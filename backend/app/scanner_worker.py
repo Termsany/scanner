@@ -45,6 +45,7 @@ from app.schemas import (
     SmartMoneyInfo,
 )
 from app.scoring_engine import compute_alpha_score, top_reasons
+from app.holdings import HoldingsChecker
 from app.smart_money import SmartWalletRegistry
 
 log = logging.getLogger("scanner")
@@ -613,6 +614,7 @@ class Scanner:
         self.goplus = GoPlusClient(self.http, self.settings.goplus_access_token)
         self.rugcheck = RugCheckClient(self.http, self.settings.rugcheck_api_key)
         self.smart_money = SmartWalletRegistry(self.settings)
+        self.holdings = HoldingsChecker(self.settings)
         self._security_sem = asyncio.Semaphore(6)
 
     # ---- 1. discovery ---------------------------------------------------
@@ -865,13 +867,20 @@ class Scanner:
             log.exception("Smart wallet refresh failed")
             stats.errors.append(f"smart_wallets: {exc!r}")
 
+        held: dict = {}
+        if self.smart_money.size:
+            try:
+                held = await self.holdings.check(survivors, self.smart_money.wallets)
+            except Exception as exc:  # never let RPC trouble break scoring
+                log.warning("holdings check failed: %r", exc)
+
         async with SessionLocal() as session:
             for m, sec in zip(survivors, sec_results):
                 if isinstance(sec, BaseException):
                     stats.errors.append(f"security {m.chain.value}:{m.address}: {sec!r}")
                     sec = None
                 try:
-                    sm = self.smart_money.evaluate(m.chain, sec)
+                    sm = self.smart_money.evaluate(m.chain, sec, held.get((m.chain, m.address)))
                     score = compute_alpha_score(m, sec, sm)
                     token = await self.persist(session, m, sec, sm, score)
                     payload = await self.maybe_signal(session, token, m, score, sec)
@@ -911,6 +920,7 @@ class Scanner:
             await asyncio.sleep(max(interval - (time.monotonic() - t0), 1.0))
 
     async def close(self) -> None:
+        await self.holdings.close()
         await self.http.close()
         await self.cache.close()
 

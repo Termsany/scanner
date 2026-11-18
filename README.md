@@ -151,6 +151,12 @@ Other commands: `birdeye` (run Birdeye discovery now), `candidates`, `add <chain
 permanently disables an auto one), `enable <chain> <address>`, `discover`, `import <file.json>`.
 The dashboard shows the list read-only (`GET /api/smart-wallets`).
 
+**Matching.** Every scan checks each tracked wallet against each scanned token directly on-chain, not just the
+top 10-20 holders: on Solana by deriving the wallet's associated token accounts (SPL Token and Token-2022) and
+reading them in batches of 100 with `getMultipleAccounts`; on Ethereum, Base and BSC with batched ERC-20
+`balanceOf` calls. A position counts when it is worth at least `HOLDINGS_MIN_USD` ($100). Free public RPCs
+are used by default; set `SOLANA_RPC_URL` / `EVM_RPC_URLS` to your own endpoints for heavier use.
+
 ## Data sources and limits
 
 | Source | Used for | Keyless limit |

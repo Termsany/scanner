@@ -157,15 +157,18 @@ class SmartWalletRegistry:
         await self.maybe_discover_birdeye(session)
         await self.refresh(session)
 
-    def evaluate(self, chain: Chain, security: SecurityReport | None) -> SmartMoneyInfo:
+    def evaluate(self, chain: Chain, security: SecurityReport | None,
+                 held_by: list[str] | None = None) -> SmartMoneyInfo:
+        """Tracked wallets among the token's top holders, plus `held_by` from the direct on-chain check."""
         tracked = self.wallets.get(chain) or {}
         if not tracked:
             return SmartMoneyInfo(inferred=True, note="no tracked wallets on this chain")
-        if security is None or not security.top_holders:
-            return SmartMoneyInfo(inferred=True, note="no holder data")
-        hits = sorted({tracked[a] for h in security.top_holders
-                       if (a := normalize_address(chain, h.address)) in tracked})
-        return SmartMoneyInfo(tracked_wallet_hits=hits, inferred=not hits)
+        hits = set(held_by or [])
+        if security is not None:
+            hits |= {tracked[a] for h in security.top_holders
+                     if (a := normalize_address(chain, h.address)) in tracked}
+        note = "" if hits else ("no holder data" if security is None and not held_by else "")
+        return SmartMoneyInfo(tracked_wallet_hits=sorted(hits), inferred=not hits, note=note)
 
 
 # ---------------------------------------------------------------------------

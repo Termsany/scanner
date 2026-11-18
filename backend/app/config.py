@@ -52,6 +52,19 @@ class Settings(BaseSettings):
     smart_auto_max_appearances: int = 40
     smart_auto_max_holder_pct: float = 20.0   # bigger holders are usually dev / team wallets
 
+    # Direct on-chain holdings check of tracked wallets (free public RPCs; override with your own)
+    holdings_check_enabled: bool = True
+    holdings_min_usd: float = 100.0
+    holdings_max_accounts: int = 4_000          # per chain per cycle
+    holdings_timeout_seconds: float = 20.0
+    holdings_min_interval_seconds: float = 0.25  # between RPC requests
+    solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
+    evm_rpc_urls: dict[str, str] = Field(default_factory=lambda: {
+        "ethereum": "https://ethereum-rpc.publicnode.com",
+        "base": "https://base-rpc.publicnode.com",
+        "bsc": "https://bsc-rpc.publicnode.com",
+    })
+
     # Birdeye trader discovery (free "Standard" key: 30k CU/month, 30 CU per call, 1 req/s)
     birdeye_api_key: str | None = None
     birdeye_interval_minutes: int = 120
