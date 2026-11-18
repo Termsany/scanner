@@ -124,6 +124,7 @@ class WalletTracker:
         self._own = http is None
         self._last = 0.0
         self._lock = asyncio.Lock()
+        self._backoff: dict[Chain, tuple[float, int]] = {}  # chain -> (paused until, last delay s)
 
     async def close(self) -> None:
         if self._own:
@@ -210,7 +211,7 @@ class WalletTracker:
             return []
         to_topics = ["0x" + w.removeprefix("0x").rjust(64, "0") for w in sorted(wallets)]
         logs: list[dict[str, Any]] = []
-        span = max(1, self.s.tracker_evm_log_span)
+        span = max(1, self.s.tracker_evm_log_spans.get(chain.value, self.s.tracker_evm_log_span))
         lo = start
         while lo <= latest:
             hi = min(lo + span - 1, latest)
@@ -333,12 +334,23 @@ class WalletTracker:
                     log.warning("solana poll failed for %s: %r", w.address[:6], exc)
             elif EVM_ADDRESS.match(w.address):
                 evm[w.chain].add(w.address.lower())
+        now = time.monotonic()
         for chain, ws in evm.items():
+            paused_until, _ = self._backoff.get(chain, (0.0, 0))
+            if now < paused_until:
+                continue  # rate-limited recently; the cursor keeps our place, nothing is lost
             try:
                 buys += await self.poll_evm(session, chain, ws)
+                self._backoff.pop(chain, None)
             except Exception as exc:
                 errors += 1
-                log.warning("%s poll failed: %r", chain.value, exc)
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                    _, prev = self._backoff.get(chain, (0.0, 0))
+                    delay = min(max(60, prev * 2), self.s.tracker_backoff_max_seconds)
+                    self._backoff[chain] = (now + delay, delay)
+                    log.warning("%s rate-limited (429); pausing it for %ss", chain.value, delay)
+                else:
+                    log.warning("%s poll failed: %r", chain.value, exc)
         alerts = await self.record(session, buys, labels)
         await session.commit()
         return {"wallets": len(rows), "buys": len(buys), "alerts": alerts, "errors": errors}

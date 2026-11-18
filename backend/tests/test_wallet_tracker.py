@@ -148,3 +148,26 @@ def test_record_prices_filters_and_regroups():
         assert rows[0].symbol == "GEM" and rows[0].wallet_label == "BE 60%" and rows[0].liquidity_usd == 80_000
         await t.http.aclose()
     _db(body)
+
+
+def test_rate_limited_chain_is_paused_not_hammered():
+    hits = {"bsc": 0}
+
+    def handler(req):
+        if "1rpc.io" in str(req.url):
+            hits["bsc"] += 1
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(404)
+
+    async def body(s):
+        s.add(SmartWallet(chain=Chain.bsc, address=EW, label="Whale", source=WalletSource.manual,
+                          enabled=False, track_buys=True))
+        await s.commit()
+        t = WalletTracker(S, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        first = await t.poll_once(s)
+        second = await t.poll_once(s)          # within the backoff window: no request at all
+        assert first["errors"] == 1 and second["errors"] == 0 and hits["bsc"] == 1
+        until, delay = t._backoff[Chain.bsc]
+        assert delay == 60
+        await t.http.aclose()
+    _db(body)

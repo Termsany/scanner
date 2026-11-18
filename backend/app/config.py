@@ -74,12 +74,15 @@ class Settings(BaseSettings):
     tracker_max_evm_block_range: int = 1_000   # cap catch-up after downtime
     # getLogs without a contract address (any token sent to the wallet): publicnode refuses it; dRPC's free
     # tier allows it for ranges <= 100 blocks, so queries are split into TRACKER_EVM_LOG_SPAN chunks.
+    # BSC: dRPC's public endpoint rate-limits 30s polling (429); 1rpc.io allows it with <= 50-block ranges.
     tracker_evm_rpc_urls: dict[str, str] = Field(default_factory=lambda: {
         "ethereum": "https://eth.drpc.org",
         "base": "https://base.drpc.org",
-        "bsc": "https://bsc.drpc.org",
+        "bsc": "https://1rpc.io/bnb",
     })
     tracker_evm_log_span: int = 100
+    tracker_evm_log_spans: dict[str, int] = Field(default_factory=lambda: {"bsc": 50})  # per-chain override
+    tracker_backoff_max_seconds: int = 600       # after a 429, pause that chain (60s, doubling, up to this)
     tracker_max_tx_per_poll: int = 25          # per Solana wallet
 
     # Birdeye trader discovery (free "Standard" key: 30k CU/month, 30 CU per call, 1 req/s)
