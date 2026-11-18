@@ -523,7 +523,12 @@ async def _cli(argv: list[str] | None = None) -> None:
             try:
                 for w in rows:
                     v = await checker.check(w.chain, w.address)
-                    flag = "OK " if v.ok else "BOT"
+                    for wait in (5, 15):  # public RPC throttling: retry before giving up
+                        if v.reason != "unchecked":
+                            break
+                        await _aio.sleep(wait)
+                        v = await checker.check(w.chain, w.address)
+                    flag = "OK " if v.ok and v.reason != "unchecked" else ("?? " if v.ok else "BOT")
                     print(f"{flag} {w.source.value:7} {w.chain.value:8} {w.address:44} {w.label[:22]:22} {v.reason}")
                     if not v.ok:
                         failed += 1
@@ -532,7 +537,7 @@ async def _cli(argv: list[str] | None = None) -> None:
                             w.stats = {**(w.stats or {}), "activity_check": v.reason}
                         if w.track_buys:
                             print("    ^ on the owner's buy-alert list: left as is (tracking is the owner's call)")
-                    await _aio.sleep(0.6)  # gentle on the public RPC
+                    await _aio.sleep(1.5)  # gentle on the public RPC (the tracker shares it)
             finally:
                 await checker.close()
             print(f"{len(rows)} checked, {failed} failed" + ("" if a.apply else " (report only; add --apply)"))

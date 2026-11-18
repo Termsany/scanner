@@ -32,14 +32,20 @@ def sol(owner=SYSTEM_PROGRAM, n=50, span_s=86_400 * 3, failed=0, exists=True):
     return handler
 
 
+W = "8vVrVudDd2DvL5jUGFZWDSh95VjhLpeETRAp1kmFnb61"          # on-curve (real keypair)
+PDA = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"        # Raydium authority: off-curve
+
+
 def test_solana_rules():
-    assert run(sol(), Chain.solana, "W").ok
-    r = run(sol(n=1000, span_s=6), Chain.solana, "W")
+    assert run(sol(), Chain.solana, W).ok
+    r = run(sol(n=1000, span_s=6), Chain.solana, W)
     assert not r.ok and "bot-like activity" in r.reason and r.info["tx_per_min"] == 10000.0
-    assert "not a user wallet" in run(sol(owner="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), Chain.solana, "W").reason
-    assert "mostly failed" in run(sol(n=300, failed=280), Chain.solana, "W").reason
-    assert "no on-chain account" in run(sol(exists=False), Chain.solana, "W").reason
-    assert run(sol(n=1000, span_s=86_400), Chain.solana, "W").ok  # 1,000 tx over a day: active trader, fine
+    assert "not a user wallet" in run(sol(owner="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), Chain.solana, W).reason
+    assert "mostly failed" in run(sol(n=300, failed=280), Chain.solana, W).reason
+    zero = run(sol(exists=False), Chain.solana, W)       # 0 SOL: someone else may pay its fees
+    assert zero.ok and zero.info["zero_sol"] is True
+    assert run(sol(), Chain.solana, PDA).reason == "program-derived address (cannot sign)"
+    assert run(sol(n=1000, span_s=86_400), Chain.solana, W).ok  # 1,000 tx over a day: active trader, fine
 
 
 def evm(code="0x", nonce=500):

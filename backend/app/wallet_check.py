@@ -68,19 +68,23 @@ class WalletChecker:
             return CheckResult(True, "unchecked", {"error": str(exc)[:120]})
 
     async def _solana(self, address: str) -> CheckResult:
+        from app.solana_pda import is_on_curve, pubkey_bytes
+
+        # Off the ed25519 curve = program-derived address: no private key exists, it can never sign.
+        if not is_on_curve(pubkey_bytes(address)):
+            return CheckResult(False, "program-derived address (cannot sign)", {})
         url = self.s.solana_rpc_url
         acct = await self._rpc(url, "getAccountInfo", [address, {"encoding": "base64"}])
         value = (acct or {}).get("value")
-        if value is None:
-            return CheckResult(False, "no on-chain account (cannot sign transactions)", {})
-        owner = value.get("owner")
-        if owner != SYSTEM_PROGRAM:
+        # No account = 0 SOL. Still a normal keypair: another account can pay its fees, so not a rejection.
+        owner = value.get("owner") if value else None
+        if value is not None and owner != SYSTEM_PROGRAM:
             return CheckResult(False, f"not a user wallet (account owned by program {owner[:8]}…)", {"owner": owner})
         sigs = await self._rpc(url, "getSignaturesForAddress", [address, {"limit": SIG_SAMPLE}]) or []
         times = [s["blockTime"] for s in sigs if s.get("blockTime")]
         failed = sum(1 for s in sigs if s.get("err") is not None)
         span_min = (max(times) - min(times)) / 60 if len(times) >= 2 else None
-        info = {"sample": len(sigs), "failed": failed,
+        info = {"sample": len(sigs), "failed": failed, "zero_sol": value is None,
                 "span_minutes": round(span_min, 1) if span_min is not None else None}
         if len(sigs) >= SIG_SAMPLE and span_min is not None and span_min < BOT_WINDOW_MINUTES:
             rate = len(sigs) / max(span_min, 0.1)
