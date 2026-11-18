@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import re
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -345,9 +346,18 @@ class TelegramAlerts:
                     msg = u.get("message") or {}
                     text = msg.get("text") or ""
                     chat_id = (msg.get("chat") or {}).get("id")
-                    if chat_id is None or not text.startswith("/"):
+                    if chat_id is None:
+                        continue
+                    owner = self._is_owner(chat_id)
+                    if not text.startswith("/"):
+                        log.info("non-command message in %s chat ignored", "owner" if owner else "other")
+                        if owner and text.strip():
+                            await self.send(chat_id, "Commands start with a slash, e.g. "
+                                                     "<code>/track solana &lt;address&gt; name</code>. Try /help.")
                         continue
                     reply = await self.handle_command(text, chat_id)
+                    log.info("command %s in %s chat -> %s", text.split()[0][:20], "owner" if owner else "other",
+                             re.sub(r"<[^>]+>", "", reply.split("\n")[0])[:90] if reply else "(no reply)")
                     if reply:
                         await self.send(chat_id, reply)
                 if updates is None:
