@@ -46,6 +46,15 @@ EVM_BURN = {
     "0x0000000000000000000000000000000000000000",
     "0x000000000000000000000000000000000000dead",
 }
+# Solana addresses that hold tokens but are not traders: the System Program (owner of burned /
+# closed token accounts), the incinerator, and AMM authorities that own pooled supply.
+SOLANA_NON_TRADERS = {
+    "11111111111111111111111111111111",               # System Program
+    "1nc1nerator11111111111111111111111111111111",    # incinerator (burn)
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",   # Raydium AMM v4 authority
+    "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",   # Raydium CPMM authority
+    "WLHv2UAZm6z4KyaaELi5pjdbJh6RESMva1Rnn8pJVVh",    # Meteora / DAMM authority
+}
 MIN_SIGNAL_AGE_HOURS = 6  # a signal younger than this counts only if it has already won
 
 
@@ -57,6 +66,8 @@ def eligible_holders(chain: Chain, holders: list[dict[str, Any]], max_pct: float
         if not addr or h.get("is_locked") or (h.get("tag") or "") in {"pool", "insider"}:
             continue
         if chain != Chain.solana and (h.get("is_contract") or addr.lower() in EVM_BURN):
+            continue
+        if chain == Chain.solana and addr in SOLANA_NON_TRADERS:
             continue
         pct = float(h.get("pct") or 0.0)
         if pct <= 0 or pct > max_pct:

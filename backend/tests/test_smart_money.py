@@ -109,6 +109,12 @@ def test_eligible_holders_filters_infrastructure():
     assert eligible_holders(Chain.base, holders, 20.0) == ["0xabc"]
 
 
+def test_solana_system_and_burn_addresses_are_not_traders():
+    holders = [h("11111111111111111111111111111111"), h("1nc1nerator11111111111111111111111111111111"),
+               h("5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"), h("RealTrader111")]
+    assert eligible_holders(Chain.solana, holders, 20.0) == ["RealTrader111"]
+
+
 def test_missing_nullable_column_is_added():
     tmp = tempfile.mkdtemp()
     eng = create_engine(f"sqlite:///{tmp}/m.db".replace("\\", "/"))
