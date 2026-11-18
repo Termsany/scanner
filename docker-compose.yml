@@ -37,6 +37,7 @@ services:
     environment:
       <<: *backend-env
       RUN_SCANNER_IN_API: "false"
+    volumes: ["./backend/data:/srv/data:ro"]   # smart_wallets.json; edit on the host, no rebuild
     ports: ["${API_BIND:-127.0.0.1:8000}:8000"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -54,6 +55,7 @@ services:
     command: ["python", "-m", "app.scanner_worker"]
     env_file: [./backend/.env]
     environment: *backend-env
+    volumes: ["./backend/data:/srv/data:ro"]
     depends_on:
       # The API creates the tables on startup; waiting for it avoids a create_all race on a fresh database.
       api: {condition: service_healthy}

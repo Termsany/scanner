@@ -241,3 +241,22 @@ export interface TokenRef {
   chain: Chain;
   address: string;
 }
+
+export interface SmartWallet {
+  chain: Chain;
+  address: string;
+  label: string;
+  source: "manual" | "auto";
+  enabled: boolean;
+  wins: number;
+  appearances: number;
+  win_tokens: { symbol: string; address: string; gain_pct: number }[];
+  updated_at: string;
+}
+
+export interface SmartWalletList {
+  items: SmartWallet[];
+  enabled_manual: number;
+  enabled_auto: number;
+  disabled: number;
+}

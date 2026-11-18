@@ -204,3 +204,9 @@ def test_telegram_render_and_commands(client):
     text = render_signal(LiveSignal.model_validate(sig | {"name": "<b>x</b>"}), "https://dash.example")
     assert "&lt;b&gt;x&lt;/b&gt;" in text and "/token/" in text
     assert fmt_usd(0.0000123) == "$0.00001230" and fmt_usd(1_500_000) == "$1.50M"
+
+
+def test_smart_wallets_endpoint(client):
+    body = client.get("/api/smart-wallets").json()
+    assert body["items"] == [] and body["enabled_manual"] == 0 and body["enabled_auto"] == 0
+    assert client.get("/api/smart-wallets", params={"limit": 0}).status_code == 422

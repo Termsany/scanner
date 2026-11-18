@@ -45,6 +45,7 @@ from app.schemas import (
     SmartMoneyInfo,
 )
 from app.scoring_engine import compute_alpha_score, top_reasons
+from app.smart_money import SmartWalletRegistry
 
 log = logging.getLogger("scanner")
 
@@ -487,6 +488,7 @@ def normalize_solana(
 
     if rug:
         providers.append("rugcheck")
+        raw["holders_are_owners"] = True  # marker: holder addresses are wallets, not token accounts
         raw["rugcheck"] = {k: rug.get(k) for k in
                            ("mintAuthority", "freezeAuthority", "score", "score_normalised", "rugged", "risks",
                             "totalHolders", "totalLPProviders", "totalMarketLiquidity")}
@@ -519,11 +521,14 @@ def normalize_solana(
 
         for h in rug.get("topHolders") or []:
             pct = _f(h.get("pct"))
-            addr = str(h.get("address", ""))
+            account = str(h.get("address", ""))
+            owner = str(h.get("owner") or "")
             if pct is None:
                 continue
-            is_pool = addr in pool_accounts or str(h.get("owner", "")) in pool_accounts
-            holders.append(HolderEntry(address=addr, pct=min(max(pct, 0.0), 100.0),
+            is_pool = account in pool_accounts or owner in pool_accounts
+            # `address` is the SPL token account; the wallet that controls it is `owner`.
+            # Store the owner so holder lists can be matched against wallet addresses (smart money).
+            holders.append(HolderEntry(address=owner or account, pct=min(max(pct, 0.0), 100.0),
                                        tag="pool" if is_pool else ("insider" if h.get("insider") else None),
                                        is_locked=is_pool))
         investor = [h for h in holders if not h.is_locked]
@@ -584,50 +589,6 @@ def normalize_solana(
 
 
 # ---------------------------------------------------------------------------
-# Smart money
-# ---------------------------------------------------------------------------
-
-
-class SmartMoneyTracker:
-    """Matches token holders against a curated wallet watchlist.
-
-    File format (data/smart_wallets.json):
-        {"wallets": [{"address": "...", "label": "Fund X", "chains": ["solana", "base"]}]}
-    """
-
-    def __init__(self, path) -> None:
-        self.wallets: dict[Chain, dict[str, str]] = defaultdict(dict)
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except FileNotFoundError:
-            log.info("No smart wallet list at %s; smart-money score will use the flow heuristic", path)
-            return
-        except (OSError, json.JSONDecodeError):
-            log.exception("Could not read smart wallet list %s", path)
-            return
-        for w in data.get("wallets", []):
-            addr, label = w.get("address"), w.get("label") or w.get("address")
-            if not addr:
-                continue
-            for c in w.get("chains") or [c.value for c in Chain]:
-                try:
-                    chain = Chain(c)
-                except ValueError:
-                    continue
-                self.wallets[chain][_norm_addr(chain, addr)] = label
-        log.info("Loaded %d tracked smart wallets", sum(len(v) for v in self.wallets.values()))
-
-    def evaluate(self, chain: Chain, security: SecurityReport | None) -> SmartMoneyInfo:
-        tracked = self.wallets.get(chain) or {}
-        if not tracked or security is None:
-            return SmartMoneyInfo(inferred=True, note="no tracked wallets" if not tracked else "no holder data")
-        hits = [tracked[_norm_addr(chain, h.address)] for h in security.top_holders
-                if _norm_addr(chain, h.address) in tracked]
-        return SmartMoneyInfo(tracked_wallet_hits=sorted(set(hits)), inferred=not hits)
-
-
-# ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
 
@@ -651,7 +612,7 @@ class Scanner:
         self.gecko = GeckoTerminalClient(self.http)
         self.goplus = GoPlusClient(self.http, self.settings.goplus_access_token)
         self.rugcheck = RugCheckClient(self.http, self.settings.rugcheck_api_key)
-        self.smart_money = SmartMoneyTracker(self.settings.smart_wallets_file)
+        self.smart_money = SmartWalletRegistry(self.settings)
         self._security_sem = asyncio.Semaphore(6)
 
     # ---- 1. discovery ---------------------------------------------------
@@ -734,7 +695,7 @@ class Scanner:
 
     # ---- 4. security ----------------------------------------------------
     async def security_for(self, m: MarketMetrics) -> SecurityReport | None:
-        key = f"sec:v1:{m.chain.value}:{m.address}"
+        key = f"sec:v2:{m.chain.value}:{m.address}"  # v2: Solana holders are owner wallets
         cached = await self.cache.get_json(key)
         if cached:
             try:
@@ -830,7 +791,8 @@ class Scanner:
                       "buy_tax", "sell_tax", "lp_locked_pct", "top10_holders_pct", "holder_count", "creator_pct",
                       "rugcheck_score", "risks", "top_holders"):
                 setattr(audit, f, dump[f])
-            audit.raw = json.loads(json.dumps(sec.raw, default=str))
+            if sec.raw:  # cached reports drop `raw` (excluded from dumps); keep the last provider payload
+                audit.raw = json.loads(json.dumps(sec.raw, default=str))
             audit.fetched_at = sec.fetched_at
 
         session.add(ScoreRecord(
@@ -846,7 +808,8 @@ class Scanner:
 
     # ---- 7. signals -----------------------------------------------------
     async def maybe_signal(
-        self, session: AsyncSession, token: Token, m: MarketMetrics, score: ScoreBreakdown
+        self, session: AsyncSession, token: Token, m: MarketMetrics, score: ScoreBreakdown,
+        sec: SecurityReport | None = None,
     ) -> dict[str, Any] | None:
         """Create a Signal row (flushed, not committed). Returns the payload to publish after commit."""
         if score.total < self.settings.live_signal_min_score or score.hard_fail:
@@ -867,8 +830,12 @@ class Scanner:
             price_change_h1=m.price_change_h1, market_cap=m.effective_mcap, pair_url=m.pair_url,
             top_reasons=top_reasons(score),
         )
+        holders = None
+        # sec:v2 reports carry wallet (owner) addresses; on Solana only RugCheck exposes the owner.
+        if sec is not None and sec.top_holders and (sec.chain != Chain.solana or "rugcheck" in sec.providers):
+            holders = [h.model_dump(mode="json") for h in sec.top_holders]
         sig = Signal(token_id=token.id, score=score.total, badge=score.badge, price_usd=m.price_usd,
-                     payload=live.model_dump(mode="json"))
+                     payload=live.model_dump(mode="json"), holders=holders)
         session.add(sig)
         await session.flush()
         live.signal_id = sig.id
@@ -891,6 +858,13 @@ class Scanner:
 
         sec_results = await self._audit_with_deadline(survivors, stats)
 
+        try:
+            async with SessionLocal() as session:
+                await self.smart_money.prepare_cycle(session)
+        except Exception as exc:  # stale wallet list is better than a failed cycle
+            log.exception("Smart wallet refresh failed")
+            stats.errors.append(f"smart_wallets: {exc!r}")
+
         async with SessionLocal() as session:
             for m, sec in zip(survivors, sec_results):
                 if isinstance(sec, BaseException):
@@ -900,7 +874,7 @@ class Scanner:
                     sm = self.smart_money.evaluate(m.chain, sec)
                     score = compute_alpha_score(m, sec, sm)
                     token = await self.persist(session, m, sec, sm, score)
-                    payload = await self.maybe_signal(session, token, m, score)
+                    payload = await self.maybe_signal(session, token, m, score, sec)
                     if payload is not None:
                         # Commit first so the token detail exists when clients react, then publish.
                         await session.commit()

@@ -13,6 +13,7 @@ import { KpiBar } from "./KpiBar";
 import { LiveFeed } from "./LiveFeed";
 import { ScannerTable } from "./ScannerTable";
 import { ScoreGauge } from "./ScoreGauge";
+import { SmartWalletsPanel } from "./SmartWalletsPanel";
 import { TokenInspector } from "./TokenInspector";
 
 const DEFAULT_QUERY: TokenQuery = { sort: "score", order: "desc", page: 1, page_size: 50 };
@@ -155,6 +156,7 @@ export function Dashboard({ initialToken = null }: { initialToken?: TokenRef | n
         />
         <div className="xl:sticky xl:top-4 xl:self-start">
           <LiveFeed feed={visibleFeed} socket={socket} minScore={feedMin} onMinScore={setFeedMin} onOpen={openToken} now={now} />
+          <SmartWalletsPanel refreshKey={refreshKey} />
         </div>
       </div>
 

@@ -339,6 +339,25 @@ class SignalOut(_Model):
     payload: dict[str, Any]
 
 
+class SmartWalletOut(_Model):
+    chain: Chain
+    address: str
+    label: str
+    source: str            # manual | auto
+    enabled: bool
+    wins: int
+    appearances: int
+    win_tokens: list[dict[str, Any]] = Field(default_factory=list)
+    updated_at: datetime
+
+
+class SmartWalletList(_Model):
+    items: list[SmartWalletOut]
+    enabled_manual: int
+    enabled_auto: int
+    disabled: int
+
+
 class Candle(_Model):
     time: int          # unix seconds (TradingView Lightweight Charts format)
     open: float

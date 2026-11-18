@@ -124,6 +124,27 @@ The dashboard reloads the table and KPIs on every `scan_complete` WebSocket even
 every 60s if the socket is down. Opening a token rewrites the URL to `/token/{chain}/{address}`, so the URL
 can be shared; Telegram alerts link there when `PUBLIC_DASHBOARD_URL` is set.
 
+## Smart wallets
+
+A token whose top holders include an enabled tracked wallet earns the 15-point smart-wallet component of the
+Alpha Score. Wallets come from two sources:
+
+- **manual**: yours. Either list them in `backend/data/smart_wallets.json` (format in
+  `smart_wallets.example.json`; the worker re-imports the file whenever it changes, and the folder is mounted
+  into the containers, so no rebuild) or use the CLI below.
+- **auto**: discovered every 30 minutes from the scanner's own history. A wallet qualifies when, at signal time,
+  it was a top holder of at least 2 tokens that later rallied 50%+, with a win rate of at least 50% across the
+  signalled tokens it held. Pools, burn addresses, contracts, RugCheck "insiders" and holders above 20% are
+  ignored, and so are wallets seen in more than 40 tokens. Tune with the `SMART_AUTO_*` settings in `config.py`.
+
+```powershell
+ssh -i $HOME\.ssh\claude_vps root@148.230.113.18 "cd /opt/alpha-scanner && docker compose exec api python -m app.smart_money list --all"
+```
+
+Other commands: `add <chain> <address> [label]`, `remove <chain> <address>` (deletes a manual wallet;
+permanently disables an auto one), `enable <chain> <address>`, `discover`, `import <file.json>`.
+The dashboard shows the list read-only (`GET /api/smart-wallets`).
+
 ## Data sources and limits
 
 | Source | Used for | Keyless limit |

@@ -1,0 +1,371 @@
+"""Smart wallet registry: manual list + automatic discovery.
+
+Sources
+  manual  Operator-curated. Added with the CLI below or listed in data/smart_wallets.json
+          (re-imported whenever the file changes). Never removed or disabled automatically.
+  auto    Discovered from the scanner's own history: wallets that were top holders, at signal time,
+          of several tokens that then rallied (see `discover`). Re-evaluated every
+          SMART_AUTO_INTERVAL_MINUTES; wallets that stop qualifying are disabled, and a wallet the
+          operator disabled is never re-enabled.
+
+Scoring: a token whose top holders include an enabled wallet earns the 15-point smart-wallet
+component (scoring_engine W1).
+
+CLI (inside the container:  docker compose exec api python -m app.smart_money <command>)
+  list [--all]                         enabled wallets (or all)
+  add <chain> <address> [label...]     add / re-enable a manual wallet
+  remove <chain> <address>             delete a manual wallet, or disable an auto one permanently
+  enable <chain> <address>             re-enable a wallet (clears the operator's disable)
+  discover                             run auto-discovery now and print what changed
+  import <file.json>                   import {"wallets": [{"address","label","chains"}]}
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import Settings, get_settings
+from app.models import Chain, MarketSnapshot, SecurityAudit, Signal, SmartWallet, Token, WalletSource
+from app.repository import normalize_address, utc
+from app.schemas import SecurityReport, SmartMoneyInfo
+
+log = logging.getLogger("smart_money")
+
+EVM_BURN = {
+    "0x0000000000000000000000000000000000000000",
+    "0x000000000000000000000000000000000000dead",
+}
+MIN_SIGNAL_AGE_HOURS = 6  # a signal younger than this counts only if it has already won
+
+
+def eligible_holders(chain: Chain, holders: list[dict[str, Any]], max_pct: float) -> list[str]:
+    """Wallet addresses from a holder list that could be traders (not pools, burns, contracts, devs)."""
+    out: list[str] = []
+    for h in holders or []:
+        addr = str(h.get("address") or "")
+        if not addr or h.get("is_locked") or (h.get("tag") or "") in {"pool", "insider"}:
+            continue
+        if chain != Chain.solana and (h.get("is_contract") or addr.lower() in EVM_BURN):
+            continue
+        pct = float(h.get("pct") or 0.0)
+        if pct <= 0 or pct > max_pct:
+            continue
+        out.append(normalize_address(chain, addr))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Registry used by the scanner
+# ---------------------------------------------------------------------------
+
+
+class SmartWalletRegistry:
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.wallets: dict[Chain, dict[str, str]] = {}
+        self._file_mtime: float | None = None
+        self._last_discovery: datetime | None = None
+
+    @property
+    def size(self) -> int:
+        return sum(len(v) for v in self.wallets.values())
+
+    async def refresh(self, session: AsyncSession) -> None:
+        rows = (await session.execute(
+            select(SmartWallet.chain, SmartWallet.address, SmartWallet.label).where(SmartWallet.enabled.is_(True))
+        )).all()
+        wallets: dict[Chain, dict[str, str]] = defaultdict(dict)
+        for chain, addr, label in rows:
+            wallets[chain][normalize_address(chain, addr)] = label or addr[:6]
+        self.wallets = dict(wallets)
+
+    async def sync_file(self, session: AsyncSession) -> int:
+        """Import data/smart_wallets.json when it changed since the last sync."""
+        path = Path(self.settings.smart_wallets_file)
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            return 0
+        if self._file_mtime == mtime:
+            return 0
+        self._file_mtime = mtime
+        try:
+            n = await import_file(session, path)
+            await session.commit()
+            log.info("Imported %d manual smart wallets from %s", n, path)
+            return n
+        except (OSError, ValueError):
+            log.exception("Could not import %s", path)
+            return 0
+
+    async def maybe_discover(self, session: AsyncSession) -> dict[str, int] | None:
+        if not self.settings.smart_auto_enabled:
+            return None
+        now = datetime.now(timezone.utc)
+        if self._last_discovery and now - self._last_discovery < timedelta(
+            minutes=self.settings.smart_auto_interval_minutes
+        ):
+            return None
+        self._last_discovery = now
+        stats = await discover(session, self.settings)
+        await session.commit()
+        log.info("Smart wallet discovery: %s", stats)
+        return stats
+
+    async def prepare_cycle(self, session: AsyncSession) -> None:
+        await self.sync_file(session)
+        await self.maybe_discover(session)
+        await self.refresh(session)
+
+    def evaluate(self, chain: Chain, security: SecurityReport | None) -> SmartMoneyInfo:
+        tracked = self.wallets.get(chain) or {}
+        if not tracked:
+            return SmartMoneyInfo(inferred=True, note="no tracked wallets on this chain")
+        if security is None or not security.top_holders:
+            return SmartMoneyInfo(inferred=True, note="no holder data")
+        hits = sorted({tracked[a] for h in security.top_holders
+                       if (a := normalize_address(chain, h.address)) in tracked})
+        return SmartMoneyInfo(tracked_wallet_hits=hits, inferred=not hits)
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _WalletStats:
+    wins: int = 0
+    appearances: int = 0
+    win_tokens: list[dict[str, Any]] = field(default_factory=list)
+
+
+async def _peak_gains(session: AsyncSession, rows: list[tuple[Signal, Token]]) -> dict[int, float]:
+    """Best price reached after each signal vs the signal price, in percent."""
+    gains: dict[int, float] = {}
+    for sig, tok in rows:
+        if not sig.price_usd or sig.price_usd <= 0:
+            continue
+        peak = (await session.execute(
+            select(func.max(MarketSnapshot.price_usd))
+            .where(MarketSnapshot.token_id == tok.id, MarketSnapshot.captured_at >= sig.created_at)
+        )).scalar()
+        best = max(p for p in (peak, tok.price_usd, sig.price_usd) if p is not None)
+        gains[sig.id] = (best / sig.price_usd - 1.0) * 100.0
+    return gains
+
+
+def _audit_holders(tok: Token, audit: SecurityAudit | None) -> list[dict[str, Any]]:
+    """Fallback for signals recorded before holder snapshots existed: the token's latest audit.
+    Old Solana audits list SPL token accounts instead of wallets, so they are only used once
+    re-fetched in the new format (marked in raw)."""
+    if audit is None:
+        return []
+    if tok.chain == Chain.solana and not (audit.raw or {}).get("holders_are_owners"):
+        return []
+    return audit.top_holders or []
+
+
+async def discover(session: AsyncSession, settings: Settings | None = None) -> dict[str, int]:
+    s = settings or get_settings()
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=s.smart_auto_lookback_days)
+
+    # First signal per token inside the lookback window.
+    all_rows = (await session.execute(
+        select(Signal, Token).join(Token, Token.id == Signal.token_id)
+        .where(Signal.created_at >= since).order_by(Signal.created_at.asc())
+    )).all()
+    first: dict[int, tuple[Signal, Token]] = {}
+    for sig, tok in all_rows:
+        first.setdefault(tok.id, (sig, tok))
+    rows = list(first.values())
+    gains = await _peak_gains(session, rows)
+
+    audits = {a.token_id: a for a in (await session.execute(
+        select(SecurityAudit).where(SecurityAudit.token_id.in_([t.id for _, t in rows] or [-1]))
+    )).scalars()}
+
+    stats: dict[tuple[Chain, str], _WalletStats] = defaultdict(_WalletStats)
+    considered = 0
+    for sig, tok in rows:
+        gain = gains.get(sig.id)
+        if gain is None:
+            continue
+        won = gain >= s.smart_auto_win_gain_pct
+        age_h = (now - utc(sig.created_at)).total_seconds() / 3600
+        if not won and age_h < MIN_SIGNAL_AGE_HOURS:
+            continue  # too early to call it a loss
+        holders = sig.holders or _audit_holders(tok, audits.get(tok.id))
+        wallets = set(eligible_holders(tok.chain, holders, s.smart_auto_max_holder_pct))
+        if not wallets:
+            continue
+        considered += 1
+        for w in wallets:
+            st = stats[(tok.chain, w)]
+            st.appearances += 1
+            if won:
+                st.wins += 1
+                st.win_tokens.append({"symbol": tok.symbol, "address": tok.address, "gain_pct": round(gain, 1)})
+
+    qualified = {
+        key for key, st in stats.items()
+        if st.wins >= s.smart_auto_min_wins
+        and st.wins / st.appearances >= s.smart_auto_min_win_rate
+        and st.appearances <= s.smart_auto_max_appearances
+    }
+
+    existing = {(w.chain, normalize_address(w.chain, w.address)): w
+                for w in (await session.execute(select(SmartWallet))).scalars()}
+    added = enabled = disabled = 0
+    for key, w in existing.items():
+        st = stats.get(key)
+        if st is not None:
+            w.wins, w.appearances = st.wins, st.appearances
+            w.win_tokens = sorted(st.win_tokens, key=lambda x: -x["gain_pct"])[:10]
+        if w.source == WalletSource.auto:
+            should = key in qualified and not w.disabled_by_user
+            if should and not w.enabled:
+                enabled += 1
+            elif not should and w.enabled:
+                disabled += 1
+            w.enabled = should
+            if st is not None:
+                w.label = f"auto {st.wins}/{st.appearances}"
+    for key in qualified - existing.keys():
+        chain, addr = key
+        st = stats[key]
+        session.add(SmartWallet(
+            chain=chain, address=addr, label=f"auto {st.wins}/{st.appearances}", source=WalletSource.auto,
+            enabled=True, wins=st.wins, appearances=st.appearances,
+            win_tokens=sorted(st.win_tokens, key=lambda x: -x["gain_pct"])[:10],
+        ))
+        added += 1
+    await session.flush()
+    return {"signals": len(rows), "tokens_considered": considered, "wallets_seen": len(stats),
+            "qualified": len(qualified), "added": added, "re_enabled": enabled, "disabled": disabled}
+
+
+# ---------------------------------------------------------------------------
+# Manual management
+# ---------------------------------------------------------------------------
+
+
+async def upsert_manual(session: AsyncSession, chain: Chain, address: str, label: str = "") -> SmartWallet:
+    addr = normalize_address(chain, address.strip())
+    w = (await session.execute(
+        select(SmartWallet).where(SmartWallet.chain == chain, SmartWallet.address == addr)
+    )).scalar_one_or_none()
+    if w is None:
+        w = SmartWallet(chain=chain, address=addr, source=WalletSource.manual, label=label or addr[:6])
+        session.add(w)
+    else:
+        w.source = WalletSource.manual
+        if label:
+            w.label = label
+    w.enabled, w.disabled_by_user = True, False
+    await session.flush()
+    return w
+
+
+async def import_file(session: AsyncSession, path: Path) -> int:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    n = 0
+    for item in data.get("wallets", []):
+        addr = str(item.get("address") or "").strip()
+        if not addr or addr.upper().startswith("REPLACE"):
+            continue
+        for c in item.get("chains") or [c.value for c in Chain]:
+            try:
+                chain = Chain(c)
+            except ValueError:
+                continue
+            if chain != Chain.solana and not addr.startswith("0x"):
+                continue
+            if chain == Chain.solana and addr.startswith("0x"):
+                continue
+            await upsert_manual(session, chain, addr, str(item.get("label") or ""))
+            n += 1
+    return n
+
+
+async def remove(session: AsyncSession, chain: Chain, address: str) -> str:
+    addr = normalize_address(chain, address.strip())
+    w = (await session.execute(
+        select(SmartWallet).where(SmartWallet.chain == chain, SmartWallet.address == addr)
+    )).scalar_one_or_none()
+    if w is None:
+        return "not found"
+    if w.source == WalletSource.manual:
+        await session.delete(w)
+        return "deleted"
+    w.enabled, w.disabled_by_user = False, True
+    return "disabled (auto wallets stay disabled so discovery does not re-add them)"
+
+
+async def _cli(argv: list[str] | None = None) -> None:
+    from app.db import SessionLocal, init_db
+
+    p = argparse.ArgumentParser(prog="python -m app.smart_money", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    ls = sub.add_parser("list")
+    ls.add_argument("--all", action="store_true")
+    for name in ("add", "remove", "enable"):
+        sp = sub.add_parser(name)
+        sp.add_argument("chain", choices=[c.value for c in Chain])
+        sp.add_argument("address")
+        if name == "add":
+            sp.add_argument("label", nargs="*")
+    sub.add_parser("discover")
+    imp = sub.add_parser("import")
+    imp.add_argument("file", type=Path)
+    a = p.parse_args(argv)
+
+    await init_db()
+    async with SessionLocal() as s:
+        if a.cmd == "list":
+            q = select(SmartWallet).order_by(SmartWallet.source, SmartWallet.wins.desc())
+            if not a.all:
+                q = q.where(SmartWallet.enabled.is_(True))
+            rows = (await s.execute(q)).scalars().all()
+            for w in rows:
+                flag = "on " if w.enabled else ("off*" if w.disabled_by_user else "off")
+                print(f"{flag:4} {w.source.value:6} {w.chain.value:8} {w.address:44} "
+                      f"wins {w.wins}/{w.appearances:<3} {w.label}")
+            print(f"{len(rows)} wallet(s)")
+        elif a.cmd == "add":
+            w = await upsert_manual(s, Chain(a.chain), a.address, " ".join(a.label))
+            print(f"added {w.chain.value} {w.address} ({w.label})")
+        elif a.cmd == "remove":
+            print(await remove(s, Chain(a.chain), a.address))
+        elif a.cmd == "enable":
+            addr = normalize_address(Chain(a.chain), a.address)
+            w = (await s.execute(select(SmartWallet).where(SmartWallet.chain == Chain(a.chain),
+                                                           SmartWallet.address == addr))).scalar_one_or_none()
+            if w is None:
+                print("not found")
+            else:
+                w.enabled, w.disabled_by_user = True, False
+                print("enabled")
+        elif a.cmd == "discover":
+            print(json.dumps(await discover(s), indent=1))
+        elif a.cmd == "import":
+            print(f"imported {await import_file(s, a.file)} wallet entries")
+        await s.commit()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level="WARNING")
+    asyncio.run(_cli())

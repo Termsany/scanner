@@ -40,6 +40,17 @@ class Settings(BaseSettings):
 
     # --- Smart money -------------------------------------------------------
     smart_wallets_file: Path = BACKEND_DIR / "data" / "smart_wallets.json"
+    # Auto-discovery: a wallet becomes "smart" when it was a top holder at signal time of at least
+    # MIN_WINS tokens that later rallied >= WIN_GAIN_PCT, with a win rate >= MIN_WIN_RATE across all
+    # signalled tokens it held. Wallets seen in too many tokens are infrastructure, not traders.
+    smart_auto_enabled: bool = True
+    smart_auto_interval_minutes: int = 30
+    smart_auto_lookback_days: int = 14
+    smart_auto_win_gain_pct: float = 50.0
+    smart_auto_min_wins: int = 2
+    smart_auto_min_win_rate: float = 0.5
+    smart_auto_max_appearances: int = 40
+    smart_auto_max_holder_pct: float = 20.0   # bigger holders are usually dev / team wallets
 
     # --- Optional API keys (all endpoints used work keyless at low volume) --
     goplus_access_token: str | None = None

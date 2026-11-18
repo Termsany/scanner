@@ -210,10 +210,43 @@ class Signal(Base):
     badge: Mapped[Badge] = mapped_column(Enum(Badge, native_enum=False, length=16, values_callable=_enum_values))
     price_usd: Mapped[float | None] = mapped_column(Float)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)    # LiveSignal JSON as broadcast
+    # Top holders at signal time (wallet addresses), used by smart-wallet discovery.
+    holders: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
     telegram_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     token: Mapped[Token] = relationship(back_populates="signals", lazy="raise")
+
+
+class WalletSource(str, enum.Enum):
+    manual = "manual"   # added by the operator (CLI or data/smart_wallets.json)
+    auto = "auto"       # discovered from holders of tokens that rallied after a signal
+
+
+class SmartWallet(Base):
+    """Tracked wallets. A token held by an enabled wallet earns the 15-point smart-wallet component."""
+
+    __tablename__ = "smart_wallets"
+    __table_args__ = (UniqueConstraint("chain", "address", name="uq_smart_wallet_chain_address"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain: Mapped[Chain] = mapped_column(Enum(Chain, native_enum=False, length=16, values_callable=_enum_values))
+    address: Mapped[str] = mapped_column(String(64))
+    label: Mapped[str] = mapped_column(String(128), default="")
+    source: Mapped[WalletSource] = mapped_column(
+        Enum(WalletSource, native_enum=False, length=16, values_callable=_enum_values)
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Set when the operator disables a wallet: auto-discovery never re-enables it.
+    disabled_by_user: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Auto-discovery stats (also maintained for manual wallets, for information)
+    wins: Mapped[int] = mapped_column(Integer, default=0)          # winner tokens it held at signal time
+    appearances: Mapped[int] = mapped_column(Integer, default=0)   # signalled tokens it held
+    win_tokens: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{"symbol","address","gain_pct"}]
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class ScannerRun(Base):

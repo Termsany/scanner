@@ -7,12 +7,12 @@ from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache import Cache
 from app.db import get_session
-from app.models import Chain, MarketSnapshot
+from app.models import Chain, MarketSnapshot, SmartWallet, WalletSource
 from app.repository import get_token, list_tokens, recent_signals, scanner_status, token_detail, utc
 from app.scanner_worker import GECKO_NETWORK
 from app.schemas import (
@@ -21,6 +21,8 @@ from app.schemas import (
     PaginatedTokens,
     ScannerStatus,
     SignalOut,
+    SmartWalletList,
+    SmartWalletOut,
     TokenDetail,
     TokenListParams,
 )
@@ -128,6 +130,31 @@ async def get_signals(
 ) -> list[SignalOut]:
     """Most recent signals with performance since the signal fired."""
     return await recent_signals(session, limit=limit, chain=chain, min_score=min_score)
+
+
+@router.get("/smart-wallets", response_model=SmartWalletList)
+async def get_smart_wallets(
+    session: Session,
+    include_disabled: bool = False,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> SmartWalletList:
+    """Tracked wallets (read-only; manage them with `python -m app.smart_money` on the server)."""
+    grouped = (await session.execute(
+        select(SmartWallet.source, SmartWallet.enabled, func.count()).group_by(SmartWallet.source, SmartWallet.enabled)
+    )).all()
+    counts = {(src, en): n for src, en, n in grouped}
+    q = select(SmartWallet).order_by(SmartWallet.enabled.desc(), SmartWallet.wins.desc(), SmartWallet.id.asc())
+    if not include_disabled:
+        q = q.where(SmartWallet.enabled.is_(True))
+    rows = (await session.execute(q.limit(limit))).scalars().all()
+    return SmartWalletList(
+        items=[SmartWalletOut(chain=w.chain, address=w.address, label=w.label, source=w.source.value,
+                              enabled=w.enabled, wins=w.wins, appearances=w.appearances,
+                              win_tokens=w.win_tokens or [], updated_at=utc(w.updated_at)) for w in rows],
+        enabled_manual=counts.get((WalletSource.manual, True), 0),
+        enabled_auto=counts.get((WalletSource.auto, True), 0),
+        disabled=sum(n for (src, en), n in counts.items() if not en),
+    )
 
 
 @router.get("/status", response_model=ScannerStatus)

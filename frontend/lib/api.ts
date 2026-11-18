@@ -5,6 +5,7 @@ import type {
   ChartInterval,
   PaginatedTokens,
   ScannerStatus,
+  SmartWalletList,
   TokenDetail,
   TokenQuery,
 } from "./types";
@@ -76,6 +77,8 @@ export const api = {
     ),
 
   status: (signal?: AbortSignal) => request<ScannerStatus>("/api/status", { signal }),
+
+  smartWallets: (signal?: AbortSignal) => request<SmartWalletList>("/api/smart-wallets?limit=50", { signal }),
 
   analyze: (chain: Chain, address: string, signal?: AbortSignal) =>
     request<AIAnalysis>("/api/ai-analyze", {
