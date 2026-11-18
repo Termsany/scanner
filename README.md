@@ -1,0 +1,145 @@
+# Alpha Scanner
+
+Multi-chain (Solana, Ethereum, Base, BSC) on-chain scanner, security analyzer and signal platform.
+
+## Directory structure
+
+```
+alpha-scanner/
+├── README.md
+├── docker-compose.yml               # Phase 2: postgres + redis + api + worker
+├── backend/
+│   ├── requirements.txt
+│   ├── .env.example
+│   ├── data/
+│   │   └── smart_wallets.example.json   # copy to smart_wallets.json
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── config.py               # pydantic-settings, all env vars
+│   │   ├── db.py                   # async engine, session factory, init_db
+│   │   ├── cache.py                # Redis/in-memory cache, pub/sub, token-bucket rate limiter
+│   │   ├── models.py               # SQLAlchemy 2.0 ORM
+│   │   ├── schemas.py              # Pydantic v2 domain + API contracts
+│   │   ├── scoring_engine.py       # Alpha Score (pure, deterministic)
+│   │   ├── scanner_worker.py       # discovery → enrich → filter → audit → score → persist → signal
+│   │   ├── repository.py           # read-side queries + ORM→schema conversion
+│   │   ├── main.py                 # FastAPI app, lifespan, /healthz, /ws/live-signals
+│   │   ├── api/
+│   │   │   ├── tokens.py           # /api/tokens, detail, chart, /api/signals, /api/status
+│   │   │   └── ai.py               # POST /api/ai-analyze
+│   │   ├── ws.py                   # SignalHub: Redis pub/sub or DB polling, per-client filters
+│   │   ├── ai_analyst.py           # OpenAI-compatible LLM client + deterministic rules fallback
+│   │   └── telegram_alerts.py      # alerts + /top /token /status commands
+│   ├── Dockerfile
+│   └── tests/
+│       ├── test_scoring_engine.py
+│       └── test_api.py
+└── frontend/                        # Next.js 16 App Router, Tailwind v4 (theme tokens in globals.css)
+    ├── Dockerfile
+    ├── app/
+    │   ├── layout.tsx               # Inter + JetBrains Mono, dark theme
+    │   ├── globals.css              # @theme tokens: carbon #0A0E17, surface #111827, emerald, amber
+    │   ├── page.tsx                 # dashboard
+    │   └── token/[chain]/[address]/page.tsx   # deep link: dashboard with inspector open
+    ├── components/
+    │   ├── Dashboard.tsx            # state, data loading, live wiring, toasts
+    │   ├── KpiBar.tsx               # active tokens, high-alpha 24h, top gainer, live pulse
+    │   ├── ScannerTable.tsx         # filters, sortable columns, pagination
+    │   ├── ScoreGauge.tsx           # 0-100 dial
+    │   ├── Badges.tsx               # chain pill, alpha badge, security pills, avatar
+    │   ├── LiveFeed.tsx             # WebSocket signal stream
+    │   ├── TokenInspector.tsx       # slide-over: score breakdown, stats, security checklist
+    │   ├── PriceChart.tsx           # TradingView Lightweight Charts v5
+    │   └── AIAnalystCard.tsx        # 3-bullet AI summary
+    └── lib/ (api.ts, useLiveSignals.ts, format.ts, types.ts)
+```
+
+## Run the worker (Phase 1)
+
+```powershell
+cd backend
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+copy .env.example .env
+.venv\Scripts\python -m pytest -q
+.venv\Scripts\python -m app.scanner_worker --once   # one cycle
+.venv\Scripts\python -m app.scanner_worker          # loop every 60s
+```
+
+Windows note: if the project lives under a very long path, SQLAlchemy's compiled extension can fail to load
+("The filename or extension is too long"). Put the venv at a short path such as `C:\venvs\alpha`.
+
+## Run the API (Phase 2)
+
+```powershell
+cd backend
+# API + worker in one process (local MVP):
+$env:RUN_SCANNER_IN_API="true"; .venv\Scripts\uvicorn app.main:app --port 8000
+# or production-style, two processes:
+.venv\Scripts\uvicorn app.main:app --port 8000
+.venv\Scripts\python -m app.scanner_worker
+```
+
+Or with Docker (Postgres + Redis + API + worker), after creating `backend/.env`:
+
+```powershell
+docker compose up --build
+```
+
+Interactive docs: http://localhost:8000/docs
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/tokens` | Scanner table. Query: `chain`, `min_score`, `min_liquidity`, `badge`, `q`, `sort` (`score`/`volume`/`liquidity`/`age`/`change_1h`), `order`, `page`, `page_size` |
+| `GET /api/tokens/{chain}/{address}` | Inspector: metrics, security audit, full score breakdown, score history |
+| `GET /api/tokens/{chain}/{address}/chart?interval=5m` | OHLCV for Lightweight Charts (GeckoTerminal, falls back to scanner snapshots) |
+| `POST /api/ai-analyze` | `{chain, address}` or inline `metrics`; 3-bullet analysis. Without `LLM_API_KEY`, returns the `rules-v1` analysis |
+| `GET /api/signals` | Recent signals with gain since signal |
+| `GET /api/status` | KPI bar: active tokens, 24h signals, high-alpha count, top gainer, live pulse |
+| `WS /ws/live-signals` | `hello` (recent signals), `signal`, `scan_complete`, `heartbeat`. Send `{"type":"subscribe","chains":["solana"],"min_score":80}` to filter |
+
+Signal ordering: the worker commits each signal before publishing it, so the token detail endpoint always
+resolves for a token you just received, and a cycle's signals always arrive before its `scan_complete`.
+
+### Telegram
+
+Create a bot with @BotFather, then set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (a channel, group or user id).
+Signals with score ≥ `TELEGRAM_MIN_SCORE` (default 80) are posted once each, even with several API replicas.
+Commands: `/top [chain]`, `/token <address>`, `/status`, `/help`. Telegram runs inside the API process; if you
+scale the API to several replicas, run `python -m app.telegram_alerts` as one separate process instead.
+
+## Run the dashboard (Phase 3)
+
+```powershell
+cd frontend
+npm install
+copy .env.example .env.local      # NEXT_PUBLIC_API_URL=http://localhost:8000
+npm run dev                       # http://localhost:3000
+```
+
+Production: `npm run build` then `npm run start`. `NEXT_PUBLIC_API_URL` is baked in at build time.
+`docker compose up --build` also builds and serves the dashboard on port 3000.
+
+The dashboard reloads the table and KPIs on every `scan_complete` WebSocket event and falls back to polling
+every 60s if the socket is down. Opening a token rewrites the URL to `/token/{chain}/{address}`, so the URL
+can be shared; Telegram alerts link there when `PUBLIC_DASHBOARD_URL` is set.
+
+## Data sources and limits
+
+| Source | Used for | Keyless limit |
+|---|---|---|
+| DexScreener `token-boosts`, `token-profiles` | discovery | 60/min |
+| DexScreener `tokens/v1/{chain}/{addrs}` | pair metrics (30 tokens/call) | 300/min |
+| GeckoTerminal `trending_pools`, `new_pools` | discovery | 30/min |
+| RugCheck `tokens/{mint}/report` | Solana mint/freeze, LP lock, holders, risks | ~ |
+| GoPlus `token_security` | EVM security (Solana fallback) | ~30/min, returns `code 4029` when exceeded |
+| GeckoTerminal `pools/{pool}/ohlcv` | inspector chart (shares the quota with discovery) | 30/min |
+
+GoPlus is the bottleneck on EVM chains. Security results are cached for 30 minutes, and audits that miss the
+per-cycle deadline (70% of the interval) are retried next cycle, so coverage fills in over a few cycles. Set
+`GOPLUS_ACCESS_TOKEN` for higher limits.
+
+## Alpha Score
+
+See the docstring at the top of `backend/app/scoring_engine.py` for every formula and threshold. Missing data
+never earns points. Honeypots, `cannot_sell_all`, sell tax ≥ 50% and RugCheck "rugged" force the score to 0.

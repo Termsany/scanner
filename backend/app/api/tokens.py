@@ -1,0 +1,136 @@
+"""Token table, token inspector, chart data, signals and scanner status."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Annotated
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.cache import Cache
+from app.db import get_session
+from app.models import Chain, MarketSnapshot
+from app.repository import get_token, list_tokens, recent_signals, scanner_status, token_detail, utc
+from app.scanner_worker import GECKO_NETWORK
+from app.schemas import (
+    Candle,
+    ChartData,
+    PaginatedTokens,
+    ScannerStatus,
+    SignalOut,
+    TokenDetail,
+    TokenListParams,
+)
+
+router = APIRouter(prefix="/api", tags=["tokens"])
+Session = Annotated[AsyncSession, Depends(get_session)]
+
+# interval -> (GeckoTerminal timeframe, aggregate, seconds per candle)
+CHART_INTERVALS: dict[str, tuple[str, int, int]] = {
+    "1m": ("minute", 1, 60),
+    "5m": ("minute", 5, 300),
+    "15m": ("minute", 15, 900),
+    "1h": ("hour", 1, 3_600),
+    "4h": ("hour", 4, 14_400),
+    "1d": ("day", 1, 86_400),
+}
+
+
+@router.get("/tokens", response_model=PaginatedTokens)
+async def get_tokens(session: Session, params: Annotated[TokenListParams, Query()]) -> PaginatedTokens:
+    """Paginated scanner table. `sort=age&order=desc` returns the youngest pairs first."""
+    return await list_tokens(session, params)
+
+
+@router.get("/tokens/{chain}/{address}", response_model=TokenDetail)
+async def get_token_detail(chain: Chain, address: str, session: Session) -> TokenDetail:
+    token = await get_token(session, chain, address)
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found or not yet scanned")
+    return await token_detail(session, token)
+
+
+@router.get("/tokens/{chain}/{address}/chart", response_model=ChartData)
+async def get_token_chart(
+    chain: Chain,
+    address: str,
+    request: Request,
+    session: Session,
+    interval: Annotated[str, Query(pattern="^(1m|5m|15m|1h|4h|1d)$")] = "5m",
+    limit: Annotated[int, Query(ge=10, le=1000)] = 300,
+) -> ChartData:
+    """OHLCV for TradingView Lightweight Charts. GeckoTerminal first, scanner snapshots as fallback."""
+    token = await get_token(session, chain, address)
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found or not yet scanned")
+
+    cache: Cache = request.app.state.cache
+    key = f"chart:v1:{chain.value}:{token.pair_address}:{interval}:{limit}"
+    cached = await cache.get_json(key)
+    if cached:
+        return ChartData.model_validate(cached)
+
+    timeframe, aggregate, step = CHART_INTERVALS[interval]
+    candles: list[Candle] = []
+    # GeckoTerminal's keyless quota (~30/min) is shared with the scanner's discovery calls; after a 429,
+    # serve snapshots for 30s instead of hammering it.
+    gecko_blocked = bool(await cache.get_json("chart:gecko_blocked"))
+    if token.pair_address and not gecko_blocked:
+        http: httpx.AsyncClient = request.app.state.http
+        url = (f"https://api.geckoterminal.com/api/v2/networks/{GECKO_NETWORK[chain]}/pools/"
+               f"{token.pair_address}/ohlcv/{timeframe}")
+        try:
+            resp = await http.get(url, params={"aggregate": aggregate, "limit": limit, "currency": "usd"},
+                                  headers={"Accept": "application/json;version=20230302"})
+            if resp.status_code == 200:
+                rows = ((resp.json().get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
+                candles = [Candle(time=int(r[0]), open=float(r[1]), high=float(r[2]), low=float(r[3]),
+                                  close=float(r[4]), volume=float(r[5] or 0)) for r in rows if len(r) >= 6]
+                candles.sort(key=lambda c: c.time)
+            elif resp.status_code == 429:
+                await cache.set_json("chart:gecko_blocked", True, ttl_seconds=30)
+        except (httpx.HTTPError, ValueError, TypeError):
+            candles = []
+
+    if candles:
+        data = ChartData(source="geckoterminal", timeframe=interval, candles=candles)
+        await cache.set_json(key, data.model_dump(mode="json"), ttl_seconds=min(step, 60))
+        return data
+
+    # Fallback: bucket our own per-cycle price snapshots into candles.
+    since = datetime.now(timezone.utc) - timedelta(seconds=step * limit)
+    snaps = (await session.execute(
+        select(MarketSnapshot.captured_at, MarketSnapshot.price_usd, MarketSnapshot.volume_h1)
+        .where(MarketSnapshot.token_id == token.id, MarketSnapshot.captured_at >= since,
+               MarketSnapshot.price_usd.is_not(None))
+        .order_by(MarketSnapshot.captured_at.asc())
+    )).all()
+    buckets: dict[int, Candle] = {}
+    for ts, price, _vol in snaps:
+        t = int(utc(ts).timestamp()) // step * step
+        c = buckets.get(t)
+        if c is None:
+            buckets[t] = Candle(time=t, open=price, high=price, low=price, close=price)
+        else:
+            c.high, c.low, c.close = max(c.high, price), min(c.low, price), price
+    return ChartData(source="snapshots", timeframe=interval, candles=list(buckets.values()))
+
+
+@router.get("/signals", response_model=list[SignalOut])
+async def get_signals(
+    session: Session,
+    chain: Chain | None = None,
+    min_score: Annotated[int, Query(ge=0, le=100)] = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[SignalOut]:
+    """Most recent signals with performance since the signal fired."""
+    return await recent_signals(session, limit=limit, chain=chain, min_score=min_score)
+
+
+@router.get("/status", response_model=ScannerStatus)
+async def get_status(session: Session) -> ScannerStatus:
+    """KPI bar: active tokens, 24h high-alpha signals, top gainer caught, live pulse."""
+    return await scanner_status(session)
