@@ -115,7 +115,8 @@ class BirdeyeClient:
 
     async def gainers(self, session: AsyncSession, chain: Chain, limit: int) -> list[dict[str, Any]]:
         data = await self.get(session, "/trader/gainers-losers", chain,
-                              {"type": "1W", "sort_by": "PnL", "sort_type": "desc", "offset": 0,
+                              # realized, not total PnL: total is dominated by paper gains of holders/creators
+                              {"type": "1W", "sort_by": "realized_pnl", "sort_type": "desc", "offset": 0,
                                "limit": min(limit, 100)})
         return data.get("items") or []
 
@@ -126,7 +127,10 @@ class BirdeyeClient:
         return data.get("items") or []
 
     async def pnl_summary(self, session: AsyncSession, chain: Chain, wallet: str) -> dict[str, Any]:
-        data = await self.get(session, "/wallet/v2/pnl/summary", chain, {"wallet": wallet, "duration": "30d"})
+        # cumulative: count positions opened before the window too (duration_only leaves active traders
+        # with ~0 closed positions and a meaningless win rate)
+        data = await self.get(session, "/wallet/v2/pnl/summary", chain,
+                              {"wallet": wallet, "duration": "30d", "position_scope": "cumulative"})
         return data.get("summary") or {}
 
 
@@ -144,24 +148,35 @@ def normalize_win_rate(v: Any) -> float:
 def evaluate_summary(summary: dict[str, Any], s: Settings) -> tuple[bool, str, dict[str, Any]]:
     counts = summary.get("counts") or {}
     pnl = summary.get("pnl") or {}
-    win_rate = normalize_win_rate(counts.get("win_rate"))
+    wins, losses = int(_f(counts.get("total_win"))), int(_f(counts.get("total_loss")))
+    closed = wins + losses
+    win_rate = wins / closed if closed else normalize_win_rate(counts.get("win_rate"))
     trades = int(_f(counts.get("total_trade")))
     realized = _f(pnl.get("realized_profit_usd"))
+    unrealized = _f(pnl.get("unrealized_usd"))
+    tokens = int(_f(summary.get("unique_tokens")))
     stats = {
         "win_rate": round(win_rate, 3),
         "realized_usd_30d": round(realized, 2),
-        "total_usd_30d": round(_f(pnl.get("total_usd")), 2),
+        "realized_pct_30d": round(_f(pnl.get("realized_profit_percent")), 1),
+        "unrealized_usd": round(unrealized, 2),
         "trades_30d": trades,
-        "unique_tokens_30d": int(_f(summary.get("unique_tokens"))),
-        "wins_30d": int(_f(counts.get("total_win"))),
-        "losses_30d": int(_f(counts.get("total_loss"))),
+        "unique_tokens_30d": tokens,
+        "wins_30d": wins,
+        "losses_30d": losses,
     }
     if trades < s.birdeye_min_trades_30d:
         return False, f"too few trades ({trades})", stats
     if trades > s.birdeye_max_trades_30d:
         return False, f"bot-like trade count ({trades})", stats
+    if tokens < s.birdeye_min_unique_tokens:
+        return False, f"too few tokens ({tokens})", stats
+    if closed < s.birdeye_min_closed_positions:
+        return False, f"too few closed positions ({closed})", stats
     if realized < s.birdeye_min_realized_usd_30d:
         return False, f"realized ${realized:,.0f} < ${s.birdeye_min_realized_usd_30d:,.0f}", stats
+    if unrealized > max(10 * realized, 1_000_000):
+        return False, f"mostly unrealized (${unrealized:,.0f}): holder / insider, not a trader", stats
     if win_rate < s.birdeye_min_win_rate:
         return False, f"win rate {win_rate:.0%} < {s.birdeye_min_win_rate:.0%}", stats
     return True, "qualified", stats
@@ -190,7 +205,8 @@ async def _candidate(session: AsyncSession, chain: Chain, address: str) -> Trade
     return c
 
 
-async def _seed(session: AsyncSession, client: BirdeyeClient, chains: list[Chain], stats: dict[str, int]) -> None:
+async def _seed(session: AsyncSession, client: BirdeyeClient, chains: list[Chain], stats: dict[str, int],
+                force: bool = False) -> None:
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     for chain in chains:
         done = (await session.execute(
@@ -198,15 +214,19 @@ async def _seed(session: AsyncSession, client: BirdeyeClient, chains: list[Chain
                 BirdeyeCall.endpoint == "/trader/gainers-losers", BirdeyeCall.chain == chain.value,
                 BirdeyeCall.created_at >= since, BirdeyeCall.status == 200)
         )).scalar_one()
-        if done:
+        if done and not force:
             continue
         items = await client.gainers(session, chain, client.settings.birdeye_seed_limit)
+        st = client.settings
         for it in items:
             addr = str(it.get("address") or "")
             trades = int(_f(it.get("trade_count")))
-            pnl = _f(it.get("pnl"))
-            if not addr or trades > client.settings.birdeye_seed_max_trades_week or pnl <= 0:
-                continue
+            realized = _f(it.get("realized_pnl"))
+            if not addr or not st.birdeye_seed_min_trades_week <= trades <= st.birdeye_seed_max_trades_week:
+                continue  # 1-3 trade "flips" are usually insiders; thousands are bots
+            if realized < st.birdeye_seed_min_realized_usd or _f(it.get("pnl")) <= 0:
+                continue  # underwater overall despite realized gains
+            pnl = realized
             c = await _candidate(session, chain, addr)
             if "gainers_1W" not in c.origins:
                 c.origins = [*c.origins, "gainers_1W"]
@@ -280,7 +300,7 @@ async def _verify(session: AsyncSession, client: BirdeyeClient, settings: Settin
 
 
 async def discover_traders(session: AsyncSession, settings: Settings | None = None,
-                           client: BirdeyeClient | None = None) -> dict[str, Any]:
+                           client: BirdeyeClient | None = None, force_seed: bool = False) -> dict[str, Any]:
     s = settings or get_settings()
     own = client is None
     client = client or BirdeyeClient(s)
@@ -298,7 +318,7 @@ async def discover_traders(session: AsyncSession, settings: Settings | None = No
         if "stopped" not in stats:
             if await client.remaining(session) > len(chains) + 4:
                 try:
-                    await _seed(session, client, chains, stats)
+                    await _seed(session, client, chains, stats, force=force_seed)
                     await _verify(session, client, s, stats)  # verify fresh seeds with what is left
                 except BudgetExhausted:
                     stats["stopped"] = "daily budget reached"

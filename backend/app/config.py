@@ -58,11 +58,15 @@ class Settings(BaseSettings):
     birdeye_daily_call_budget: int = 30          # 30/day = 900/month, under the free 1,000
     birdeye_seed_limit: int = 50                 # chain-wide weekly PnL leaders per chain per day
     birdeye_seed_max_trades_week: int = 1_500    # more than this is a bot / market maker
+    birdeye_seed_min_trades_week: int = 10       # fewer is a one-off flip (often an insider)
+    birdeye_seed_min_realized_usd: float = 2_500.0
     birdeye_min_token_pnl_usd: float = 1_000.0   # min PnL on a winner token to become a candidate
     birdeye_min_win_rate: float = 0.55           # 30-day win rate to qualify
     birdeye_min_realized_usd_30d: float = 5_000.0
     birdeye_min_trades_30d: int = 20
     birdeye_max_trades_30d: int = 5_000
+    birdeye_min_closed_positions: int = 5
+    birdeye_min_unique_tokens: int = 5
     birdeye_reverify_days: int = 7
 
     # --- Optional API keys (all endpoints used work keyless at low volume) --

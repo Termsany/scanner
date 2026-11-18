@@ -378,7 +378,9 @@ async def _cli(argv: list[str] | None = None) -> None:
         if name == "add":
             sp.add_argument("label", nargs="*")
     sub.add_parser("discover")
-    sub.add_parser("birdeye", help="run Birdeye trader discovery now (uses the daily call budget)")
+    be = sub.add_parser("birdeye", help="run Birdeye trader discovery now (uses the daily call budget)")
+    be.add_argument("--force-seed", action="store_true", help="re-run today's chain-wide seed")
+    be.add_argument("--prune", action="store_true", help="first drop unverified/rejected seed-only candidates")
     sub.add_parser("candidates", help="show Birdeye trader candidates and why they were rejected")
     imp = sub.add_parser("import")
     imp.add_argument("file", type=Path)
@@ -415,7 +417,17 @@ async def _cli(argv: list[str] | None = None) -> None:
         elif a.cmd == "birdeye":
             from app.birdeye import discover_traders
 
-            print(json.dumps(await discover_traders(s), indent=1, default=str))
+            from sqlalchemy import delete
+
+            from app.models import TraderCandidate
+
+            if a.prune:
+                cands = (await s.execute(select(TraderCandidate).where(TraderCandidate.qualified.is_(False)))).scalars().all()
+                junk = [c.id for c in cands if not c.winner_hits]
+                if junk:
+                    await s.execute(delete(TraderCandidate).where(TraderCandidate.id.in_(junk)))
+                print(f"pruned {len(junk)} seed-only candidates")
+            print(json.dumps(await discover_traders(s, force_seed=a.force_seed), indent=1, default=str))
         elif a.cmd == "candidates":
             from app.models import TraderCandidate
 
