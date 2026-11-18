@@ -364,6 +364,7 @@ class SmartWalletList(_Model):
     enabled_auto: int
     enabled_birdeye: int = 0
     disabled: int
+    telegram_bot: str | None = None   # bot username for Track deep links (t.me/<bot>?start=track_...)
 
 
 class Candle(_Model):

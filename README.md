@@ -163,9 +163,14 @@ Pick any wallets (smart or not) and get a Telegram message when they buy. From t
 (`TELEGRAM_CHAT_ID` only):
 
 ```
-/track solana <address> [name]      /track evm <0x address> [name]   (evm = Ethereum + Base + BSC)
-/untrack <chain|evm> <address>      /tracked
+/wallets                      smart wallets, each with a 👀 Track / ✖ Untrack button
+/track <address> [name]       chain auto-detected: base58 = Solana, 0x = Ethereum + Base + BSC
+/untrack <address>            /tracked
 ```
+
+The slash is optional in the owner chat (`track <address>` works). The dashboard's Smart wallets panel has a
+Track button per wallet: it opens the bot with `?start=track_sol_<address>` / `track_evm_<address>`, and pressing
+Start adds it (accepted from the owner chat only, since the site itself has no login).
 
 The worker polls every 30s. Solana: new transactions *signed by the wallet* (getSignaturesForAddress →
 getTransaction, `maxSupportedTransactionVersion: 1`), token balance increases excluding SOL/USDC/USDT.

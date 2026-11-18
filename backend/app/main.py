@@ -43,12 +43,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                                        headers={"User-Agent": "alpha-scanner/0.1"})
     app.state.analyst = AIAnalyst(app.state.cache, settings)
     app.state.hub = SignalHub(settings)
+    app.state.telegram = None
     await app.state.hub.start()
 
     background: list[asyncio.Task] = []
     telegram: TelegramAlerts | None = None
     if settings.telegram_bot_token:
         telegram = TelegramAlerts(settings)
+        app.state.telegram = telegram
         background.append(asyncio.create_task(telegram.run(), name="telegram"))
     scanner = None
     if settings.run_scanner_in_api:

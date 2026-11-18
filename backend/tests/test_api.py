@@ -252,3 +252,44 @@ def test_render_trade_escapes_and_links():
     text = render_trade(t, "https://scanner.example")
     assert "&lt;Whale&gt;" in text and "Gem &amp; Co" in text and "first buy" in text
     assert "solscan.io/tx/sig9" in text and "/token/solana/Mint1" in text and "Alpha Score <b>78</b>" in text
+
+
+def test_track_autodetect_deeplink_and_wallet_buttons(client):
+    owner = "4242"
+    bot = TelegramAlerts(get_settings().model_copy(update={"telegram_bot_token": "123:test", "telegram_chat_id": owner}))
+    sol = "6DQAGJT7VZPVBsuG4kn3AvpyHCEi7B2RFFvMZdbqQqqP"
+    evm = "0xb5002f252e8153edf930d13f7979fedbbb086401"
+    calls = []
+
+    async def fake_call(method, payload, timeout=None):
+        calls.append((method, payload))
+        return {"ok": True}
+
+    bot._call = fake_call
+    try:
+        # chain auto-detected from the address; name after it
+        r = client.portal.call(bot.handle_command, f"/track {sol} Sniper King", owner)
+        assert "on solana" in r and "Sniper King" in r
+        # dashboard deep link: /start track_evm_<addr> -> Ethereum + Base + BSC
+        r = client.portal.call(bot.handle_command, f"/start track_evm_{evm}", owner)
+        assert "ethereum, base, bsc" in r
+        assert "owner's chat" in client.portal.call(bot.handle_command, f"/start track_sol_{sol}", "999")
+
+        text, markup = client.portal.call(bot.wallets_menu)
+        buttons = [b[0] for b in markup["inline_keyboard"]]
+        sol_btn = next(b for b in buttons if "Sniper King" in b["text"])
+        assert sol_btn["text"].startswith("✖ Untrack") and sol_btn["callback_data"].startswith("u:")
+        # tap Untrack from the owner chat -> tracking off; a watch-only wallet then leaves the menu,
+        # while the tracked EVM wallets stay listed with Untrack buttons
+        client.portal.call(bot.handle_callback, {"id": "cb1", "data": sol_btn["callback_data"],
+                                                 "message": {"chat": {"id": int(owner)}, "message_id": 7}})
+        assert ("answerCallbackQuery", {"callback_query_id": "cb1", "text": "Stopped tracking Sniper King"}) in calls
+        edited = next(p for m, p in calls if m == "editMessageText")
+        labels = [row[0]["text"] for row in edited["reply_markup"]["inline_keyboard"]]
+        assert not any("Sniper King" in t for t in labels) and sum(t.startswith("✖ Untrack") for t in labels) == 3
+        # someone else tapping a button is refused
+        client.portal.call(bot.handle_callback, {"id": "cb2", "data": "t:1", "message": {"chat": {"id": 999}}})
+        assert ("answerCallbackQuery", {"callback_query_id": "cb2", "text": "Not allowed"}) in calls
+    finally:
+        client.portal.call(bot.handle_command, f"/untrack evm {evm}", owner)
+        client.portal.call(bot.close)

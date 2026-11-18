@@ -85,6 +85,17 @@ export function SmartWalletsPanel({ refreshKey }: { refreshKey: number }) {
                   >
                     {w.source}
                   </span>
+                  {!w.track_buys && data.telegram_bot && (
+                    <a
+                      href={`https://t.me/${data.telegram_bot}?start=track_${w.chain === "solana" ? "sol" : "evm"}_${w.address}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open the bot in Telegram and press Start to get buy alerts for this wallet (owner chat only)"
+                      className="inline-flex items-center gap-0.5 rounded border border-warn/40 px-1 text-[9.5px] font-semibold tracking-wider text-warn uppercase hover:bg-warn-soft"
+                    >
+                      <Eye className="size-2.5" /> Track
+                    </a>
+                  )}
                   {w.track_buys && (
                     <span title="Telegram buy alerts on" className="inline-flex items-center gap-0.5 rounded bg-warn-soft px-1 text-[9.5px] font-semibold tracking-wider text-warn uppercase">
                       <Eye className="size-2.5" /> tracked

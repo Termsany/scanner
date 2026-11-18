@@ -266,6 +266,7 @@ export interface SmartWalletList {
   enabled_auto: number;
   enabled_birdeye: number;
   disabled: number;
+  telegram_bot: string | null;
 }
 
 export interface SignalOut {

@@ -134,6 +134,7 @@ async def get_signals(
 
 @router.get("/smart-wallets", response_model=SmartWalletList)
 async def get_smart_wallets(
+    request: Request,
     session: Session,
     include_disabled: bool = False,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -155,6 +156,7 @@ async def get_smart_wallets(
         enabled_auto=counts.get((WalletSource.auto, True), 0),
         enabled_birdeye=counts.get((WalletSource.birdeye, True), 0),
         disabled=sum(n for (src, en), n in counts.items() if not en),
+        telegram_bot=getattr(getattr(request.app.state, "telegram", None), "username", None),
     )
 
 

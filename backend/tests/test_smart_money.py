@@ -125,3 +125,16 @@ def test_missing_nullable_column_is_added():
         _add_missing_columns(c)
         assert "holders" in {col["name"] for col in inspect(c).get_columns("signals")}
     eng.dispose()
+
+
+def test_untracking_a_scoring_wallet_keeps_it_for_the_menu():
+    async def body(s):
+        from app.smart_money import set_tracking
+
+        await discover(s, S)  # W1, W3 become auto (scoring) wallets
+        await set_tracking(s, [Chain.solana], "W3", "", True)
+        await set_tracking(s, [Chain.solana], "W3", "", False)
+        w = (await s.execute(select(SmartWallet).where(SmartWallet.address == "W3"))).scalar_one()
+        assert w.enabled is True and w.track_buys is False  # still a smart wallet -> menu shows "Track"
+
+    _run(body)
