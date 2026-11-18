@@ -29,11 +29,20 @@ SYSTEM_PROMPT = """You are a senior on-chain analyst reviewing a freshly scanned
 You receive JSON with market metrics, a security audit and a deterministic "Alpha Score" breakdown.
 
 Respond with ONLY a JSON object, no prose, in exactly this shape:
-{"verdict": "BULLISH" | "NEUTRAL" | "AVOID", "bullets": [string, string, string], "confidence": number}
+{"verdict": "BULLISH" | "NEUTRAL" | "AVOID",
+ "reward": string,
+ "risk": string,
+ "watch": string,
+ "confidence": number}
 
-Rules:
-- Exactly 3 bullets, each at most 28 words, concrete and numeric (cite the figures you rely on).
-- Bullet 1: the strongest reward signal. Bullet 2: the most serious risk. Bullet 3: what to watch / invalidation.
+Field rules (each field at most 28 words, concrete and numeric: cite the figures you rely on):
+- "reward": the single strongest reason the token could perform.
+- "risk": the single most serious DOWNSIDE. It must describe something that can go wrong (weakness,
+  failed check, missing data, concentration, thin liquidity, overheated momentum, young pair age, etc.).
+  It must NOT restate a strength. Every token has a risk; new DEX tokens are inherently volatile.
+- "watch": the concrete level or event that would invalidate the setup.
+
+Other rules:
 - If "hard_fail" is not null, or the token is a honeypot, verdict MUST be "AVOID".
 - Missing data (listed in "data_gaps") is a risk, never a positive.
 - confidence is 0-1 and must be <= 0.5 when more than two data_gaps exist.
@@ -152,7 +161,7 @@ class AIAnalyst:
     ) -> AIAnalysis:
         payload = build_payload(metrics, security, score)
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:24]
-        key = f"ai:v1:{metrics.chain.value}:{metrics.address}:{digest}"
+        key = f"ai:v2:{metrics.chain.value}:{metrics.address}:{digest}"
 
         cached = await self.cache.get_json(key)
         if cached:
@@ -161,16 +170,21 @@ class AIAnalyst:
             except ValidationError:
                 pass
 
-        result = await self._call_llm(payload) if self._client else None
+        rules = rules_analysis(score, security)
+        result = None
+        if self._client:
+            content = await self._call_llm(payload)
+            if content is not None:
+                result = self._parse(content, rules)
         if result is None:
-            result = rules_analysis(score, security)
+            result = rules
         elif score is not None and score.hard_fail:
             result.verdict = "AVOID"  # never let the model override a hard fail
 
         await self.cache.set_json(key, result.model_dump(mode="json"), self.settings.ai_cache_ttl_seconds)
         return result
 
-    async def _call_llm(self, payload: dict[str, Any]) -> AIAnalysis | None:
+    async def _call_llm(self, payload: dict[str, Any]) -> str | None:
         assert self._client is not None
         try:
             resp = await self._client.chat.completions.create(
@@ -184,13 +198,16 @@ class AIAnalyst:
                     {"role": "user", "content": json.dumps(payload, default=str)},
                 ],
             )
-            content = (resp.choices[0].message.content or "").strip()
-            return self._parse(content)
+            return (resp.choices[0].message.content or "").strip()
         except Exception:
             log.warning("LLM analysis failed; using rules fallback", exc_info=True)
             return None
 
-    def _parse(self, content: str) -> AIAnalysis | None:
+    def _parse(self, content: str, rules: AIAnalysis) -> AIAnalysis | None:
+        """Parse {"verdict","reward","risk","watch","confidence"} into ordered bullets [reward, risk, watch].
+
+        A slot the model leaves empty is filled from the deterministic rules analysis, so the dashboard's
+        Reward / Risk / Watch labels always sit next to the right kind of statement."""
         if content.startswith("```"):  # some providers wrap JSON in fences despite json mode
             content = content.strip("`")
             content = content[content.find("{"):]
@@ -199,14 +216,30 @@ class AIAnalyst:
         except (ValueError, TypeError):
             log.warning("LLM returned non-JSON: %.200s", content)
             return None
-        verdict = str(data.get("verdict", "")).upper()
-        bullets = [str(b).strip() for b in data.get("bullets") or [] if str(b).strip()][:3]
+        if not isinstance(data, dict):
+            return None
+        verdict = str(data.get("verdict", "")).strip().upper()
+        slots = [_text(data.get(k)) for k in SLOTS]
+        if verdict not in VERDICTS or not any(slots):
+            log.warning("LLM output failed validation: %.200s", content)
+            return None
+        filled = [s or rules.bullets[i] for i, s in enumerate(slots)]
+        missing = [SLOTS[i] for i, s in enumerate(slots) if not s]
+        if missing:
+            log.info("LLM omitted %s; filled from rules", ", ".join(missing))
         try:
             confidence = float(data.get("confidence", 0.5))
         except (TypeError, ValueError):
             confidence = 0.5
-        if verdict not in VERDICTS or not bullets:
-            log.warning("LLM output failed validation: %.200s", content)
-            return None
-        return AIAnalysis(verdict=verdict, bullets=bullets, confidence=min(max(confidence, 0.0), 1.0),
-                          model=self.settings.llm_model)
+        model = self.settings.llm_model + (" + rules" if missing else "")
+        return AIAnalysis(verdict=verdict, bullets=filled, confidence=min(max(confidence, 0.0), 1.0), model=model)
+
+
+SLOTS = ("reward", "risk", "watch")
+
+
+def _text(v: Any) -> str:
+    """Field as a clean single string; lists (some models return one) are joined."""
+    if isinstance(v, list):
+        v = "; ".join(str(x).strip() for x in v if str(x).strip())
+    return str(v).strip() if v is not None else ""
