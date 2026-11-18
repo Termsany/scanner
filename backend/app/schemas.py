@@ -187,6 +187,7 @@ class SortField(str, enum.Enum):
     liquidity = "liquidity"
     age = "age"
     change_1h = "change_1h"
+    volume_1h = "volume_1h"
 
 
 class SortOrder(str, enum.Enum):
@@ -318,6 +319,10 @@ class ScannerStatus(_Model):
     last_run_at: datetime | None
     last_run_ok: bool | None
     last_run_scored: int | None
+    last_run_candidates: int | None = None
+    last_run_errors: int | None = None
+    last_cycle_seconds: float | None = None
+    security_coverage_pct: float | None = None   # active tokens (1h) that have a security audit
     scan_interval_seconds: int
     active_tokens: int
     high_alpha_24h: int

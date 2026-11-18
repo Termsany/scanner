@@ -14,7 +14,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import { ApiError, api } from "@/lib/api";
-import { CHAIN_LABEL, age, explorerUrl, pct, pctClass, price, shortAddr, usd } from "@/lib/format";
+import { CHAIN_LABEL, age, explorerUrl, pct, pctClass, price, scoreTone, shortAddr, usd } from "@/lib/format";
 import type { CategoryScore, ScoreComponent, SecurityReport, TokenDetail, TokenRef } from "@/lib/types";
 
 import { AIAnalystCard } from "./AIAnalystCard";
@@ -77,9 +77,9 @@ export function TokenInspector({ token, refreshKey, onClose }: Props) {
   return (
     <div className="fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label="Token inspector">
       <div className="absolute inset-0 animate-fade-in bg-black/55 backdrop-blur-[2px]" onClick={onClose} />
-      <aside className="absolute inset-y-0 right-0 flex w-full max-w-[640px] animate-slide-in flex-col border-l border-line bg-carbon shadow-2xl shadow-black/60">
+      <aside className="absolute inset-y-0 right-0 flex w-full max-w-[560px] animate-slide-in flex-col border-l border-line bg-carbon shadow-2xl shadow-black/60">
         {/* Header */}
-        <header className="flex items-center gap-3 border-b border-line px-5 py-4">
+        <header className="flex flex-wrap items-center gap-3 border-b border-line px-5 py-4">
           {t ? (
             <TokenAvatar symbol={t.symbol} image={t.image_url} size={40} />
           ) : (
@@ -96,6 +96,25 @@ export function TokenInspector({ token, refreshKey, onClose }: Props) {
               <CopyAddress address={token.address} />
             </div>
           </div>
+          {t && (
+            <div className="order-last flex w-full items-center justify-end gap-1.5 sm:order-none sm:w-auto">
+              {t.pair_url && (
+                <a href={t.pair_url} target="_blank" rel="noopener noreferrer" title="Open on DexScreener"
+                   className="grid h-9 place-items-center rounded-lg border border-line px-2 text-[11px] text-muted hover:bg-raised hover:text-ink">
+                  <span className="flex items-center gap-1">DEX <ExternalLink className="size-3" /></span>
+                </a>
+              )}
+              <a href={explorerUrl(token.chain, token.address)} target="_blank" rel="noopener noreferrer"
+                 title={`Open on ${CHAIN_LABEL[token.chain]} explorer`}
+                 className="grid h-9 place-items-center rounded-lg border border-line px-2 text-[11px] text-muted hover:bg-raised hover:text-ink">
+                <span className="flex items-center gap-1">Scan <ExternalLink className="size-3" /></span>
+              </a>
+              <span className={`num grid h-9 min-w-12 place-items-center rounded-lg border px-2 text-lg font-bold ${SCORE_BOX[scoreTone(t.alpha_score)]}`}
+                    title="Alpha Score">
+                {t.alpha_score}
+              </span>
+            </div>
+          )}
           <button
             ref={closeRef}
             onClick={onClose}
@@ -133,6 +152,16 @@ export function TokenInspector({ token, refreshKey, onClose }: Props) {
                   <div>
                     <div className="font-semibold">Hard fail: {s.hard_fail.replaceAll("_", " ").toLowerCase()}</div>
                     <div className="text-xs text-bear/80">Score forced to 0 regardless of momentum.</div>
+                  </div>
+                </div>
+              )}
+
+              {s && s.data_gaps.length > 0 && (
+                <div className="flex items-start gap-2.5 rounded-xl border border-warn/30 bg-warn-soft px-4 py-2.5 text-xs text-warn">
+                  <AlertTriangle className="mt-px size-3.5 shrink-0" />
+                  <div>
+                    <span className="font-semibold">Missing data</span> (scored as 0, never as safe):{" "}
+                    {s.data_gaps.map((g) => g.split(".").pop()!.replaceAll("_", " ")).join(", ")}
                   </div>
                 </div>
               )}
@@ -197,12 +226,6 @@ export function TokenInspector({ token, refreshKey, onClose }: Props) {
                       </ul>
                     </div>
                   ))}
-                  {s.data_gaps.length > 0 && (
-                    <p className="mt-3 flex items-start gap-1.5 text-[11px] text-warn">
-                      <AlertTriangle className="mt-px size-3.5 shrink-0" />
-                      Missing data: {s.data_gaps.map((g) => g.split(".").pop()!.replaceAll("_", " ")).join(", ")}
-                    </p>
-                  )}
                 </section>
               )}
 
@@ -224,6 +247,12 @@ export function TokenInspector({ token, refreshKey, onClose }: Props) {
     </div>
   );
 }
+
+const SCORE_BOX = {
+  bull: "border-bull/40 bg-bull-soft text-bull",
+  warn: "border-warn/40 bg-warn-soft text-warn",
+  bear: "border-bear/40 bg-bear-soft text-bear",
+} as const;
 
 const WINDOW_LABEL = { m5: "5m", h1: "1h", h6: "6h", h24: "24h" } as const;
 
@@ -309,6 +338,12 @@ function SecurityChecklist({ sec }: { sec: SecurityReport | null }) {
       maxTax === null ? "n/a" : `${sec.buy_tax ?? 0}% / ${sec.sell_tax ?? 0}%`,
     ],
   ];
+  const rugged = sec.risks.some((r) => r.name.toLowerCase() === "rugged" && r.level === "danger");
+  rows.push([
+    "Rugged (RugCheck)",
+    !sec.providers.includes("rugcheck") ? "unknown" : rugged ? "bad" : "ok",
+    !sec.providers.includes("rugcheck") ? "n/a" : rugged ? "RUGGED" : "No",
+  ]);
   if (sec.is_open_source !== null) rows.push(["Verified source", flag(sec.is_open_source, true), sec.is_open_source ? "Yes" : "No"]);
   if (sec.owner_can_change_balance !== null)
     rows.push(["Owner can edit balances", flag(sec.owner_can_change_balance, false), sec.owner_can_change_balance ? "Yes" : "No"]);

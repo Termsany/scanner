@@ -210,3 +210,12 @@ def test_smart_wallets_endpoint(client):
     body = client.get("/api/smart-wallets").json()
     assert body["items"] == [] and body["enabled_manual"] == 0 and body["enabled_auto"] == 0
     assert client.get("/api/smart-wallets", params={"limit": 0}).status_code == 422
+
+
+def test_status_telemetry_and_volume_1h_sort(client):
+    st = client.get("/api/status").json()
+    assert st["security_coverage_pct"] == 100.0  # every seeded token has an audit
+    assert "last_cycle_seconds" in st and "last_run_errors" in st
+    items = client.get("/api/tokens", params={"sort": "volume_1h"}).json()["items"]
+    vols = [t["volume_h1"] for t in items]
+    assert vols == sorted(vols, reverse=True)

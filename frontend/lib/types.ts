@@ -2,7 +2,7 @@
 
 export type Chain = "solana" | "ethereum" | "base" | "bsc";
 export type Badge = "STRONG_ALPHA" | "MODERATE" | "HIGH_RISK";
-export type SortField = "score" | "volume" | "liquidity" | "age" | "change_1h";
+export type SortField = "score" | "volume" | "volume_1h" | "liquidity" | "age" | "change_1h";
 export type SortOrder = "asc" | "desc";
 
 export const CHAINS: Chain[] = ["solana", "ethereum", "base", "bsc"];
@@ -201,6 +201,10 @@ export interface ScannerStatus {
   last_run_at: string | null;
   last_run_ok: boolean | null;
   last_run_scored: number | null;
+  last_run_candidates: number | null;
+  last_run_errors: number | null;
+  last_cycle_seconds: number | null;
+  security_coverage_pct: number | null;
   scan_interval_seconds: number;
   active_tokens: number;
   high_alpha_24h: number;
@@ -260,3 +264,20 @@ export interface SmartWalletList {
   enabled_auto: number;
   disabled: number;
 }
+
+export interface SignalOut {
+  id: number;
+  chain: Chain;
+  address: string;
+  symbol: string;
+  score: number;
+  badge: Badge;
+  price_usd: number | null;
+  current_price_usd: number | null;
+  gain_pct: number | null;
+  created_at: string;
+  payload: Record<string, unknown>;
+}
+
+/** Feed item: a live signal, plus the gain since it fired when loaded from GET /api/signals. */
+export type FeedSignal = LiveSignal & { gain_pct?: number | null };

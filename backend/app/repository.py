@@ -111,6 +111,7 @@ _SORT_COLUMNS = {
     SortField.liquidity: Token.liquidity_usd,
     SortField.age: Token.pair_created_at,
     SortField.change_1h: Token.price_change_h1,
+    SortField.volume_1h: Token.volume_h1,
 }
 
 
@@ -201,9 +202,17 @@ async def scanner_status(session: AsyncSession) -> ScannerStatus:
     last_at = utc(last.finished_at or last.started_at) if last else None
     live = bool(last_at and (now - last_at).total_seconds() <= s.scan_interval_seconds * 3)
 
+    hour_ago = now - timedelta(hours=1)
     active = (await session.execute(
-        select(func.count(Token.id)).where(Token.last_scanned_at >= now - timedelta(hours=1))
+        select(func.count(Token.id)).where(Token.last_scanned_at >= hour_ago)
     )).scalar_one()
+    audited = (await session.execute(
+        select(func.count(Token.id)).join(SecurityAudit, SecurityAudit.token_id == Token.id)
+        .where(Token.last_scanned_at >= hour_ago)
+    )).scalar_one()
+    cycle_s = None
+    if last and last.finished_at and last.started_at:
+        cycle_s = round((utc(last.finished_at) - utc(last.started_at)).total_seconds(), 1)
     signals_24h = (await session.execute(
         select(func.count(Signal.id)).where(Signal.created_at >= day_ago)
     )).scalar_one()
@@ -224,6 +233,11 @@ async def scanner_status(session: AsyncSession) -> ScannerStatus:
 
     return ScannerStatus(
         live=live, last_run_at=last_at, last_run_ok=last.ok if last else None,
-        last_run_scored=last.scored if last else None, scan_interval_seconds=s.scan_interval_seconds,
+        last_run_scored=last.scored if last else None,
+        last_run_candidates=last.candidates if last else None,
+        last_run_errors=len(last.errors or []) if last else None,
+        last_cycle_seconds=cycle_s,
+        security_coverage_pct=round(audited / active * 100, 1) if active else None,
+        scan_interval_seconds=s.scan_interval_seconds,
         active_tokens=active, high_alpha_24h=high_alpha, signals_24h=signals_24h, top_gainer=top,
     )

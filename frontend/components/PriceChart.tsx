@@ -19,7 +19,7 @@ import type { Chain, ChartData, ChartInterval } from "@/lib/types";
 
 const INTERVALS: ChartInterval[] = ["1m", "5m", "15m", "1h", "4h", "1d"];
 const BULL = "#10b981";
-const BEAR = "#f43f5e";
+const BEAR = "#ef4444";
 
 export function PriceChart({ chain, address }: { chain: Chain; address: string }) {
   const el = useRef<HTMLDivElement>(null);
@@ -107,7 +107,7 @@ export function PriceChart({ chain, address }: { chain: Chain; address: string }
             ? d.candles.map((c) => ({
                 time: c.time as UTCTimestamp,
                 value: c.volume,
-                color: c.close >= c.open ? "rgba(16,185,129,0.35)" : "rgba(244,63,94,0.35)",
+                color: c.close >= c.open ? "rgba(16,185,129,0.35)" : "rgba(239,68,68,0.35)",
               }))
             : [],
         );

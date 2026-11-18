@@ -1,4 +1,4 @@
-import { Coins, Lock, Percent, ShieldAlert, Snowflake } from "lucide-react";
+import { Coins, Lock, Percent, ShieldAlert, ShieldCheck, Snowflake } from "lucide-react";
 
 import { BADGE_LABEL, CHAIN_SHORT } from "@/lib/format";
 import type { Badge, Chain, SecurityBadges as SB } from "@/lib/types";
@@ -72,6 +72,12 @@ export function SecurityBadges({ b }: { b: SB }) {
   const describe = (v: boolean | null, yes: string, no: string) => (v === null ? "Unknown" : v ? yes : no);
   return (
     <div className="flex flex-nowrap gap-1">
+      <Pill
+        state={b.honeypot === null ? "unknown" : "ok"}
+        title={b.honeypot === null ? "Honeypot check: unknown" : "Not a honeypot: token can be sold"}
+      >
+        <ShieldCheck className="size-3" /> Safe
+      </Pill>
       <Pill state={stateOf(b.lp_locked)} title={`LP lock: ${describe(b.lp_locked, "> 80% locked/burned", "< 80% locked")}`}>
         <Lock className="size-3" /> LP
       </Pill>
