@@ -227,6 +227,19 @@ class GeckoTerminalClient:
         self.http = http
         self.limiter = RateLimiter(25, 60.0)
 
+    async def ohlcv(self, chain: Chain, pool: str, *, aggregate_minutes: int = 15, limit: int = 120,
+                    before_ts: int | None = None) -> list[list[float]]:
+        """Minute candles [ts, open, high, low, close, volume], oldest first (one call, <= 1000 candles)."""
+        params: dict[str, Any] = {"aggregate": aggregate_minutes, "limit": limit, "currency": "usd"}
+        if before_ts:
+            params["before_timestamp"] = before_ts
+        data = await self.http.get_json(
+            f"{self.BASE}/networks/{GECKO_NETWORK[chain]}/pools/{pool}/ohlcv/minute",
+            limiter=self.limiter, headers=self.HEADERS, params=params,
+        )
+        rows = (((data or {}).get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
+        return sorted((r for r in rows if isinstance(r, list) and len(r) >= 5), key=lambda r: r[0])
+
     async def _pools(self, chain: Chain, kind: str) -> list[str]:
         network = GECKO_NETWORK[chain]
         data = await self.http.get_json(
@@ -951,7 +964,10 @@ async def _main(once: bool) -> None:
         if once:
             await scanner.run_cycle()
         else:
-            await asyncio.gather(scanner.run_forever(), tracker.run_forever())
+            from app.performance import PerformanceTracker
+
+            await asyncio.gather(scanner.run_forever(), tracker.run_forever(),
+                                 PerformanceTracker(scanner.gecko, scanner.settings).run_forever())
     finally:
         await tracker.close()
         await scanner.close()

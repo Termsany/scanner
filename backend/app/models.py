@@ -255,6 +255,33 @@ class SmartWallet(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class SignalOutcome(Base):
+    """What happened after a signal, from GeckoTerminal 15-minute candles of its pool (so tokens that crashed
+    out of the scanner's filters are still measured: no survivorship bias)."""
+
+    __tablename__ = "signal_outcomes"
+    __table_args__ = (Index("ix_signal_outcomes_signal_time", "signal_time"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id", ondelete="CASCADE"), unique=True)
+    chain: Mapped[Chain] = mapped_column(Enum(Chain, native_enum=False, length=16, values_callable=_enum_values))
+    symbol: Mapped[str] = mapped_column(String(64), default="")
+    token_address: Mapped[str] = mapped_column(String(64))
+    score: Mapped[int] = mapped_column(Integer)
+    signal_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    entry_price: Mapped[float | None] = mapped_column(Float)
+    r_1h: Mapped[float | None] = mapped_column(Float)        # % change vs entry
+    r_6h: Mapped[float | None] = mapped_column(Float)
+    r_24h: Mapped[float | None] = mapped_column(Float)
+    peak_pct: Mapped[float | None] = mapped_column(Float)    # best high within 24h (or so far)
+    trough_pct: Mapped[float | None] = mapped_column(Float)  # worst low within 24h (or so far)
+    peak_minutes: Mapped[int | None] = mapped_column(Integer)
+    horizon_hours: Mapped[int] = mapped_column(Integer, default=0)  # 0 / 1 / 6 / 24: horizons measured so far
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(String(160))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class WalletTrade(Base):
     """A buy by a tracked wallet, detected on-chain. Delivered to Telegram once (telegram_sent claim)."""
 

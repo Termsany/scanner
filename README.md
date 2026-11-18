@@ -193,6 +193,15 @@ transfer out (recorded, no alert). Sell alerts show the share of the position so
 average cost. Partial sells within 60 minutes are grouped; a full exit always alerts. On a Solana 429 the
 tracker keeps its place at the last transaction read and resumes on the next poll, so trades are not lost.
 
+## Signal performance
+
+`/performance` (dashboard), `GET /api/performance?hours=168`, and `/performance [24h|7d]` in Telegram show what
+each signal's price did 1h, 6h and 24h after it fired, plus the peak, the drawdown and the share of signals that
+reached +50%, by score range and by chain. Prices come from GeckoTerminal 15-minute candles of the token's pool,
+so tokens that crashed out of the scanner's filters are still counted (no survivorship bias). Each signal is
+measured at most three times (at 1h, 6h, 24h old), at most `PERF_MAX_CALLS_PER_RUN` calls every 5 minutes.
+A daily summary is sent to Telegram at `TELEGRAM_DAILY_REPORT_HOUR` (UTC, default 8).
+
 ## Data sources and limits
 
 | Source | Used for | Keyless limit |

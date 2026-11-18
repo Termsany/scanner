@@ -160,6 +160,18 @@ async def get_smart_wallets(
     )
 
 
+@router.get("/performance")
+async def get_performance(
+    session: Session,
+    hours: Annotated[int, Query(ge=1, le=24 * 30)] = 24 * 7,
+    min_score: Annotated[int, Query(ge=0, le=100)] = 0,
+) -> dict:
+    """How signals performed 1h / 6h / 24h after firing (GeckoTerminal candles; includes tokens that crashed)."""
+    from app.performance import performance_summary
+
+    return await performance_summary(session, hours=hours, min_score=min_score)
+
+
 @router.get("/status", response_model=ScannerStatus)
 async def get_status(session: Session) -> ScannerStatus:
     """KPI bar: active tokens, 24h high-alpha signals, top gainer caught, live pulse."""

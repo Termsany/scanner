@@ -285,3 +285,42 @@ export interface SignalOut {
 
 /** Feed item: a live signal, plus the gain since it fired when loaded from GET /api/signals. */
 export type FeedSignal = LiveSignal & { gain_pct?: number | null };
+
+export interface PerfStats {
+  n: number;
+  n_24h: number;
+  median_1h: number | null;
+  median_6h: number | null;
+  median_24h: number | null;
+  positive_6h_pct: number | null;
+  positive_24h_pct: number | null;
+  hit_50_pct: number | null;
+  median_peak: number | null;
+  median_trough: number | null;
+}
+
+export interface PerfRow {
+  symbol: string;
+  chain: Chain;
+  token_address: string;
+  score: number;
+  signal_time: string;
+  entry_price: number | null;
+  r_1h: number | null;
+  r_6h: number | null;
+  r_24h: number | null;
+  peak_pct: number | null;
+  trough_pct: number | null;
+  peak_minutes: number | null;
+}
+
+export interface Performance {
+  window_hours: number;
+  signals_in_window: number;
+  measured: number;
+  overall: PerfStats;
+  by_score: (PerfStats & { label: string })[];
+  by_chain: (PerfStats & { chain: Chain })[];
+  best: { symbol: string; chain: Chain; score: number; peak_pct: number; peak_minutes: number; token_address: string }[];
+  recent: PerfRow[];
+}

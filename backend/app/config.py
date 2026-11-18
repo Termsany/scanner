@@ -66,6 +66,11 @@ class Settings(BaseSettings):
         "bsc": "https://bsc-rpc.publicnode.com",
     })
 
+    # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)
+    perf_interval_seconds: int = 300
+    perf_max_calls_per_run: int = 15             # = 3 calls/min on average
+    telegram_daily_report_hour: int | None = 8   # UTC hour for the daily performance summary; None = off
+
     # Buy alerts for wallets the operator tracks (/track in Telegram)
     tracker_enabled: bool = True
     tracker_interval_seconds: int = 30

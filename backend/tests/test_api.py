@@ -328,3 +328,14 @@ def test_untrack_from_tracked_menu_and_deeplink(client):
         assert "owner's chat" in client.portal.call(bot.handle_command, f"/start untrack_sol_{sol}", "999")
     finally:
         client.portal.call(bot.close)
+
+
+def test_performance_endpoint_and_telegram_text(client):
+    body = client.get("/api/performance", params={"hours": 24}).json()
+    assert {"overall", "by_score", "by_chain", "recent", "measured", "signals_in_window"} <= set(body)
+    bot = TelegramAlerts(get_settings().model_copy(update={"telegram_bot_token": "123:test", "telegram_chat_id": "1"}))
+    try:
+        text = client.portal.call(bot.handle_command, "/performance 7d", "1")
+        assert "Signal performance · last 7d" in text
+    finally:
+        client.portal.call(bot.close)

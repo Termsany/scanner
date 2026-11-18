@@ -25,7 +25,7 @@ from sqlalchemy import select, update
 
 from app.config import Settings, get_settings
 from app.db import SessionLocal, init_db
-from app.models import Badge, Chain, Signal, SmartWallet, Token, WalletTrade
+from app.models import Badge, Chain, Signal, SmartWallet, Token, TrackerCursor, WalletTrade
 from app.repository import get_token, list_tokens, scanner_status, token_detail
 from app.schemas import LiveSignal, SortField, TokenListParams
 
@@ -36,7 +36,7 @@ BADGE_TEXT = {Badge.strong_alpha: "STRONG ALPHA", Badge.moderate: "MODERATE", Ba
 BACKLOG_MINUTES = 10   # on startup, don't post signals older than this
 SEND_INTERVAL = 1.1    # Telegram allows ~1 msg/s per chat
 MENU_LIMIT = 30        # wallets per /wallets menu
-SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token"}
+SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token", "performance"}
 
 
 def fmt_usd(v: float | None) -> str:
@@ -315,10 +315,58 @@ class TelegramAlerts:
             await asyncio.sleep(SEND_INTERVAL)
         return sent
 
+    async def performance_text(self, hours: int = 24) -> str:
+        from app.performance import performance_summary
+
+        async with SessionLocal() as s:
+            p = await performance_summary(s, hours=hours, recent_limit=0)
+        o = p["overall"]
+        window = f"{hours // 24}d" if hours % 24 == 0 and hours >= 48 else f"{hours}h"
+        if not p["measured"]:
+            return f"📊 <b>Signal performance · last {window}</b>\nNo signal is old enough to measure yet."
+
+        def pc(v):
+            return "—" if v is None else f"{v:.0f}%"
+
+        lines = [f"📊 <b>Signal performance · last {window}</b>",
+                 f"{p['measured']} of {p['signals_in_window']} signals measured (with 24h result: {o['n_24h']})", "",
+                 f"Median change: 1h {fmt_pct(o['median_1h'])} · 6h {fmt_pct(o['median_6h'])} · "
+                 f"24h {fmt_pct(o['median_24h'])}",
+                 f"Up after 6h: {pc(o['positive_6h_pct'])} · after 24h: {pc(o['positive_24h_pct'])}",
+                 f"Reached +50%: <b>{pc(o['hit_50_pct'])}</b> · median drawdown {fmt_pct(o['median_trough'])}",
+                 "", "<b>By score</b>"]
+        for b in p["by_score"]:
+            lines.append(f"{e(b['label'])}: n={b['n']} · 6h {fmt_pct(b['median_6h'])} · "
+                         f"24h {fmt_pct(b['median_24h'])} · +50% hit {pc(b['hit_50_pct'])}")
+        if p["best"]:
+            lines += ["", "<b>Best</b>"] + [f"${e(x['symbol'])} ({x['chain']}, {x['score']}): peak {fmt_pct(x['peak_pct'])}"
+                                            for x in p["best"][:3]]
+        lines.append("<i>Peaks are highs, not executed trades. Not financial advice.</i>")
+        return "\n".join(lines)
+
+    async def _maybe_daily_report(self) -> None:
+        hour = self.settings.telegram_daily_report_hour
+        chat = self.settings.telegram_chat_id
+        now = datetime.now(timezone.utc)
+        if hour is None or not chat or now.hour != hour:
+            return
+        today = now.strftime("%Y-%m-%d")
+        async with SessionLocal() as s:  # claim today's report once, even across restarts / replicas
+            row = await s.get(TrackerCursor, "daily_report")
+            if row is not None and row.value == today:
+                return
+            if row is None:
+                s.add(TrackerCursor(key="daily_report", value=today))
+            else:
+                row.value = today
+            await s.commit()
+        await self.send(chat, await self.performance_text(24))
+
     async def _alerts_loop(self) -> None:
         await self._skip_backlog()
         while True:
             try:
+                await self._maybe_daily_report()
                 await self.deliver_pending()
             except asyncio.CancelledError:
                 raise
@@ -350,6 +398,7 @@ class TelegramAlerts:
                     "/top [solana|ethereum|base|bsc] — top 5 by Alpha Score\n"
                     "/token &lt;address&gt; — score card\n"
                     "/status — scanner health\n"
+                    "/performance [24h|7d] — how signals did after they fired\n"
                     "/wallets — smart wallets with Track buttons\n"
                     "/track &lt;address&gt; [name] — buy alerts for any wallet (chain auto-detected)\n"
                     "/untrack &lt;address&gt;\n"
@@ -444,6 +493,12 @@ class TelegramAlerts:
             if token.pair_url:
                 lines.append(f'<a href="{e(token.pair_url)}">DexScreener</a>')
             return "\n".join(lines)
+
+        if cmd == "/performance":
+            hours = 24
+            if args and args[0].rstrip("dh").isdigit():
+                hours = int(args[0].rstrip("dh")) * (24 if args[0].endswith("d") else 1)
+            return await self.performance_text(min(max(hours, 1), 24 * 30))
 
         if cmd == "/status":
             async with SessionLocal() as s:

@@ -4,6 +4,7 @@ import type {
   ChartData,
   ChartInterval,
   PaginatedTokens,
+  Performance,
   ScannerStatus,
   SignalOut,
   SmartWalletList,
@@ -78,6 +79,9 @@ export const api = {
     ),
 
   status: (signal?: AbortSignal) => request<ScannerStatus>("/api/status", { signal }),
+
+  performance: (hours: number, signal?: AbortSignal) =>
+    request<Performance>(`/api/performance${qs({ hours })}`, { signal }),
 
   signals: (minScore: number, limit = 30, signal?: AbortSignal) =>
     request<SignalOut[]>(`/api/signals${qs({ min_score: minScore, limit })}`, { signal }),
