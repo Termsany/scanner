@@ -94,7 +94,7 @@ def run(settings: Settings, key: str = "good-key"):
     return asyncio.run(go())
 
 
-S = Settings(chains=["solana"], birdeye_daily_call_budget=30)
+S = Settings(chains=["solana"], birdeye_daily_call_budget=30, smart_activity_check_enabled=False)
 
 
 def test_full_pipeline_qualifies_verified_traders_only():

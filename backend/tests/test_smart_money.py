@@ -12,7 +12,8 @@ from app.schemas import HolderEntry, SecurityReport
 from app.smart_money import SmartWalletRegistry, discover, eligible_holders, remove, upsert_manual
 
 NOW = datetime.now(timezone.utc)
-S = Settings(smart_auto_min_wins=2, smart_auto_min_win_rate=0.5, smart_auto_win_gain_pct=50.0)
+S = Settings(smart_auto_min_wins=2, smart_auto_min_win_rate=0.5, smart_auto_win_gain_pct=50.0,
+             smart_activity_check_enabled=False)  # fake addresses; the check has its own tests
 
 
 def h(addr, pct=2.0, **kw):
@@ -136,5 +137,25 @@ def test_untracking_a_scoring_wallet_keeps_it_for_the_menu():
         await set_tracking(s, [Chain.solana], "W3", "", False)
         w = (await s.execute(select(SmartWallet).where(SmartWallet.address == "W3"))).scalar_one()
         assert w.enabled is True and w.track_buys is False  # still a smart wallet -> menu shows "Track"
+
+    _run(body)
+
+
+def test_discovery_stores_bot_rejections_sticky():
+    from app.wallet_check import CheckResult
+
+    class FakeChecker:
+        async def check(self, chain, addr):
+            return CheckResult(addr != "W3", "bot-like activity (999 tx/min)" if addr == "W3" else "ok", {})
+
+    async def body(s):
+        st = await discover(s, S.model_copy(update={"smart_activity_check_enabled": True}), checker=FakeChecker())
+        await s.commit()
+        assert st["added"] == 1 and st["rejected_bots"] == 1
+        rows = {w.address: w for w in (await s.execute(select(SmartWallet))).scalars()}
+        assert rows["W1"].enabled and not rows["W3"].enabled and rows["W3"].disabled_by_user
+        assert rows["W3"].stats["activity_check"].startswith("bot-like")
+        st2 = await discover(s, S, checker=FakeChecker())   # next run: W3 is not re-added or re-enabled
+        assert st2["added"] == 0 and st2["re_enabled"] == 0
 
     _run(body)

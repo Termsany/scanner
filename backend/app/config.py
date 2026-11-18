@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     smart_auto_min_win_rate: float = 0.5
     smart_auto_max_appearances: int = 40
     smart_auto_max_holder_pct: float = 20.0   # bigger holders are usually dev / team wallets
+    smart_activity_check_enabled: bool = True # reject bot / program / contract addresses before adding them
 
     # Direct on-chain holdings check of tracked wallets (free public RPCs; override with your own)
     holdings_check_enabled: bool = True

@@ -11,6 +11,7 @@ os.environ["LLM_API_KEY"] = ""
 os.environ["TELEGRAM_BOT_TOKEN"] = ""
 os.environ["WS_POLL_SECONDS"] = "0.2"
 os.environ["WS_HEARTBEAT_SECONDS"] = "3600"
+os.environ["SMART_ACTIVITY_CHECK_ENABLED"] = "false"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

@@ -151,6 +151,12 @@ Other commands: `birdeye` (run Birdeye discovery now), `candidates`, `add <chain
 permanently disables an auto one), `enable <chain> <address>`, `discover`, `import <file.json>`.
 The dashboard shows the list read-only (`GET /api/smart-wallets`).
 
+**Bot / program filter.** Before a wallet is added automatically (auto-discovery or Birdeye) it must look like a
+person's wallet on-chain: on Solana the account is owned by the System Program, its last 1,000 transactions do not
+all fall within an hour, and fewer than 80% failed; on EVM there is no contract code (EIP-7702 wallets allowed)
+and the nonce is under 50,000. Rejections are stored with the reason and never re-added.
+`python -m app.smart_money audit` re-checks the enabled wallets (`--apply` disables the failures).
+
 **Matching.** Every scan checks each tracked wallet against each scanned token directly on-chain, not just the
 top 10-20 holders: on Solana by deriving the wallet's associated token accounts (SPL Token and Token-2022) and
 reading them in batches of 100 with `getMultipleAccounts`; on Ethereum, Base and BSC with batched ERC-20

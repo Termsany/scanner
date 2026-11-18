@@ -229,7 +229,7 @@ def _audit_holders(tok: Token, audit: SecurityAudit | None) -> list[dict[str, An
     return audit.top_holders or []
 
 
-async def discover(session: AsyncSession, settings: Settings | None = None) -> dict[str, int]:
+async def discover(session: AsyncSession, settings: Settings | None = None, checker=None) -> dict[str, int]:
     s = settings or get_settings()
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=s.smart_auto_lookback_days)
@@ -295,18 +295,38 @@ async def discover(session: AsyncSession, settings: Settings | None = None) -> d
             w.enabled = should
             if st is not None:
                 w.label = f"auto {st.wins}/{st.appearances}"
-    for key in qualified - existing.keys():
-        chain, addr = key
-        st = stats[key]
-        session.add(SmartWallet(
-            chain=chain, address=addr, label=f"auto {st.wins}/{st.appearances}", source=WalletSource.auto,
-            enabled=True, wins=st.wins, appearances=st.appearances,
-            win_tokens=sorted(st.win_tokens, key=lambda x: -x["gain_pct"])[:10],
-        ))
-        added += 1
+    rejected = 0
+    new_keys = qualified - existing.keys()
+    if new_keys:
+        from app.wallet_check import WalletChecker
+
+        own = checker is None
+        checker = checker or WalletChecker(s)
+        try:
+            for key in sorted(new_keys, key=lambda k: k[1]):
+                chain, addr = key
+                st = stats[key]
+                verdict = await checker.check(chain, addr)
+                # A rejected address is stored disabled (sticky) with the reason, so it is not re-checked
+                # or re-added every 30 minutes.
+                session.add(SmartWallet(
+                    chain=chain, address=addr, label=f"auto {st.wins}/{st.appearances}", source=WalletSource.auto,
+                    enabled=verdict.ok, disabled_by_user=not verdict.ok, wins=st.wins, appearances=st.appearances,
+                    win_tokens=sorted(st.win_tokens, key=lambda x: -x["gain_pct"])[:10],
+                    stats={"activity_check": verdict.reason, **verdict.info},
+                ))
+                if verdict.ok:
+                    added += 1
+                else:
+                    rejected += 1
+                    log.info("auto wallet %s %s rejected: %s", chain.value, addr[:8], verdict.reason)
+        finally:
+            if own:
+                await checker.close()
     await session.flush()
     return {"signals": len(rows), "tokens_considered": considered, "wallets_seen": len(stats),
-            "qualified": len(qualified), "added": added, "re_enabled": enabled, "disabled": disabled}
+            "qualified": len(qualified), "added": added, "rejected_bots": rejected, "re_enabled": enabled,
+            "disabled": disabled}
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +468,8 @@ async def _cli(argv: list[str] | None = None) -> None:
     ut.add_argument("chain")
     ut.add_argument("address")
     sub.add_parser("tracked", help="list wallets with buy alerts")
+    au = sub.add_parser("audit", help="re-check enabled auto/birdeye wallets for bot/program/contract activity")
+    au.add_argument("--apply", action="store_true", help="disable the ones that fail (default: report only)")
     be = sub.add_parser("birdeye", help="run Birdeye trader discovery now (uses the daily call budget)")
     be.add_argument("--force-seed", action="store_true", help="re-run today's chain-wide seed")
     be.add_argument("--prune", action="store_true", help="first drop unverified/rejected seed-only candidates")
@@ -489,6 +511,31 @@ async def _cli(argv: list[str] | None = None) -> None:
         elif a.cmd == "tracked":
             for w in await tracked_wallets(s):
                 print(f"{w.chain.value:8} {w.address:44} {w.label}  ({'scoring' if w.enabled else 'watch-only'})")
+        elif a.cmd == "audit":
+            import asyncio as _aio
+
+            from app.wallet_check import WalletChecker
+
+            checker = WalletChecker(get_settings().model_copy(update={"smart_activity_check_enabled": True}))
+            rows = (await s.execute(select(SmartWallet).where(
+                SmartWallet.enabled.is_(True), SmartWallet.source != WalletSource.manual))).scalars().all()
+            failed = 0
+            try:
+                for w in rows:
+                    v = await checker.check(w.chain, w.address)
+                    flag = "OK " if v.ok else "BOT"
+                    print(f"{flag} {w.source.value:7} {w.chain.value:8} {w.address:44} {w.label[:22]:22} {v.reason}")
+                    if not v.ok:
+                        failed += 1
+                        if a.apply:
+                            w.enabled, w.disabled_by_user = False, True
+                            w.stats = {**(w.stats or {}), "activity_check": v.reason}
+                        if w.track_buys:
+                            print("    ^ on the owner's buy-alert list: left as is (tracking is the owner's call)")
+                    await _aio.sleep(0.6)  # gentle on the public RPC
+            finally:
+                await checker.close()
+            print(f"{len(rows)} checked, {failed} failed" + ("" if a.apply else " (report only; add --apply)"))
         elif a.cmd == "discover":
             print(json.dumps(await discover(s), indent=1))
         elif a.cmd == "birdeye":

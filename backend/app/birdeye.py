@@ -272,31 +272,46 @@ async def _verify(session: AsyncSession, client: BirdeyeClient, settings: Settin
     # Repeat winners first, then single-token winners, then chain-wide seeds; bigger PnL first.
     due.sort(key=lambda c: (-len(c.winner_hits), -c.best_pnl_usd))
     existing = {(w.chain, w.address): w for w in (await session.execute(select(SmartWallet))).scalars()}
-    for c in due:
-        summary = await client.pnl_summary(session, c.chain, c.address)
-        ok, reason, wstats = evaluate_summary(summary, settings)
-        c.summary, c.verified_at, c.qualified, c.reject_reason = wstats, datetime.now(timezone.utc), ok, (
-            None if ok else reason)
-        stats["verified"] += 1
-        w = existing.get((c.chain, c.address))
-        if ok:
-            stats["qualified"] += 1
-            if w is None:
-                w = SmartWallet(chain=c.chain, address=c.address, source=WalletSource.birdeye, enabled=True)
-                session.add(w)
-                existing[(c.chain, c.address)] = w
-                stats["added"] += 1
-            if w.source == WalletSource.birdeye:
-                w.label = wallet_label(wstats)
-                w.enabled = not w.disabled_by_user
-            w.stats = wstats
-            w.win_tokens = [{"symbol": h["symbol"], "address": h["address"], "gain_pct": h.get("gain_pct", 0),
-                             "pnl_usd": h["pnl_usd"]} for h in c.winner_hits][:10]
-        elif w is not None and w.source == WalletSource.birdeye and w.enabled:
-            w.enabled = False
-            w.stats = wstats
-            stats["disabled"] += 1
-        await session.flush()
+    checker = None
+    try:
+        for c in due:
+            summary = await client.pnl_summary(session, c.chain, c.address)
+            ok, reason, wstats = evaluate_summary(summary, settings)
+            w = existing.get((c.chain, c.address))
+            if ok and w is None:  # new wallet: make sure it is a person's wallet, not a bot / contract
+                from app.wallet_check import WalletChecker
+
+                if checker is None:
+                    checker = WalletChecker(settings)
+                verdict = await checker.check(c.chain, c.address)
+                wstats["activity_check"] = verdict.reason
+                if not verdict.ok:
+                    ok, reason = False, verdict.reason
+                    stats["rejected_bots"] = stats.get("rejected_bots", 0) + 1
+            c.summary, c.verified_at, c.qualified, c.reject_reason = wstats, datetime.now(timezone.utc), ok, (
+                None if ok else reason)
+            stats["verified"] += 1
+            if ok:
+                stats["qualified"] += 1
+                if w is None:
+                    w = SmartWallet(chain=c.chain, address=c.address, source=WalletSource.birdeye, enabled=True)
+                    session.add(w)
+                    existing[(c.chain, c.address)] = w
+                    stats["added"] += 1
+                if w.source == WalletSource.birdeye:
+                    w.label = wallet_label(wstats)
+                    w.enabled = not w.disabled_by_user
+                w.stats = wstats
+                w.win_tokens = [{"symbol": h["symbol"], "address": h["address"], "gain_pct": h.get("gain_pct", 0),
+                                 "pnl_usd": h["pnl_usd"]} for h in c.winner_hits][:10]
+            elif w is not None and w.source == WalletSource.birdeye and w.enabled:
+                w.enabled = False
+                w.stats = wstats
+                stats["disabled"] += 1
+            await session.flush()
+    finally:
+        if checker is not None:
+            await checker.close()
 
 
 async def discover_traders(session: AsyncSession, settings: Settings | None = None,
