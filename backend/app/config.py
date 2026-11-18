@@ -52,6 +52,19 @@ class Settings(BaseSettings):
     smart_auto_max_appearances: int = 40
     smart_auto_max_holder_pct: float = 20.0   # bigger holders are usually dev / team wallets
 
+    # Birdeye trader discovery (free "Standard" key: 30k CU/month, 30 CU per call, 1 req/s)
+    birdeye_api_key: str | None = None
+    birdeye_interval_minutes: int = 120
+    birdeye_daily_call_budget: int = 30          # 30/day = 900/month, under the free 1,000
+    birdeye_seed_limit: int = 50                 # chain-wide weekly PnL leaders per chain per day
+    birdeye_seed_max_trades_week: int = 1_500    # more than this is a bot / market maker
+    birdeye_min_token_pnl_usd: float = 1_000.0   # min PnL on a winner token to become a candidate
+    birdeye_min_win_rate: float = 0.55           # 30-day win rate to qualify
+    birdeye_min_realized_usd_30d: float = 5_000.0
+    birdeye_min_trades_30d: int = 20
+    birdeye_max_trades_30d: int = 5_000
+    birdeye_reverify_days: int = 7
+
     # --- Optional API keys (all endpoints used work keyless at low volume) --
     goplus_access_token: str | None = None
     rugcheck_api_key: str | None = None

@@ -132,6 +132,12 @@ Alpha Score. Wallets come from two sources:
 - **manual**: yours. Either list them in `backend/data/smart_wallets.json` (format in
   `smart_wallets.example.json`; the worker re-imports the file whenever it changes, and the folder is mounted
   into the containers, so no rebuild) or use the CLI below.
+- **birdeye**: verified profitable traders (needs a free `BIRDEYE_API_KEY`). Every 2 hours the worker pulls the
+  most profitable traders of each token that rallied 50%+ after a signal (dev / sniper / bundler / insider tags
+  dropped), plus once a day the week's top PnL wallets per chain (bot-like trade counts dropped), then checks each
+  candidate's last 30 days with Birdeye's wallet PnL summary: win rate >= 55%, realized profit >= $5,000 and
+  20–5,000 trades. Calls are logged and capped at 30 per 24h to stay inside the free plan (30 CU each, 30k CU/month).
+  `python -m app.smart_money candidates` shows every candidate and why it was rejected.
 - **auto**: discovered every 30 minutes from the scanner's own history. A wallet qualifies when, at signal time,
   it was a top holder of at least 2 tokens that later rallied 50%+, with a win rate of at least 50% across the
   signalled tokens it held. Pools, burn addresses, contracts, RugCheck "insiders" and holders above 20% are
@@ -141,7 +147,7 @@ Alpha Score. Wallets come from two sources:
 ssh -i $HOME\.ssh\claude_vps root@148.230.113.18 "cd /opt/alpha-scanner && docker compose exec api python -m app.smart_money list --all"
 ```
 
-Other commands: `add <chain> <address> [label]`, `remove <chain> <address>` (deletes a manual wallet;
+Other commands: `birdeye` (run Birdeye discovery now), `candidates`, `add <chain> <address> [label]`, `remove <chain> <address>` (deletes a manual wallet;
 permanently disables an auto one), `enable <chain> <address>`, `discover`, `import <file.json>`.
 The dashboard shows the list read-only (`GET /api/smart-wallets`).
 

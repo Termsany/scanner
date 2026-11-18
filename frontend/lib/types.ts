@@ -250,11 +250,12 @@ export interface SmartWallet {
   chain: Chain;
   address: string;
   label: string;
-  source: "manual" | "auto";
+  source: "manual" | "auto" | "birdeye";
   enabled: boolean;
   wins: number;
   appearances: number;
-  win_tokens: { symbol: string; address: string; gain_pct: number }[];
+  win_tokens: { symbol: string; address: string; gain_pct: number; pnl_usd?: number }[];
+  stats: { win_rate?: number; realized_usd_30d?: number; trades_30d?: number } | null;
   updated_at: string;
 }
 
@@ -262,6 +263,7 @@ export interface SmartWalletList {
   items: SmartWallet[];
   enabled_manual: number;
   enabled_auto: number;
+  enabled_birdeye: number;
   disabled: number;
 }
 

@@ -221,6 +221,7 @@ class Signal(Base):
 class WalletSource(str, enum.Enum):
     manual = "manual"   # added by the operator (CLI or data/smart_wallets.json)
     auto = "auto"       # discovered from holders of tokens that rallied after a signal
+    birdeye = "birdeye" # profitable traders found and verified with the Birdeye API
 
 
 class SmartWallet(Base):
@@ -244,9 +245,56 @@ class SmartWallet(Base):
     wins: Mapped[int] = mapped_column(Integer, default=0)          # winner tokens it held at signal time
     appearances: Mapped[int] = mapped_column(Integer, default=0)   # signalled tokens it held
     win_tokens: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{"symbol","address","gain_pct"}]
+    # Verified performance (Birdeye wallet PnL summary): {"win_rate","realized_usd_30d","trades_30d",...}
+    stats: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class BirdeyeCall(Base):
+    """One row per Birdeye request: enforces the daily budget (free plan: ~1,000 calls / month)."""
+
+    __tablename__ = "birdeye_calls"
+    __table_args__ = (Index("ix_birdeye_calls_created", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    endpoint: Mapped[str] = mapped_column(String(64))
+    chain: Mapped[str] = mapped_column(String(16))
+    status: Mapped[int] = mapped_column(Integer, default=0)   # HTTP status, 0 = network error
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TraderCandidate(Base):
+    """A wallet seen as a profitable trader, waiting for (or holding the result of) verification."""
+
+    __tablename__ = "trader_candidates"
+    __table_args__ = (UniqueConstraint("chain", "address", name="uq_trader_candidate"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain: Mapped[Chain] = mapped_column(Enum(Chain, native_enum=False, length=16, values_callable=_enum_values))
+    address: Mapped[str] = mapped_column(String(64))
+    origins: Mapped[list[Any]] = mapped_column(JSON, default=list)     # ["gainers_1W", "winner:<symbol>"]
+    winner_hits: Mapped[list[Any]] = mapped_column(JSON, default=list) # [{"symbol","address","pnl_usd"}]
+    best_pnl_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    qualified: Mapped[bool] = mapped_column(Boolean, default=False)
+    reject_reason: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TraderTokenFetch(Base):
+    """Winner tokens whose top traders were already pulled (each costs one Birdeye call)."""
+
+    __tablename__ = "trader_token_fetches"
+    __table_args__ = (UniqueConstraint("chain", "token_address", name="uq_trader_token_fetch"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain: Mapped[Chain] = mapped_column(Enum(Chain, native_enum=False, length=16, values_callable=_enum_values))
+    token_address: Mapped[str] = mapped_column(String(64))
+    traders_found: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ScannerRun(Base):

@@ -87,6 +87,7 @@ class SmartWalletRegistry:
         self.wallets: dict[Chain, dict[str, str]] = {}
         self._file_mtime: float | None = None
         self._last_discovery: datetime | None = None
+        self._last_birdeye: datetime | None = None
 
     @property
     def size(self) -> int:
@@ -134,9 +135,26 @@ class SmartWalletRegistry:
         log.info("Smart wallet discovery: %s", stats)
         return stats
 
+    async def maybe_discover_birdeye(self, session: AsyncSession) -> dict[str, Any] | None:
+        if not self.settings.birdeye_api_key:
+            return None
+        now = datetime.now(timezone.utc)
+        if self._last_birdeye and now - self._last_birdeye < timedelta(minutes=self.settings.birdeye_interval_minutes):
+            return None
+        self._last_birdeye = now
+        from app.birdeye import discover_traders
+
+        try:
+            stats = await discover_traders(session, self.settings)
+        finally:
+            await session.commit()  # keep the call log even if discovery stopped early
+        log.info("Birdeye trader discovery: %s", stats)
+        return stats
+
     async def prepare_cycle(self, session: AsyncSession) -> None:
         await self.sync_file(session)
         await self.maybe_discover(session)
+        await self.maybe_discover_birdeye(session)
         await self.refresh(session)
 
     def evaluate(self, chain: Chain, security: SecurityReport | None) -> SmartMoneyInfo:
@@ -175,6 +193,26 @@ async def _peak_gains(session: AsyncSession, rows: list[tuple[Signal, Token]]) -
         best = max(p for p in (peak, tok.price_usd, sig.price_usd) if p is not None)
         gains[sig.id] = (best / sig.price_usd - 1.0) * 100.0
     return gains
+
+
+async def winner_tokens(session: AsyncSession, settings: Settings | None = None) -> list[tuple[Token, float]]:
+    """Tokens whose price peaked >= SMART_AUTO_WIN_GAIN_PCT after their first signal in the lookback,
+    newest signal first, with the peak gain in percent."""
+    s = settings or get_settings()
+    since = datetime.now(timezone.utc) - timedelta(days=s.smart_auto_lookback_days)
+    rows = (await session.execute(
+        select(Signal, Token).join(Token, Token.id == Signal.token_id)
+        .where(Signal.created_at >= since).order_by(Signal.created_at.asc())
+    )).all()
+    first: dict[int, tuple[Signal, Token]] = {}
+    for sig, tok in rows:
+        first.setdefault(tok.id, (sig, tok))
+    pairs = list(first.values())
+    gains = await _peak_gains(session, pairs)
+    won = [(tok, gains[sig.id], sig.created_at) for sig, tok in pairs
+           if gains.get(sig.id, 0.0) >= s.smart_auto_win_gain_pct]
+    won.sort(key=lambda x: x[2], reverse=True)
+    return [(tok, gain) for tok, gain, _ in won]
 
 
 def _audit_holders(tok: Token, audit: SecurityAudit | None) -> list[dict[str, Any]]:
@@ -340,6 +378,8 @@ async def _cli(argv: list[str] | None = None) -> None:
         if name == "add":
             sp.add_argument("label", nargs="*")
     sub.add_parser("discover")
+    sub.add_parser("birdeye", help="run Birdeye trader discovery now (uses the daily call budget)")
+    sub.add_parser("candidates", help="show Birdeye trader candidates and why they were rejected")
     imp = sub.add_parser("import")
     imp.add_argument("file", type=Path)
     a = p.parse_args(argv)
@@ -372,6 +412,22 @@ async def _cli(argv: list[str] | None = None) -> None:
                 print("enabled")
         elif a.cmd == "discover":
             print(json.dumps(await discover(s), indent=1))
+        elif a.cmd == "birdeye":
+            from app.birdeye import discover_traders
+
+            print(json.dumps(await discover_traders(s), indent=1, default=str))
+        elif a.cmd == "candidates":
+            from app.models import TraderCandidate
+
+            rows = (await s.execute(select(TraderCandidate).order_by(TraderCandidate.qualified.desc(),
+                                                                     TraderCandidate.best_pnl_usd.desc()))).scalars().all()
+            for c in rows:
+                st = c.summary or {}
+                state = "OK " if c.qualified else ("-- " if c.verified_at else ".. ")
+                print(f"{state} {c.chain.value:8} {c.address:44} best ${c.best_pnl_usd:>10,.0f} "
+                      f"wr {st.get('win_rate', 0):.0%} 30d ${st.get('realized_usd_30d', 0):>10,.0f} "
+                      f"{c.reject_reason or ''} {','.join(c.origins)[:40]}")
+            print(f"{len(rows)} candidate(s)")
         elif a.cmd == "import":
             print(f"imported {await import_file(s, a.file)} wallet entries")
         await s.commit()

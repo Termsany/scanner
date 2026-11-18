@@ -348,11 +348,12 @@ class SmartWalletOut(_Model):
     chain: Chain
     address: str
     label: str
-    source: str            # manual | auto
+    source: str            # manual | auto | birdeye
     enabled: bool
     wins: int
     appearances: int
     win_tokens: list[dict[str, Any]] = Field(default_factory=list)
+    stats: dict[str, Any] | None = None
     updated_at: datetime
 
 
@@ -360,6 +361,7 @@ class SmartWalletList(_Model):
     items: list[SmartWalletOut]
     enabled_manual: int
     enabled_auto: int
+    enabled_birdeye: int = 0
     disabled: int
 
 

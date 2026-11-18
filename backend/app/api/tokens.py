@@ -150,9 +150,10 @@ async def get_smart_wallets(
     return SmartWalletList(
         items=[SmartWalletOut(chain=w.chain, address=w.address, label=w.label, source=w.source.value,
                               enabled=w.enabled, wins=w.wins, appearances=w.appearances,
-                              win_tokens=w.win_tokens or [], updated_at=utc(w.updated_at)) for w in rows],
+                              win_tokens=w.win_tokens or [], stats=w.stats, updated_at=utc(w.updated_at)) for w in rows],
         enabled_manual=counts.get((WalletSource.manual, True), 0),
         enabled_auto=counts.get((WalletSource.auto, True), 0),
+        enabled_birdeye=counts.get((WalletSource.birdeye, True), 0),
         disabled=sum(n for (src, en), n in counts.items() if not en),
     )
 
