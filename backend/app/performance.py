@@ -129,6 +129,7 @@ async def update_outcomes(session: AsyncSession, gecko, settings: Settings | Non
            if tok.pair_address and _due(have.get(sig.id), (now - utc(sig.created_at)).total_seconds() / 3600)]
     # Oldest first: a signal about to pass 24h must not miss its last measurement.
     calls = measured = from_snaps = 0
+    gecko_down = False
     now_ts = int(now.timestamp())
     for sig, tok in due:
         t0 = int(utc(sig.created_at).timestamp())
@@ -154,8 +155,8 @@ async def update_outcomes(session: AsyncSession, gecko, settings: Settings | Non
             from_snaps += 1
             measured += 1
             continue
-        # 2) gaps: GeckoTerminal candles, within this run's call budget
-        if calls >= s.perf_max_calls_per_run:
+        # 2) gaps: GeckoTerminal candles, within this run's call budget (skipped once it refused this run)
+        if gecko_down or calls >= s.perf_max_calls_per_run:
             continue
         calls += 1
         try:
@@ -164,8 +165,10 @@ async def update_outcomes(session: AsyncSession, gecko, settings: Settings | Non
         except Exception as exc:  # noqa: BLE001
             # Transient (rate limit / network): not counted as an attempt; stop spending calls this run.
             o.error = f"{type(exc).__name__}: {exc}"[:160]
-            log.info("performance: GeckoTerminal unavailable (%s); stopping this run", type(exc).__name__)
-            break
+            log.info("performance: GeckoTerminal unavailable (%s); snapshots only for the rest of this run",
+                     type(exc).__name__)
+            gecko_down = True
+            continue
         o.attempts += 1
         res = compute_outcome(sig.price_usd or 0.0, t0, candles, now_ts)
         if res["horizon_hours"] == 0 and not candles:

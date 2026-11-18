@@ -115,9 +115,10 @@ def test_rate_limit_is_not_an_attempt_and_stops_the_run():
         g = Flaky({})
         st = await update_outcomes(s, g, Settings(perf_max_calls_per_run=10))
         await s.commit()
-        assert g.calls == 1 and st["measured"] == 0           # stopped after the first failure
-        o = (await s.execute(select(SignalOutcome))).scalars().one()
-        assert o.attempts == 0 and "unavailable" in o.error   # retried later, never given up for it
+        assert g.calls == 1 and st["measured"] == 0           # no more candle calls after the first failure
+        rows = (await s.execute(select(SignalOutcome))).scalars().all()
+        failed = [o for o in rows if o.error]
+        assert len(failed) == 1 and failed[0].attempts == 0 and "unavailable" in failed[0].error
     _db(body)
 
 
