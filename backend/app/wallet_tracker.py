@@ -56,6 +56,8 @@ EVM_QUOTES = {
 EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 MIN_SOL_RECEIVED_LAMPORTS = 1_000_000   # 0.001 SOL: more than a fee refund
 FULL_EXIT_PCT = 99.0
+SIG_PAGE = 1000                         # getSignaturesForAddress max page
+QUOTA_BACKOFF_SECONDS = 1800            # provider says the plan's usage limit is reached
 
 
 @dataclass
@@ -242,18 +244,27 @@ class WalletTracker:
             latest = await self._sol("getSignaturesForAddress", [wallet, {"limit": 1}]) or []
             await self._set_cursor(session, key, latest[0]["signature"] if latest else "-")
             return []  # start from now, never replay history
-        opts: dict[str, Any] = {"limit": self.s.tracker_max_tx_per_poll, "commitment": "confirmed"}
+        # One call returns up to 1,000 signatures since the cursor; only successful ones cost a getTransaction,
+        # capped at TRACKER_MAX_TX_PER_POLL per poll (the cursor resumes the rest next poll).
+        opts: dict[str, Any] = {"limit": SIG_PAGE, "commitment": "confirmed"}
         if cursor != "-":
             opts["until"] = cursor
         sigs = await self._sol("getSignaturesForAddress", [wallet, opts]) or []
         if not sigs:
             return []
-        if len(sigs) >= self.s.tracker_max_tx_per_poll:
-            log.warning("%s: %d+ new transactions since last poll; older ones in between are skipped",
-                        wallet[:6], len(sigs))
+        if len(sigs) >= SIG_PAGE and cursor != "-":
+            # >1,000 transactions reference this address within one poll: a bot / program account, not a
+            # person trading. Catching up is impossible on a public RPC; skip ahead and say so.
+            log.warning("%s: %d+ transactions per poll (bot/program-like); skipping ahead", wallet[:6], SIG_PAGE)
+            await self._set_cursor(session, key, sigs[0]["signature"])
+            return []
         trades: list[Trade] = []
+        fetched = 0
         for item in reversed(sigs):  # oldest first; the cursor only moves past what was actually read
+            if item.get("err") is None and fetched >= self.s.tracker_max_tx_per_poll:
+                break  # budget for this poll used; resume here next poll
             if item.get("err") is None:
+                fetched += 1
                 # HTTP errors (429, timeouts) propagate: the cursor stays at the last transaction read, so the
                 # next poll retries from there and nothing is lost.
                 try:
@@ -467,11 +478,13 @@ class WalletTracker:
                 self._backoff.pop(chain, None)
             except Exception as exc:
                 errors += 1
-                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                quota = isinstance(exc, RuntimeError) and "limit" in str(exc).lower()
+                if quota or (isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429):
                     _, prev = self._backoff.get(chain, (0.0, 0))
-                    delay = min(max(60, prev * 2), self.s.tracker_backoff_max_seconds)
+                    delay = QUOTA_BACKOFF_SECONDS if quota else min(max(60, prev * 2), self.s.tracker_backoff_max_seconds)
                     self._backoff[chain] = (now + delay, delay)
-                    log.warning("%s rate-limited (429); pausing it for %ss", chain.value, delay)
+                    log.warning("%s %s; pausing it for %ss", chain.value,
+                                "RPC plan usage limit reached" if quota else "rate-limited (429)", delay)
                 else:
                     log.warning("%s poll failed: %r", chain.value, exc)
         alerts = await self.record(session, trades, labels)

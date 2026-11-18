@@ -274,3 +274,50 @@ def test_solana_429_keeps_cursor_at_last_read_tx():
         assert (await s.get(TrackerCursor, f"sol:{W}")).value == "A"
         await t.http.aclose()
     _db(body)
+
+
+def test_solana_bot_like_address_skips_ahead_and_budget_resumes():
+    from app.wallet_tracker import SIG_PAGE
+
+    mode = {"n": SIG_PAGE}
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "getSignaturesForAddress":
+            n = mode["n"]
+            return httpx.Response(200, json={"result": [{"signature": f"S{i}", "err": None if i % 2 == 0 else {"x": 1}}
+                                                        for i in range(n, 0, -1)]})  # newest first
+        return httpx.Response(200, json={"result": {"meta": {"err": None, "preTokenBalances": [],
+                                                              "postTokenBalances": []}}})
+
+    async def body(s):
+        s.add(TrackerCursor(key=f"sol:{W}", value="S0"))
+        await s.flush()
+        t = WalletTracker(S.model_copy(update={"solana_rpc_url": "https://rpc.test", "tracker_max_tx_per_poll": 3,
+                                               "tracker_solana_min_interval": 0.0}),
+                          http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        assert await t.poll_solana(s, W) == []                       # 1,000 sigs in one poll: bot-like
+        assert (await s.get(TrackerCursor, f"sol:{W}")).value == f"S{SIG_PAGE}"   # jumped to newest
+        mode["n"] = 10                                               # S1..S10; even = successful
+        (await s.get(TrackerCursor, f"sol:{W}")).value = "S0"
+        await t.poll_solana(s, W)
+        # 3 successful reads allowed (S2, S4, S6); failed ones cost nothing; stops before S8
+        assert (await s.get(TrackerCursor, f"sol:{W}")).value == "S7"
+        await t.http.aclose()
+    _db(body)
+
+
+def test_rpc_quota_error_pauses_chain_for_30_minutes():
+    def handler(req):
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "error": {
+            "code": -32001, "message": "You've reached the usage limit for your current plan."}})
+
+    async def body(s):
+        s.add(SmartWallet(chain=Chain.bsc, address=EW, label="Whale", source=WalletSource.manual,
+                          enabled=False, track_buys=True))
+        await s.commit()
+        t = WalletTracker(S, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        assert (await t.poll_once(s))["errors"] == 1
+        assert t._backoff[Chain.bsc][1] == 1800
+        await t.http.aclose()
+    _db(body)
