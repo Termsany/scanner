@@ -635,6 +635,7 @@ class Scanner:
         self.smart_money = SmartWalletRegistry(self.settings)
         self.holdings = HoldingsChecker(self.settings)
         self._security_sem = asyncio.Semaphore(6)
+        self._cycle_no = 0
 
     # ---- 1. discovery ---------------------------------------------------
     async def discover(self, stats: CycleStats) -> dict[tuple[Chain, str], set[str]]:
@@ -645,10 +646,14 @@ class Scanner:
             "dex_boost_top": self.dex.top_boosts(),
             "dex_profile_latest": self.dex.latest_profiles(),
         }
+        # GeckoTerminal's free API (~30 calls/min per IP) is shared with performance measurement and the
+        # inspector chart; its trending/new lists change slowly, so poll them every Nth cycle only.
+        self._cycle_no += 1
         gecko_jobs = {}
-        for chain in self.chains:
-            gecko_jobs[(chain, "gecko_trending")] = self.gecko.trending_pools(chain)
-            gecko_jobs[(chain, "gecko_new")] = self.gecko.new_pools(chain)
+        if (self._cycle_no - 1) % max(1, self.settings.gecko_discovery_every_cycles) == 0:
+            for chain in self.chains:
+                gecko_jobs[(chain, "gecko_trending")] = self.gecko.trending_pools(chain)
+                gecko_jobs[(chain, "gecko_new")] = self.gecko.new_pools(chain)
 
         dex_results = await asyncio.gather(*dex_jobs.values(), return_exceptions=True)
         for source, res in zip(dex_jobs.keys(), dex_results):

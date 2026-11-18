@@ -66,6 +66,8 @@ class Settings(BaseSettings):
         "bsc": "https://bsc-rpc.publicnode.com",
     })
 
+    gecko_discovery_every_cycles: int = 3        # GeckoTerminal trending/new lists: 8 calls -> every 3rd cycle
+
     # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)
     perf_interval_seconds: int = 300
     perf_max_calls_per_run: int = 15             # = 3 calls/min on average
