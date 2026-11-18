@@ -339,3 +339,34 @@ def test_performance_endpoint_and_telegram_text(client):
         assert "Signal performance · last 7d" in text
     finally:
         client.portal.call(bot.close)
+
+
+def test_signal_alerts_off_sends_only_wallet_alerts(client):
+    from sqlalchemy import select as _select
+
+    from app.models import Chain, Signal, WalletTrade
+
+    async def seed():
+        async with SessionLocal() as s:
+            s.add(WalletTrade(chain=Chain.solana, wallet="W", wallet_label="Whale", token_address="Mint9",
+                              symbol="GEM", tx_hash="tx-only-wallet", amount=10, usd_value=500, side="buy",
+                              kind="buy", telegram_sent=False))
+            await s.commit()
+            return (await s.execute(_select(Signal).where(Signal.telegram_sent.is_(False)))).scalars().all()
+
+    unsent_signals = client.portal.call(seed)
+    assert unsent_signals  # fixture signals are still pending
+    bot = TelegramAlerts(get_settings().model_copy(update={
+        "telegram_bot_token": "123:test", "telegram_chat_id": "1", "telegram_signal_alerts": False}))
+    sent = []
+
+    async def fake_send(chat, text, markup=None):
+        sent.append(text)
+        return True
+
+    bot.send = fake_send
+    try:
+        client.portal.call(bot.deliver_pending)
+        assert sent and all("WALLET" in t for t in sent) and not any("ALPHA" in t and "/100" in t for t in sent)
+    finally:
+        client.portal.call(bot.close)

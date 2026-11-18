@@ -140,6 +140,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None      # channel / group / user that receives signals
     telegram_min_score: int = 80
+    telegram_signal_alerts: bool = True       # false = Telegram sends only tracked-wallet buy/sell alerts
     telegram_commands_enabled: bool = True   # /top, /token, /status via long polling
     public_dashboard_url: str | None = None  # deep links in alerts, e.g. https://scanner.example.com
 

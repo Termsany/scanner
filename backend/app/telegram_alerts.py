@@ -273,6 +273,10 @@ class TelegramAlerts:
         chat = self.settings.telegram_chat_id
         if not chat:
             return 0
+        if not self.settings.telegram_signal_alerts:
+            # Signal alerts off: only wallet buy/sell alerts go out. Signals stay on the dashboard, /top and
+            # /performance; they are not queued (switching back on later does not replay old ones).
+            return await self.deliver_trades(chat)
         async with SessionLocal() as s:
             pending = (await s.execute(
                 select(Signal).where(Signal.telegram_sent.is_(False), Signal.score >= self.settings.telegram_min_score)
