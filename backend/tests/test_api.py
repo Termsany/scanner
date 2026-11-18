@@ -294,3 +294,37 @@ def test_track_autodetect_deeplink_and_wallet_buttons(client):
     finally:
         client.portal.call(bot.handle_command, f"/untrack evm {evm}", owner)
         client.portal.call(bot.close)
+
+
+def test_untrack_from_tracked_menu_and_deeplink(client):
+    owner = "4242"
+    bot = TelegramAlerts(get_settings().model_copy(update={"telegram_bot_token": "123:test", "telegram_chat_id": owner}))
+    sol = "8vVrVudDd2DvL5jUGFZWDSh95VjhLpeETRAp1kmFnb61"
+    evm = "0xb5002f252e8153edf930d13f7979fedbbb086401"
+    calls = []
+
+    async def fake_call(method, payload, timeout=None):
+        calls.append((method, payload))
+        return {"ok": True}
+
+    bot._call = fake_call
+    try:
+        client.portal.call(bot.handle_command, f"/track {sol} Sol Whale", owner)
+        client.portal.call(bot.handle_command, f"/track {evm} Evm Whale", owner)
+        text, markup = client.portal.call(bot.tracked_menu)
+        rows = [r[0] for r in markup["inline_keyboard"]]
+        assert len(rows) == 2 and "(base, bsc, ethereum" in text     # EVM address grouped into one button
+        evm_btn = next(b for b in rows if "Evm Whale" in b["text"])
+        assert evm_btn["text"].startswith("✖ Untrack") and evm_btn["callback_data"].startswith("x:")
+        # one tap untracks the EVM address on all three chains and re-renders the tracked list
+        client.portal.call(bot.handle_callback, {"id": "c1", "data": evm_btn["callback_data"],
+                                                 "message": {"chat": {"id": int(owner)}, "message_id": 3}})
+        edited = next(p for m, p in calls if m == "editMessageText")
+        assert "Evm Whale" not in edited["text"] and "Sol Whale" in edited["text"]
+        # dashboard deep link: /start untrack_sol_<addr>
+        r = client.portal.call(bot.handle_command, f"/start untrack_sol_{sol}", owner)
+        assert "Buy alerts off" in r
+        assert "No tracked wallets" in client.portal.call(bot.tracked_menu)[0]
+        assert "owner's chat" in client.portal.call(bot.handle_command, f"/start untrack_sol_{sol}", "999")
+    finally:
+        client.portal.call(bot.close)

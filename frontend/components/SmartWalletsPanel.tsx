@@ -1,6 +1,6 @@
 "use client";
 
-import { ExternalLink, Eye, Users } from "lucide-react";
+import { ExternalLink, Eye, Users, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
@@ -96,11 +96,25 @@ export function SmartWalletsPanel({ refreshKey }: { refreshKey: number }) {
                       <Eye className="size-2.5" /> Track
                     </a>
                   )}
-                  {w.track_buys && (
-                    <span title="Telegram buy alerts on" className="inline-flex items-center gap-0.5 rounded bg-warn-soft px-1 text-[9.5px] font-semibold tracking-wider text-warn uppercase">
-                      <Eye className="size-2.5" /> tracked
-                    </span>
-                  )}
+                  {w.track_buys &&
+                    (data.telegram_bot ? (
+                      <a
+                        href={`https://t.me/${data.telegram_bot}?start=untrack_${w.chain === "solana" ? "sol" : "evm"}_${w.address}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Buy/sell alerts are on. Click to open the bot and press Start to stop them (owner chat only)"
+                        className="group/untrack inline-flex items-center gap-0.5 rounded bg-warn-soft px-1 text-[9.5px] font-semibold tracking-wider text-warn uppercase hover:bg-bear-soft hover:text-bear"
+                      >
+                        <Eye className="size-2.5 group-hover/untrack:hidden" />
+                        <X className="hidden size-2.5 group-hover/untrack:inline" />
+                        <span className="group-hover/untrack:hidden">tracked</span>
+                        <span className="hidden group-hover/untrack:inline">untrack</span>
+                      </a>
+                    ) : (
+                      <span title="Buy/sell alerts on" className="inline-flex items-center gap-0.5 rounded bg-warn-soft px-1 text-[9.5px] font-semibold tracking-wider text-warn uppercase">
+                        <Eye className="size-2.5" /> tracked
+                      </span>
+                    ))}
                 </div>
                 <a
                   href={walletUrl(w.chain, w.address)}

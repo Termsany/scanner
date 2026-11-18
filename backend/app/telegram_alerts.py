@@ -207,11 +207,33 @@ class TelegramAlerts:
                               "callback_data": f"{'u' if w.track_buys else 't'}:{w.id}"}])
         return "\n".join(lines), {"inline_keyboard": keyboard}
 
+    async def tracked_menu(self) -> tuple[str, dict[str, Any] | None]:
+        """Tracked wallets, one ✖ Untrack button per address (an EVM address covers all its chains)."""
+        from app.smart_money import tracked_wallets
+
+        async with SessionLocal() as s:
+            rows = await tracked_wallets(s)
+        if not rows:
+            return ("No tracked wallets. Add one with <code>track &lt;address&gt; [name]</code> "
+                    "or the Track buttons in /wallets."), None
+        by_addr: dict[str, list[SmartWallet]] = {}
+        for w in rows:
+            by_addr.setdefault(w.address, []).append(w)
+        lines = [f"<b>Tracked wallets ({len(by_addr)})</b> — tap to stop buy/sell alerts\n"]
+        keyboard = []
+        for addr, ws in by_addr.items():
+            label = next((w.label for w in ws if w.enabled), ws[0].label)
+            nets = ", ".join(w.chain.value for w in ws)
+            lines.append(f"👀 <b>{e(label)}</b> ({nets}{'' if any(w.enabled for w in ws) else ', watch-only'})\n"
+                         f"<code>{e(addr)}</code>")
+            keyboard.append([{"text": f"✖ Untrack {label[:28]}", "callback_data": f"x:{ws[0].id}"}])
+        return "\n".join(lines), {"inline_keyboard": keyboard}
+
     async def handle_callback(self, cq: dict[str, Any]) -> None:
         msg = cq.get("message") or {}
         chat_id = (msg.get("chat") or {}).get("id")
         data = str(cq.get("data") or "")
-        if not self._is_owner(chat_id) or not re.fullmatch(r"[tu]:\d+", data):
+        if not self._is_owner(chat_id) or not re.fullmatch(r"[tux]:\d+", data):
             await self._call("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Not allowed"})
             return
         from app.smart_money import set_tracking
@@ -220,14 +242,19 @@ class TelegramAlerts:
         async with SessionLocal() as s:
             w = await s.get(SmartWallet, int(wid))
             if w is not None:
-                await set_tracking(s, [w.chain], w.address, "", action == "t")
-                await s.commit()
                 label = w.label
+                if action == "x":  # from /tracked: untrack this address on every chain it is tracked on
+                    chains = [c for (c,) in (await s.execute(select(SmartWallet.chain).where(
+                        SmartWallet.address == w.address, SmartWallet.track_buys.is_(True)))).all()] or [w.chain]
+                    await set_tracking(s, chains, w.address, "", False)
+                else:
+                    await set_tracking(s, [w.chain], w.address, "", action == "t")
+                await s.commit()
         note = ("Wallet not found" if w is None else
                 f"Tracking {label}" if action == "t" else f"Stopped tracking {label}")
         log.info("callback %s -> %s", action, note)
         await self._call("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": note[:190]})
-        text, markup = await self.wallets_menu()
+        text, markup = await (self.tracked_menu() if action == "x" else self.wallets_menu())
         await self._call("editMessageText", {"chat_id": chat_id, "message_id": msg.get("message_id"), "text": text,
                                              "parse_mode": "HTML", "disable_web_page_preview": True,
                                              "reply_markup": markup or {"inline_keyboard": []}})
@@ -314,6 +341,9 @@ class TelegramAlerts:
         if cmd == "/start" and args and args[0].startswith(("track_sol_", "track_evm_")):
             kind, addr = args[0][6:9], args[0][10:]
             cmd, args = "/track", ["solana" if kind == "sol" else "evm", addr]
+        elif cmd == "/start" and args and args[0].startswith(("untrack_sol_", "untrack_evm_")):
+            kind, addr = args[0][8:11], args[0][12:]
+            cmd, args = "/untrack", ["solana" if kind == "sol" else "evm", addr]
 
         if cmd in ("/start", "/help"):
             return ("<b>Alpha Scanner</b>\n"
@@ -323,7 +353,7 @@ class TelegramAlerts:
                     "/wallets — smart wallets with Track buttons\n"
                     "/track &lt;address&gt; [name] — buy alerts for any wallet (chain auto-detected)\n"
                     "/untrack &lt;address&gt;\n"
-                    "/tracked — wallets with buy alerts")
+                    "/tracked — tracked wallets with Untrack buttons")
 
         if cmd in ("/track", "/untrack", "/tracked", "/wallets") and not self._is_owner(chat_id):
             return "Wallet tracking can only be managed from the owner's chat."
@@ -454,9 +484,10 @@ class TelegramAlerts:
                             await self.send(chat_id, "Try <code>track &lt;address&gt; [name]</code>, "
                                                      "<code>wallets</code> or /help.")
                         continue
-                    if text.split()[0].split("@")[0].lower() == "/wallets" and owner:
-                        body, markup = await self.wallets_menu()
-                        log.info("command /wallets in owner chat -> %d buttons",
+                    first = text.split()[0].split("@")[0].lower()
+                    if first in ("/wallets", "/tracked") and owner:
+                        body, markup = await (self.wallets_menu() if first == "/wallets" else self.tracked_menu())
+                        log.info("command %s in owner chat -> %d buttons", first,
                                  len((markup or {}).get("inline_keyboard", [])))
                         await self.send(chat_id, body, markup)
                         continue
