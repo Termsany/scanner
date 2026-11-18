@@ -217,6 +217,10 @@ class DexScreenerClient:
         return data if isinstance(data, list) else []
 
 
+class GeckoUnavailable(Exception):
+    """GeckoTerminal did not answer (rate limit, network, unknown pool) after retries."""
+
+
 class GeckoTerminalClient:
     """https://www.geckoterminal.com/dex-api  (public: 30 calls/min)"""
 
@@ -237,7 +241,9 @@ class GeckoTerminalClient:
             f"{self.BASE}/networks/{GECKO_NETWORK[chain]}/pools/{pool}/ohlcv/minute",
             limiter=self.limiter, headers=self.HEADERS, params=params,
         )
-        rows = (((data or {}).get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
+        if data is None:  # rate limited / network / 404 after retries: not the same as "no candles"
+            raise GeckoUnavailable(f"ohlcv unavailable for {pool[:10]}")
+        rows = ((data.get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
         return sorted((r for r in rows if isinstance(r, list) and len(r) >= 5), key=lambda r: r[0])
 
     async def _pools(self, chain: Chain, kind: str) -> list[str]:

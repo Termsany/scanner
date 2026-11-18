@@ -98,14 +98,16 @@ async def update_outcomes(session: AsyncSession, gecko, settings: Settings | Non
             signal_time=utc(sig.created_at), entry_price=sig.price_usd, horizon_hours=0, attempts=0)
         if sig.id not in have:
             session.add(o)
-        o.attempts += 1
         calls += 1
         try:
             candles = await gecko.ohlcv(tok.chain, tok.pair_address, aggregate_minutes=CANDLE_MINUTES,
                                         limit=110, before_ts=min(int(now.timestamp()), t0 + 25 * 3600))
-        except Exception as exc:  # noqa: BLE001 - one pool failing must not stop the run
+        except Exception as exc:  # noqa: BLE001
+            # Transient (rate limit / network): not counted as an attempt; stop spending calls this run.
             o.error = f"{type(exc).__name__}: {exc}"[:160]
-            continue
+            log.info("performance: GeckoTerminal unavailable (%s); stopping this run", type(exc).__name__)
+            break
+        o.attempts += 1
         res = compute_outcome(sig.price_usd or 0.0, t0, candles, int(now.timestamp()))
         if res["horizon_hours"] == 0 and not candles:
             o.error = "no candles for pool"

@@ -94,3 +94,28 @@ def test_update_outcomes_schedule_and_summary():
         assert by["90+"]["median_6h"] == 50.0 and by["80–89"]["median_6h"] == -50.0 and by["75–79"]["n"] == 1
         assert p["overall"]["positive_6h_pct"] == 50.0 and p["best"][0]["symbol"] == "T0"
     _db(body)
+
+
+def test_rate_limit_is_not_an_attempt_and_stops_the_run():
+    class Flaky(FakeGecko):
+        async def ohlcv(self, chain, pool, **kw):
+            self.calls += 1
+            raise RuntimeError("ohlcv unavailable")
+
+    async def body(s):
+        now = datetime.now(timezone.utc)
+        for i in range(3):
+            t = Token(chain=Chain.solana, address=f"m{i}", symbol=f"X{i}", name="", pair_address=f"p{i}",
+                      discovery_sources=[], alpha_score=80, badge=Badge.strong_alpha)
+            s.add(t)
+            await s.flush()
+            s.add(Signal(token_id=t.id, score=80, badge=Badge.strong_alpha, price_usd=1.0, payload={},
+                         created_at=now - timedelta(hours=2)))
+        await s.commit()
+        g = Flaky({})
+        st = await update_outcomes(s, g, Settings(perf_max_calls_per_run=10))
+        await s.commit()
+        assert g.calls == 1 and st["measured"] == 0           # stopped after the first failure
+        o = (await s.execute(select(SignalOutcome))).scalars().one()
+        assert o.attempts == 0 and "unavailable" in o.error   # retried later, never given up for it
+    _db(body)
