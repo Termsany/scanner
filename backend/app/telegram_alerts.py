@@ -26,7 +26,7 @@ from sqlalchemy import select, update
 from app.config import Settings, get_settings
 from app.db import SessionLocal, init_db
 from app.models import Badge, Chain, Signal, SmartWallet, Token, TrackerCursor, WalletTrade
-from app.repository import get_token, list_tokens, scanner_status, token_detail
+from app.repository import get_token, list_tokens, scanner_status, token_detail, utc
 from app.schemas import LiveSignal, SortField, TokenListParams
 
 log = logging.getLogger("telegram")
@@ -141,6 +141,52 @@ def render_trade(t: WalletTrade, dashboard_url: str | None) -> str:
         links.append(f'<a href="{e(t.pair_url)}">DexScreener</a>')
     if dashboard_url:
         links.append(f'<a href="{e(dashboard_url.rstrip("/"))}/token/{t.chain.value}/{e(t.token_address)}">Inspector</a>')
+    lines.append(" · ".join(links))
+    lines.append("<i>On-chain activity, not a recommendation.</i>")
+    return "\n".join(lines)
+
+
+def render_trade_group(trades: list[WalletTrade], dashboard_url: str | None) -> str:
+    """One alert for several trades of the same token and side."""
+    t0 = max(trades, key=lambda t: t.id)  # freshest market data
+    sell = (t0.side or "buy") == "sell"
+    wallets: dict[str, list[WalletTrade]] = {}
+    for t in trades:
+        wallets.setdefault(t.wallet, []).append(t)
+    n = len(wallets)
+    total = sum(t.usd_value or 0 for t in trades)
+    times = [utc(t.block_time) for t in trades if t.block_time]
+    same_moment = n >= 2 and len(times) == len(trades) and (max(times) - min(times)).total_seconds() <= 2
+    verb = "sold" if sell else "bought"
+    head = (f"{'🔻' if sell else '🐋'} <b>{n} TRACKED WALLETS {verb.upper()}</b> ${e(t0.symbol)} · {e(t0.chain.value)}"
+            if n >= 2 else
+            f"{'🔻' if sell else '🐋'} <b>WALLET {'SELL' if sell else 'BUY'}</b> ×{len(trades)} · {e(t0.chain.value)}")
+    lines = [head, f"Total ≈ <b>{fmt_usd(total)}</b>" + (f" — {e(t0.name)}" if t0.name else ""), ""]
+    for addr, ts in list(wallets.items())[:8]:
+        who = ts[0].wallet_label or f"{addr[:4]}…{addr[-4:]}"
+        extra = ""
+        if sell:
+            last = max(ts, key=lambda x: x.id)
+            if last.pct_sold is not None:
+                extra = " · FULL EXIT" if last.pct_sold >= 99 else f" · sold {last.pct_sold:.0f}%"
+            if last.pnl_usd is not None:
+                extra += f" · P&amp;L {'+' if last.pnl_usd >= 0 else '-'}{fmt_usd(abs(last.pnl_usd))}"
+        elif any(x.first_buy for x in ts):
+            extra = " · first buy"
+        lines.append(f"• <b>{e(who)}</b> {fmt_usd(sum(x.usd_value or 0 for x in ts))}{extra}")
+    if len(wallets) > 8:
+        lines.append(f"• …and {len(wallets) - 8} more")
+    if same_moment:
+        lines.append("⚠️ <i>Same second: likely one owner or one bot, not independent conviction.</i>")
+    lines += ["",
+              f"Price {fmt_usd(t0.price_usd)} · Liq {fmt_usd(t0.liquidity_usd)} · MC {fmt_usd(t0.market_cap)}"
+              + (f" · Alpha Score <b>{t0.alpha_score}</b>" if t0.alpha_score is not None else ""),
+              "", f"<code>{e(t0.token_address)}</code>"]
+    links = [f'<a href="{EXPLORER_TX[t0.chain].format(e(t0.tx_hash))}">Latest tx</a>']
+    if t0.pair_url:
+        links.append(f'<a href="{e(t0.pair_url)}">DexScreener</a>')
+    if dashboard_url:
+        links.append(f'<a href="{e(dashboard_url.rstrip("/"))}/token/{t0.chain.value}/{e(t0.token_address)}">Inspector</a>')
     lines.append(" · ".join(links))
     lines.append("<i>On-chain activity, not a recommendation.</i>")
     return "\n".join(lines)
@@ -301,20 +347,34 @@ class TelegramAlerts:
         return sent + await self.deliver_trades(chat)
 
     async def deliver_trades(self, chat: str) -> int:
+        """Send pending wallet-trade alerts. Trades of the same token and side are held for
+        TELEGRAM_TRADE_GROUP_SECONDS after the first one so that several wallets buying (or selling) the same
+        token arrive as one alert."""
         async with SessionLocal() as s:
             pending = (await s.execute(
-                select(WalletTrade).where(WalletTrade.telegram_sent.is_(False)).order_by(WalletTrade.id.asc()).limit(20)
+                select(WalletTrade).where(WalletTrade.telegram_sent.is_(False)).order_by(WalletTrade.id.asc()).limit(100)
             )).scalars().all()
-        sent = 0
+        wait = max(0, self.settings.telegram_trade_group_seconds)
+        now = datetime.now(timezone.utc)
+        groups: dict[tuple, list[WalletTrade]] = {}
         for t in pending:
+            groups.setdefault((t.chain, t.token_address, t.side or "buy"), []).append(t)
+        sent = 0
+        for trades in groups.values():
+            first = min(utc(t.detected_at) for t in trades)
+            if wait and (now - first).total_seconds() < wait:
+                continue  # still collecting other wallets for this token
+            ids = [t.id for t in trades]
             async with SessionLocal() as s:
-                claimed = await s.execute(update(WalletTrade).where(WalletTrade.id == t.id,
+                claimed = await s.execute(update(WalletTrade).where(WalletTrade.id.in_(ids),
                                                                     WalletTrade.telegram_sent.is_(False))
                                           .values(telegram_sent=True))
                 await s.commit()
-            if claimed.rowcount != 1:
-                continue
-            if await self.send(chat, render_trade(t, self.settings.public_dashboard_url)):
+            if claimed.rowcount != len(ids):
+                continue  # another replica took (part of) it
+            text = (render_trade(trades[0], self.settings.public_dashboard_url) if len(trades) == 1
+                    else render_trade_group(trades, self.settings.public_dashboard_url))
+            if await self.send(chat, text):
                 sent += 1
             await asyncio.sleep(SEND_INTERVAL)
         return sent

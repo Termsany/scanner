@@ -357,7 +357,8 @@ def test_signal_alerts_off_sends_only_wallet_alerts(client):
     unsent_signals = client.portal.call(seed)
     assert unsent_signals  # fixture signals are still pending
     bot = TelegramAlerts(get_settings().model_copy(update={
-        "telegram_bot_token": "123:test", "telegram_chat_id": "1", "telegram_signal_alerts": False}))
+        "telegram_bot_token": "123:test", "telegram_chat_id": "1", "telegram_signal_alerts": False,
+        "telegram_trade_group_seconds": 0}))
     sent = []
 
     async def fake_send(chat, text, markup=None):
@@ -368,5 +369,46 @@ def test_signal_alerts_off_sends_only_wallet_alerts(client):
     try:
         client.portal.call(bot.deliver_pending)
         assert sent and all("WALLET" in t for t in sent) and not any("ALPHA" in t and "/100" in t for t in sent)
+    finally:
+        client.portal.call(bot.close)
+
+
+
+def test_wallet_trades_grouped_into_one_alert(client):
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    from app.models import Chain, WalletTrade
+
+    old = _dt.now(_tz.utc) - _td(seconds=90)
+    bt = _dt(2026, 11, 18, 23, 12, 16, tzinfo=_tz.utc)
+
+    async def seed():
+        async with SessionLocal() as s:
+            for i, w in enumerate(("WalletA", "WalletB", "WalletC")):
+                s.add(WalletTrade(chain=Chain.solana, wallet=w, wallet_label=f"auto {i}", token_address="GrpMint",
+                                  symbol="DCTY", name="", tx_hash=f"grp-{i}", amount=100, usd_value=380.0 + i,
+                                  price_usd=0.01, liquidity_usd=50_000, side="buy", kind="buy", first_buy=True,
+                                  block_time=bt, detected_at=old, telegram_sent=False))
+            s.add(WalletTrade(chain=Chain.solana, wallet="WalletD", wallet_label="fresh", token_address="NewMint",
+                              symbol="NEW", name="", tx_hash="fresh-1", amount=1, usd_value=200, side="buy",
+                              kind="buy", detected_at=_dt.now(_tz.utc), telegram_sent=False))
+            await s.commit()
+
+    client.portal.call(seed)
+    bot = TelegramAlerts(get_settings().model_copy(update={
+        "telegram_bot_token": "123:test", "telegram_chat_id": "1", "telegram_trade_group_seconds": 45}))
+    sent = []
+
+    async def fake_send(chat, text, markup=None):
+        sent.append(text)
+        return True
+
+    bot.send = fake_send
+    try:
+        client.portal.call(bot.deliver_trades, "1")
+        grouped = [t for t in sent if "DCTY" in t]
+        assert len(grouped) == 1 and "3 TRACKED WALLETS BOUGHT" in grouped[0] and "$1.1K" in grouped[0]
+        assert "Same second" in grouped[0] and grouped[0].count("first buy") == 3
+        assert not any("NEW" in t for t in sent)          # 0s old: still waiting for other wallets
     finally:
         client.portal.call(bot.close)
