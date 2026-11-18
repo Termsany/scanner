@@ -247,8 +247,51 @@ class SmartWallet(Base):
     win_tokens: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{"symbol","address","gain_pct"}]
     # Verified performance (Birdeye wallet PnL summary): {"win_rate","realized_usd_30d","trades_30d",...}
     stats: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Operator's buy-alert watchlist (Telegram). Independent of `enabled`, which controls scoring:
+    # a tracked wallet can be any address, smart or not. Nullable so it can be added to live tables.
+    track_buys: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class WalletTrade(Base):
+    """A buy by a tracked wallet, detected on-chain. Delivered to Telegram once (telegram_sent claim)."""
+
+    __tablename__ = "wallet_trades"
+    __table_args__ = (
+        UniqueConstraint("chain", "tx_hash", "token_address", name="uq_wallet_trade"),
+        Index("ix_wallet_trades_detected", "detected_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain: Mapped[Chain] = mapped_column(Enum(Chain, native_enum=False, length=16, values_callable=_enum_values))
+    wallet: Mapped[str] = mapped_column(String(64))
+    wallet_label: Mapped[str] = mapped_column(String(128), default="")
+    token_address: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(64), default="")
+    name: Mapped[str] = mapped_column(String(128), default="")
+    tx_hash: Mapped[str] = mapped_column(String(128))
+    amount: Mapped[float] = mapped_column(Float, default=0.0)
+    usd_value: Mapped[float | None] = mapped_column(Float)
+    price_usd: Mapped[float | None] = mapped_column(Float)
+    liquidity_usd: Mapped[float | None] = mapped_column(Float)
+    market_cap: Mapped[float | None] = mapped_column(Float)
+    pair_url: Mapped[str | None] = mapped_column(String(512))
+    alpha_score: Mapped[int | None] = mapped_column(Integer)
+    first_buy: Mapped[bool] = mapped_column(Boolean, default=True)   # first time this wallet bought it
+    block_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    telegram_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class TrackerCursor(Base):
+    """Where each tracker stream stopped (Solana: last signature per wallet; EVM: last block per chain)."""
+
+    __tablename__ = "tracker_cursors"
+
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    value: Mapped[str] = mapped_column(String(160))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 

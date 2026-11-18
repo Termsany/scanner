@@ -24,7 +24,7 @@ from sqlalchemy import select, update
 
 from app.config import Settings, get_settings
 from app.db import SessionLocal, init_db
-from app.models import Badge, Chain, Signal, Token
+from app.models import Badge, Chain, Signal, Token, WalletTrade
 from app.repository import get_token, list_tokens, scanner_status, token_detail
 from app.schemas import LiveSignal, SortField, TokenListParams
 
@@ -85,6 +85,39 @@ def render_signal(sig: LiveSignal, dashboard_url: str | None) -> str:
     return "\n".join(lines)
 
 
+EXPLORER_TX = {
+    Chain.solana: "https://solscan.io/tx/{}", Chain.ethereum: "https://etherscan.io/tx/{}",
+    Chain.base: "https://basescan.org/tx/{}", Chain.bsc: "https://bscscan.com/tx/{}",
+}
+EXPLORER_WALLET = {
+    Chain.solana: "https://solscan.io/account/{}", Chain.ethereum: "https://etherscan.io/address/{}",
+    Chain.base: "https://basescan.org/address/{}", Chain.bsc: "https://bscscan.com/address/{}",
+}
+
+
+def render_trade(t: WalletTrade, dashboard_url: str | None) -> str:
+    who = t.wallet_label or f"{t.wallet[:4]}…{t.wallet[-4:]}"
+    lines = [
+        f"🐋 <b>WALLET BUY</b> · {e(t.chain.value)}" + (" · <i>first buy</i>" if t.first_buy else " · <i>adding</i>"),
+        f"<b>{e(who)}</b> bought <b>${e(t.symbol)}</b>" + (f" — {e(t.name)}" if t.name else ""),
+        "",
+        f"Size ≈ <b>{fmt_usd(t.usd_value)}</b> · Price {fmt_usd(t.price_usd)}",
+        f"Liq {fmt_usd(t.liquidity_usd)} · MC {fmt_usd(t.market_cap)}"
+        + (f" · Alpha Score <b>{t.alpha_score}</b>" if t.alpha_score is not None else ""),
+        "",
+        f"<code>{e(t.token_address)}</code>",
+    ]
+    links = [f'<a href="{EXPLORER_TX[t.chain].format(e(t.tx_hash))}">Tx</a>',
+             f'<a href="{EXPLORER_WALLET[t.chain].format(e(t.wallet))}">Wallet</a>']
+    if t.pair_url:
+        links.append(f'<a href="{e(t.pair_url)}">DexScreener</a>')
+    if dashboard_url:
+        links.append(f'<a href="{e(dashboard_url.rstrip("/"))}/token/{t.chain.value}/{e(t.token_address)}">Inspector</a>')
+    lines.append(" · ".join(links))
+    lines.append("<i>On-chain activity, not a recommendation.</i>")
+    return "\n".join(lines)
+
+
 class TelegramAlerts:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -126,6 +159,8 @@ class TelegramAlerts:
         async with SessionLocal() as s:
             await s.execute(update(Signal).where(Signal.telegram_sent.is_(False), Signal.created_at < cutoff)
                             .values(telegram_sent=True))
+            await s.execute(update(WalletTrade).where(WalletTrade.telegram_sent.is_(False),
+                                                      WalletTrade.detected_at < cutoff).values(telegram_sent=True))
             await s.commit()
 
     async def deliver_pending(self) -> int:
@@ -153,6 +188,25 @@ class TelegramAlerts:
             if await self.send(chat, render_signal(live, self.settings.public_dashboard_url)):
                 sent += 1
             await asyncio.sleep(SEND_INTERVAL)
+        return sent + await self.deliver_trades(chat)
+
+    async def deliver_trades(self, chat: str) -> int:
+        async with SessionLocal() as s:
+            pending = (await s.execute(
+                select(WalletTrade).where(WalletTrade.telegram_sent.is_(False)).order_by(WalletTrade.id.asc()).limit(20)
+            )).scalars().all()
+        sent = 0
+        for t in pending:
+            async with SessionLocal() as s:
+                claimed = await s.execute(update(WalletTrade).where(WalletTrade.id == t.id,
+                                                                    WalletTrade.telegram_sent.is_(False))
+                                          .values(telegram_sent=True))
+                await s.commit()
+            if claimed.rowcount != 1:
+                continue
+            if await self.send(chat, render_trade(t, self.settings.public_dashboard_url)):
+                sent += 1
+            await asyncio.sleep(SEND_INTERVAL)
         return sent
 
     async def _alerts_loop(self) -> None:
@@ -167,7 +221,10 @@ class TelegramAlerts:
             await asyncio.sleep(3)
 
     # ---- commands ---------------------------------------------------------
-    async def handle_command(self, text: str) -> str:
+    def _is_owner(self, chat_id: str | int | None) -> bool:
+        return chat_id is not None and str(chat_id) == str(self.settings.telegram_chat_id or "")
+
+    async def handle_command(self, text: str, chat_id: str | int | None = None) -> str:
         parts = text.strip().split()
         if not parts:
             return ""
@@ -178,7 +235,45 @@ class TelegramAlerts:
             return ("<b>Alpha Scanner</b>\n"
                     "/top [solana|ethereum|base|bsc] — top 5 by Alpha Score\n"
                     "/token &lt;address&gt; — score card\n"
-                    "/status — scanner health")
+                    "/status — scanner health\n"
+                    "/track &lt;solana|ethereum|base|bsc|evm&gt; &lt;address&gt; [name] — buy alerts for a wallet\n"
+                    "/untrack &lt;chain|evm&gt; &lt;address&gt;\n"
+                    "/tracked — wallets with buy alerts")
+
+        if cmd in ("/track", "/untrack", "/tracked") and not self._is_owner(chat_id):
+            return "Wallet tracking can only be managed from the owner's chat."
+
+        if cmd in ("/track", "/untrack"):
+            from app.smart_money import parse_track_target, set_tracking
+
+            if len(args) < 2:
+                return f"Usage: {cmd} &lt;solana|ethereum|base|bsc|evm&gt; &lt;address&gt;" + (" [name]" if cmd == "/track" else "")
+            try:
+                chains, addr = parse_track_target(args[0], args[1])
+            except ValueError as exc:
+                return e(str(exc))
+            label = " ".join(args[2:])[:60]
+            async with SessionLocal() as s:
+                n = await set_tracking(s, chains, addr, label, cmd == "/track")
+                await s.commit()
+            nets = ", ".join(c.value for c in chains)
+            if cmd == "/untrack":
+                return f"Buy alerts off for <code>{e(addr)}</code> ({nets})." if n else "That wallet was not tracked."
+            return (f"👀 Tracking <code>{e(addr)}</code> on {nets}"
+                    + (f" as <b>{e(label)}</b>" if label else "")
+                    + ".\nYou'll get an alert for each buy ≥ $"
+                    + f"{self.settings.tracker_min_buy_usd:,.0f} from now on (past trades are not replayed).")
+
+        if cmd == "/tracked":
+            from app.smart_money import tracked_wallets
+
+            async with SessionLocal() as s:
+                rows = await tracked_wallets(s)
+            if not rows:
+                return "No tracked wallets. Add one with /track solana &lt;address&gt; [name]"
+            lines = [f"• <b>{e(w.label)}</b> ({w.chain.value}{'' if w.enabled else ', watch-only'})\n"
+                     f"  <code>{e(w.address)}</code>" for w in rows]
+            return f"<b>Tracked wallets ({len(rows)})</b>\n" + "\n".join(lines)
 
         if cmd == "/top":
             chain = None
@@ -252,7 +347,7 @@ class TelegramAlerts:
                     chat_id = (msg.get("chat") or {}).get("id")
                     if chat_id is None or not text.startswith("/"):
                         continue
-                    reply = await self.handle_command(text)
+                    reply = await self.handle_command(text, chat_id)
                     if reply:
                         await self.send(chat_id, reply)
                 if updates is None:

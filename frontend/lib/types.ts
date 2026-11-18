@@ -256,6 +256,7 @@ export interface SmartWallet {
   appearances: number;
   win_tokens: { symbol: string; address: string; gain_pct: number; pnl_usd?: number }[];
   stats: { win_rate?: number; realized_usd_30d?: number; trades_30d?: number } | null;
+  track_buys: boolean;
   updated_at: string;
 }
 

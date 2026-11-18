@@ -366,6 +366,65 @@ async def remove(session: AsyncSession, chain: Chain, address: str) -> str:
     return "disabled (auto wallets stay disabled so discovery does not re-add them)"
 
 
+# ---------------------------------------------------------------------------
+# Buy-alert watchlist (independent of scoring)
+# ---------------------------------------------------------------------------
+
+EVM_CHAINS = (Chain.ethereum, Chain.base, Chain.bsc)
+
+
+def parse_track_target(chain_arg: str, address: str) -> tuple[list[Chain], str]:
+    """Validate '<chain> <address>'. 'evm' means Ethereum + Base + BSC. Raises ValueError with a user message."""
+    from app.solana_pda import pubkey_bytes
+    from app.wallet_tracker import EVM_ADDRESS
+
+    c = chain_arg.strip().lower()
+    a = address.strip()
+    if c in ("sol", "solana"):
+        try:
+            pubkey_bytes(a)
+        except (ValueError, KeyError):
+            raise ValueError("That is not a valid Solana address.") from None
+        return [Chain.solana], a
+    if c in ("evm", "eth", "ethereum", "base", "bsc"):
+        if not EVM_ADDRESS.match(a):
+            raise ValueError("That is not a valid 0x… address.")
+        chains = list(EVM_CHAINS) if c == "evm" else [Chain.ethereum if c in ("eth", "ethereum") else Chain(c)]
+        return chains, a.lower()
+    raise ValueError("Chain must be solana, ethereum, base, bsc or evm.")
+
+
+async def set_tracking(session: AsyncSession, chains: list[Chain], address: str, label: str, on: bool) -> int:
+    """Turn buy alerts on/off. Creates a watch-only row (not used for scoring) when the wallet is unknown."""
+    n = 0
+    for chain in chains:
+        addr = normalize_address(chain, address)
+        w = (await session.execute(
+            select(SmartWallet).where(SmartWallet.chain == chain, SmartWallet.address == addr)
+        )).scalar_one_or_none()
+        if w is None:
+            if not on:
+                continue
+            w = SmartWallet(chain=chain, address=addr, source=WalletSource.manual, enabled=False,
+                            label=label or f"{addr[:4]}…{addr[-4:]}")
+            session.add(w)
+        elif label and on:
+            w.label = label
+        if not on and w.source == WalletSource.manual and not w.enabled:
+            await session.delete(w)  # watch-only row: nothing else depends on it
+        else:
+            w.track_buys = on
+        n += 1
+    await session.flush()
+    return n
+
+
+async def tracked_wallets(session: AsyncSession) -> list[SmartWallet]:
+    return list((await session.execute(
+        select(SmartWallet).where(SmartWallet.track_buys.is_(True)).order_by(SmartWallet.chain, SmartWallet.label)
+    )).scalars())
+
+
 async def _cli(argv: list[str] | None = None) -> None:
     from app.db import SessionLocal, init_db
 
@@ -381,6 +440,14 @@ async def _cli(argv: list[str] | None = None) -> None:
         if name == "add":
             sp.add_argument("label", nargs="*")
     sub.add_parser("discover")
+    tr = sub.add_parser("track", help="buy alerts on: track <solana|ethereum|base|bsc|evm> <address> [label]")
+    tr.add_argument("chain")
+    tr.add_argument("address")
+    tr.add_argument("label", nargs="*")
+    ut = sub.add_parser("untrack", help="buy alerts off: untrack <chain|evm> <address>")
+    ut.add_argument("chain")
+    ut.add_argument("address")
+    sub.add_parser("tracked", help="list wallets with buy alerts")
     be = sub.add_parser("birdeye", help="run Birdeye trader discovery now (uses the daily call budget)")
     be.add_argument("--force-seed", action="store_true", help="re-run today's chain-wide seed")
     be.add_argument("--prune", action="store_true", help="first drop unverified/rejected seed-only candidates")
@@ -415,6 +482,13 @@ async def _cli(argv: list[str] | None = None) -> None:
             else:
                 w.enabled, w.disabled_by_user = True, False
                 print("enabled")
+        elif a.cmd in ("track", "untrack"):
+            chains, addr = parse_track_target(a.chain, a.address)
+            n = await set_tracking(s, chains, addr, " ".join(getattr(a, "label", []) or []), a.cmd == "track")
+            print(f"{a.cmd}: {n} wallet/chain entr{'y' if n == 1 else 'ies'} updated")
+        elif a.cmd == "tracked":
+            for w in await tracked_wallets(s):
+                print(f"{w.chain.value:8} {w.address:44} {w.label}  ({'scoring' if w.enabled else 'watch-only'})")
         elif a.cmd == "discover":
             print(json.dumps(await discover(s), indent=1))
         elif a.cmd == "birdeye":

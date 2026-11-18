@@ -219,3 +219,36 @@ def test_status_telemetry_and_volume_1h_sort(client):
     items = client.get("/api/tokens", params={"sort": "volume_1h"}).json()["items"]
     vols = [t["volume_h1"] for t in items]
     assert vols == sorted(vols, reverse=True)
+
+
+def test_telegram_track_commands_owner_only(client):
+    owner = "4242"
+    bot = TelegramAlerts(get_settings().model_copy(update={"telegram_bot_token": "123:test", "telegram_chat_id": owner}))
+    wallet = "8vVrVudDd2DvL5jUGFZWDSh95VjhLpeETRAp1kmFnb61"
+    try:
+        assert "owner's chat" in client.portal.call(bot.handle_command, f"/track solana {wallet}", "999")
+        assert "not a valid Solana" in client.portal.call(bot.handle_command, "/track solana 0xabc", owner)
+        reply = client.portal.call(bot.handle_command, f"/track solana {wallet} Whale One", owner)
+        assert "Tracking" in reply and "Whale One" in reply
+        listing = client.portal.call(bot.handle_command, "/tracked", owner)
+        assert "Whale One" in listing and "watch-only" in listing and "\n" in listing
+        assert "/track" in client.portal.call(bot.handle_command, "/help", owner)
+        wallets = client.get("/api/smart-wallets").json()["items"]
+        assert any(w["address"] == wallet and w["track_buys"] for w in wallets)
+        assert "off" in client.portal.call(bot.handle_command, f"/untrack solana {wallet}", owner)
+        assert "No tracked wallets" in client.portal.call(bot.handle_command, "/tracked", owner)
+    finally:
+        client.portal.call(bot.close)
+
+
+def test_render_trade_escapes_and_links():
+    from app.models import Chain, WalletTrade
+    from app.telegram_alerts import render_trade
+
+    t = WalletTrade(chain=Chain.solana, wallet="8vVrVudDd2DvL5jUGFZWDSh95VjhLpeETRAp1kmFnb61", wallet_label="<Whale>",
+                    token_address="Mint1", symbol="GEM", name="Gem & Co", tx_hash="sig9", amount=1000,
+                    usd_value=500, price_usd=0.5, liquidity_usd=80_000, market_cap=900_000, alpha_score=78,
+                    first_buy=True, pair_url="https://dexscreener.com/x")
+    text = render_trade(t, "https://scanner.example")
+    assert "&lt;Whale&gt;" in text and "Gem &amp; Co" in text and "first buy" in text
+    assert "solscan.io/tx/sig9" in text and "/token/solana/Mint1" in text and "Alpha Score <b>78</b>" in text

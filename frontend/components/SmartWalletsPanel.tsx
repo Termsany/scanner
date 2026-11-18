@@ -1,6 +1,6 @@
 "use client";
 
-import { ExternalLink, Users } from "lucide-react";
+import { ExternalLink, Eye, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
@@ -39,7 +39,7 @@ export function SmartWalletsPanel({ refreshKey }: { refreshKey: number }) {
     return () => ctl.abort();
   }, [refreshKey]);
 
-  const total = data ? data.enabled_manual + data.enabled_auto + data.enabled_birdeye : 0;
+  const total = data ? data.items.length : 0;
 
   return (
     <section className="card mt-4 flex max-h-[420px] flex-col" aria-label="Smart wallets">
@@ -85,6 +85,11 @@ export function SmartWalletsPanel({ refreshKey }: { refreshKey: number }) {
                   >
                     {w.source}
                   </span>
+                  {w.track_buys && (
+                    <span title="Telegram buy alerts on" className="inline-flex items-center gap-0.5 rounded bg-warn-soft px-1 text-[9.5px] font-semibold tracking-wider text-warn uppercase">
+                      <Eye className="size-2.5" /> tracked
+                    </span>
+                  )}
                 </div>
                 <a
                   href={walletUrl(w.chain, w.address)}

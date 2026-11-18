@@ -649,6 +649,20 @@ class Scanner:
             for addr in res:
                 found[(chain, _norm_addr(chain, addr))].add(source)
 
+        # Tokens tracked wallets bought recently get scored too, even if no DEX feed lists them.
+        try:
+            from app.models import WalletTrade
+
+            async with SessionLocal() as session:
+                since = datetime.now(timezone.utc) - timedelta(hours=2)
+                for chain, addr in (await session.execute(
+                    select(WalletTrade.chain, WalletTrade.token_address).where(WalletTrade.detected_at >= since)
+                )).all():
+                    if chain in self.chains:
+                        found[(chain, _norm_addr(chain, addr))].add("tracked_wallet_buy")
+        except Exception:
+            log.warning("could not load tracked-wallet buys", exc_info=True)
+
         stats.candidates = len(found)
         return found
 
@@ -928,12 +942,16 @@ class Scanner:
 async def _main(once: bool) -> None:
     await init_db()
     scanner = Scanner()
+    from app.wallet_tracker import WalletTracker
+
+    tracker = WalletTracker(scanner.settings)
     try:
         if once:
             await scanner.run_cycle()
         else:
-            await scanner.run_forever()
+            await asyncio.gather(scanner.run_forever(), tracker.run_forever())
     finally:
+        await tracker.close()
         await scanner.close()
         await engine.dispose()
 

@@ -65,6 +65,23 @@ class Settings(BaseSettings):
         "bsc": "https://bsc-rpc.publicnode.com",
     })
 
+    # Buy alerts for wallets the operator tracks (/track in Telegram)
+    tracker_enabled: bool = True
+    tracker_interval_seconds: int = 30
+    tracker_min_buy_usd: float = 100.0
+    tracker_min_liquidity_usd: float = 5_000.0
+    tracker_regroup_minutes: int = 60          # repeat buys of the same token inside this window: one alert
+    tracker_max_evm_block_range: int = 1_000   # cap catch-up after downtime
+    # getLogs without a contract address (any token sent to the wallet): publicnode refuses it; dRPC's free
+    # tier allows it for ranges <= 100 blocks, so queries are split into TRACKER_EVM_LOG_SPAN chunks.
+    tracker_evm_rpc_urls: dict[str, str] = Field(default_factory=lambda: {
+        "ethereum": "https://eth.drpc.org",
+        "base": "https://base.drpc.org",
+        "bsc": "https://bsc.drpc.org",
+    })
+    tracker_evm_log_span: int = 100
+    tracker_max_tx_per_poll: int = 25          # per Solana wallet
+
     # Birdeye trader discovery (free "Standard" key: 30k CU/month, 30 CU per call, 1 req/s)
     birdeye_api_key: str | None = None
     birdeye_interval_minutes: int = 120

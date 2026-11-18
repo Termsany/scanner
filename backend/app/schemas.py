@@ -354,6 +354,7 @@ class SmartWalletOut(_Model):
     appearances: int
     win_tokens: list[dict[str, Any]] = Field(default_factory=list)
     stats: dict[str, Any] | None = None
+    track_buys: bool = False
     updated_at: datetime
 
 

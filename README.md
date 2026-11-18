@@ -157,6 +157,23 @@ reading them in batches of 100 with `getMultipleAccounts`; on Ethereum, Base and
 `balanceOf` calls. A position counts when it is worth at least `HOLDINGS_MIN_USD` ($100). Free public RPCs
 are used by default; set `SOLANA_RPC_URL` / `EVM_RPC_URLS` to your own endpoints for heavier use.
 
+## Wallet buy alerts
+
+Pick any wallets (smart or not) and get a Telegram message when they buy. From the owner chat
+(`TELEGRAM_CHAT_ID` only):
+
+```
+/track solana <address> [name]      /track evm <0x address> [name]   (evm = Ethereum + Base + BSC)
+/untrack <chain|evm> <address>      /tracked
+```
+
+The worker polls every 30s. Solana: new transactions *signed by the wallet* (getSignaturesForAddress →
+getTransaction, `maxSupportedTransactionVersion: 1`), token balance increases excluding SOL/USDC/USDT.
+EVM: ERC-20 transfers to the wallet in transactions *the wallet sent* (address-less `eth_getLogs` on dRPC's
+free tier, split into 100-block chunks). A buy alerts when the token has a DEX pair with ≥ $5K liquidity and the
+buy is ≥ $100; repeat buys within 60 minutes are grouped; history from before `/track` is never replayed.
+Bought tokens are also added to the scanner's next cycle. Tuning: `TRACKER_*` settings in `config.py`.
+
 ## Data sources and limits
 
 | Source | Used for | Keyless limit |

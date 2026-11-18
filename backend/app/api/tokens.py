@@ -7,7 +7,7 @@ from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache import Cache
@@ -144,13 +144,13 @@ async def get_smart_wallets(
     )).all()
     counts = {(src, en): n for src, en, n in grouped}
     q = select(SmartWallet).order_by(SmartWallet.enabled.desc(), SmartWallet.wins.desc(), SmartWallet.id.asc())
-    if not include_disabled:
-        q = q.where(SmartWallet.enabled.is_(True))
+    if not include_disabled:  # tracked (buy-alert) wallets are listed even when they are watch-only
+        q = q.where(or_(SmartWallet.enabled.is_(True), SmartWallet.track_buys.is_(True)))
     rows = (await session.execute(q.limit(limit))).scalars().all()
     return SmartWalletList(
         items=[SmartWalletOut(chain=w.chain, address=w.address, label=w.label, source=w.source.value,
                               enabled=w.enabled, wins=w.wins, appearances=w.appearances,
-                              win_tokens=w.win_tokens or [], stats=w.stats, updated_at=utc(w.updated_at)) for w in rows],
+                              win_tokens=w.win_tokens or [], stats=w.stats, track_buys=bool(w.track_buys), updated_at=utc(w.updated_at)) for w in rows],
         enabled_manual=counts.get((WalletSource.manual, True), 0),
         enabled_auto=counts.get((WalletSource.auto, True), 0),
         enabled_birdeye=counts.get((WalletSource.birdeye, True), 0),
