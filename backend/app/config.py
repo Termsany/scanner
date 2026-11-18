@@ -5,7 +5,9 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from typing import Any
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -57,6 +59,10 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "gpt-4o-mini"
     llm_timeout_seconds: float = 20.0
+    llm_max_tokens: int = 600
+    # Provider-specific request fields, JSON. E.g. NVIDIA reasoning models answer far faster with
+    # LLM_EXTRA_BODY={"chat_template_kwargs": {"enable_thinking": false}}
+    llm_extra_body: dict[str, Any] = Field(default_factory=dict)
     ai_cache_ttl_seconds: int = 600
     ai_requests_per_minute: int = 10         # per client IP
 
@@ -68,6 +74,16 @@ class Settings(BaseSettings):
     public_dashboard_url: str | None = None  # deep links in alerts, e.g. https://scanner.example.com
 
     log_level: str = "INFO"
+
+    @field_validator("llm_base_url")
+    @classmethod
+    def _strip_endpoint_path(cls, v: str) -> str:
+        """The OpenAI client appends /chat/completions itself; accept a pasted full endpoint URL too."""
+        v = v.strip().rstrip("/")
+        for suffix in ("/chat/completions", "/completions"):
+            if v.endswith(suffix):
+                v = v[: -len(suffix)]
+        return v
 
 
 @lru_cache

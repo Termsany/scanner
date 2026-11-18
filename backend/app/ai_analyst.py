@@ -176,8 +176,9 @@ class AIAnalyst:
             resp = await self._client.chat.completions.create(
                 model=self.settings.llm_model,
                 temperature=0.2,
-                max_tokens=400,
+                max_tokens=self.settings.llm_max_tokens,
                 response_format={"type": "json_object"},
+                extra_body=self.settings.llm_extra_body or None,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": json.dumps(payload, default=str)},
