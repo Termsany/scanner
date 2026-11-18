@@ -656,7 +656,9 @@ class Scanner:
             async with SessionLocal() as session:
                 since = datetime.now(timezone.utc) - timedelta(hours=2)
                 for chain, addr in (await session.execute(
-                    select(WalletTrade.chain, WalletTrade.token_address).where(WalletTrade.detected_at >= since)
+                    select(WalletTrade.chain, WalletTrade.token_address).where(
+                        WalletTrade.detected_at >= since,
+                        (WalletTrade.side == "buy") | WalletTrade.side.is_(None))  # buys only
                 )).all():
                     if chain in self.chains:
                         found[(chain, _norm_addr(chain, addr))].add("tracked_wallet_buy")

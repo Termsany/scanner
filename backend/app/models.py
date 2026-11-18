@@ -280,6 +280,14 @@ class WalletTrade(Base):
     pair_url: Mapped[str | None] = mapped_column(String(512))
     alpha_score: Mapped[int | None] = mapped_column(Integer)
     first_buy: Mapped[bool] = mapped_column(Boolean, default=True)   # first time this wallet bought it
+    # Sells (nullable so they can be added to the live table; NULL side = buy, rows predating sells)
+    side: Mapped[str | None] = mapped_column(String(8), nullable=True, default="buy")        # buy | sell
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True, default="buy")       # buy | sell | transfer
+    remaining_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pct_sold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_basis_usd: Mapped[float | None] = mapped_column(Float, nullable=True)   # avg buy price per token
+    pnl_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     block_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     telegram_sent: Mapped[bool] = mapped_column(Boolean, default=False)

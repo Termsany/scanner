@@ -171,3 +171,106 @@ def test_rate_limited_chain_is_paused_not_hammered():
         assert delay == 60
         await t.http.aclose()
     _db(body)
+
+
+# ---------------------------------------------------------------------------
+# Sells
+# ---------------------------------------------------------------------------
+from app.wallet_tracker import Trade, evm_trades_from_logs, solana_trades_from_tx  # noqa: E402
+
+
+def _sell_tx(sol_in_lamports):
+    return {"blockTime": 2, "transaction": {"message": {"accountKeys": [{"pubkey": W, "signer": True},
+                                                                          {"pubkey": "Pool", "signer": False}]}},
+            "meta": {"err": None, "preBalances": [5_000_000_000, 0], "postBalances": [5_000_000_000 + sol_in_lamports, 0],
+                     "preTokenBalances": [bal(W, MINT, 1000.0)], "postTokenBalances": [bal(W, MINT, 600.0)]}}
+
+
+def test_solana_sell_vs_transfer_out():
+    [s] = solana_trades_from_tx(_sell_tx(2_000_000_000), W, "s1")   # received 2 SOL -> sale
+    assert (s.side, s.kind, s.amount, s.remaining) == ("sell", "sell", 400.0, 600.0)
+    [t] = solana_trades_from_tx(_sell_tx(-5000), W, "s2")            # only paid the fee -> moved tokens out
+    assert (t.side, t.kind) == ("sell", "transfer")
+
+
+def test_evm_outgoing_router_is_sell_direct_is_transfer():
+    pad = lambda a: "0x" + a.removeprefix("0x").rjust(64, "0")
+    tok = "0x00000000000000000000000000000000000000aa"
+    router = "0x00000000000000000000000000000000000000bb"
+    logs = [
+        {"address": tok, "topics": [TRANSFER_TOPIC, pad(EW), pad("0x01")], "data": hex(5 * 10**18), "transactionHash": "0xS"},
+        {"address": tok, "topics": [TRANSFER_TOPIC, pad(EW), pad("0x02")], "data": hex(10**18), "transactionHash": "0xT"},
+        {"address": tok, "topics": [TRANSFER_TOPIC, pad("0x03"), pad(EW)], "data": hex(10**18), "transactionHash": "0xB"},
+    ]
+    info = {"0xs": {"from": EW, "to": router}, "0xt": {"from": EW, "to": tok}, "0xb": {"from": EW, "to": router}}
+    got = {(t.tx_hash, t.side, t.kind, t.amount) for t in evm_trades_from_logs(Chain.base, logs, info, {EW}, {tok: 18})}
+    assert got == {("0xs", "sell", "sell", 5.0), ("0xt", "sell", "transfer", 1.0), ("0xb", "buy", "buy", 1.0)}
+
+
+def test_sell_pnl_pct_sold_full_exit_and_grouping():
+    price = {"v": "0.5"}
+
+    def handler(req):
+        if "dexscreener" in req.url.host:
+            return httpx.Response(200, json=[{"baseToken": {"address": MINT, "symbol": "GEM"}, "priceUsd": price["v"],
+                                              "liquidity": {"usd": 80_000}}])
+        return httpx.Response(404)
+
+    async def body(s):
+        t = tracker_with(handler)
+        lab = {(Chain.solana, W): "Whale"}
+        await t.record(s, [Trade(Chain.solana, W, MINT, 1000.0, "b1")], lab)               # buy 1000 @ $0.50
+        price["v"] = "1.0"
+        n1 = await t.record(s, [Trade(Chain.solana, W, MINT, 400.0, "s1", side="sell", kind="sell", remaining=600.0)], lab)
+        n2 = await t.record(s, [Trade(Chain.solana, W, MINT, 100.0, "s2", side="sell", kind="sell", remaining=500.0)], lab)
+        n3 = await t.record(s, [Trade(Chain.solana, W, MINT, 500.0, "s3", side="sell", kind="sell", remaining=0.0)], lab)
+        n4 = await t.record(s, [Trade(Chain.solana, W, MINT, 300.0, "t1", side="sell", kind="transfer", remaining=0.0)], lab)
+        assert (n1, n2, n3, n4) == (1, 0, 1, 0)   # partial grouped; full exit always alerts; transfer silent
+        rows = {r.tx_hash: r for r in (await s.execute(select(WalletTrade))).scalars()}
+        s1 = rows["s1"]
+        assert (s1.side, s1.pct_sold, s1.cost_basis_usd, s1.pnl_usd, s1.pnl_pct) == ("sell", 40.0, 0.5, 200.0, 100.0)
+        assert rows["s3"].pct_sold == 100.0 and rows["s3"].telegram_sent is False
+        assert rows["t1"].kind == "transfer" and rows["t1"].telegram_sent is True
+        await t.http.aclose()
+    _db(body)
+
+
+def test_render_sell_alert():
+    from app.telegram_alerts import render_trade
+
+    base = dict(chain=Chain.solana, wallet=W, wallet_label="Whale", token_address=MINT, symbol="GEM", name="",
+                tx_hash="s1", amount=400, usd_value=400, price_usd=1.0, liquidity_usd=80_000, market_cap=1e6,
+                side="sell", kind="sell")
+    text = render_trade(WalletTrade(**base, pct_sold=100.0, pnl_usd=200.0, pnl_pct=100.0, cost_basis_usd=0.5), None)
+    assert "WALLET SELL" in text and "FULL EXIT" in text and "+$200" in text and "+100.0%" in text
+    text = render_trade(WalletTrade(**base, pct_sold=40.0, pnl_usd=-50.0, pnl_pct=-20.0, cost_basis_usd=1.25), None)
+    assert "sold <b>40%</b>" in text and "🔴" in text and "-$50" in text
+    assert "unknown" in render_trade(WalletTrade(**base), None)
+
+
+def test_solana_429_keeps_cursor_at_last_read_tx():
+    state = {"calls": 0}
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body["method"] == "getSignaturesForAddress":
+            return httpx.Response(200, json={"result": [{"signature": "C", "err": None}, {"signature": "B", "err": None},
+                                                        {"signature": "A", "err": None}]})
+        if body["method"] == "getTransaction":
+            state["calls"] += 1
+            if body["params"][0] == "B":
+                return httpx.Response(429, text="slow down")
+            return httpx.Response(200, json={"result": {"meta": {"err": None, "preTokenBalances": [],
+                                                                  "postTokenBalances": [bal(W, MINT, 5.0)]}}})
+        return httpx.Response(404)
+
+    async def body(s):
+        s.add(TrackerCursor(key=f"sol:{W}", value="OLD"))
+        await s.flush()
+        t = tracker_with(handler)
+        with pytest.raises(httpx.HTTPStatusError):
+            await t.poll_solana(s, W)
+        # A was read (oldest first); B hit 429 -> cursor stays at A so B and C are retried next poll
+        assert (await s.get(TrackerCursor, f"sol:{W}")).value == "A"
+        await t.http.aclose()
+    _db(body)

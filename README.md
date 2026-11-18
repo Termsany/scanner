@@ -179,6 +179,13 @@ free tier, split into 100-block chunks). A buy alerts when the token has a DEX p
 buy is ≥ $100; repeat buys within 60 minutes are grouped; history from before `/track` is never replayed.
 Bought tokens are also added to the scanner's next cycle. Tuning: `TRACKER_*` settings in `config.py`.
 
+**Sells.** A decrease in a tracked wallet's token balance, in a transaction it signed/sent, is a sale when the
+wallet received SOL / a quote token (Solana) or the transaction went through a router (EVM); otherwise it is a
+transfer out (recorded, no alert). Sell alerts show the share of the position sold (from the remaining balance,
+"FULL EXIT" at ≥ 99%) and, when this wallet's buys of the token were recorded, the estimated P&L against their
+average cost. Partial sells within 60 minutes are grouped; a full exit always alerts. On a Solana 429 the
+tracker keeps its place at the last transaction read and resumes on the next poll, so trades are not lost.
+
 ## Data sources and limits
 
 | Source | Used for | Keyless limit |

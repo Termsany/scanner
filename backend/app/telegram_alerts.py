@@ -100,16 +100,41 @@ EXPLORER_WALLET = {
 
 def render_trade(t: WalletTrade, dashboard_url: str | None) -> str:
     who = t.wallet_label or f"{t.wallet[:4]}…{t.wallet[-4:]}"
-    lines = [
-        f"🐋 <b>WALLET BUY</b> · {e(t.chain.value)}" + (" · <i>first buy</i>" if t.first_buy else " · <i>adding</i>"),
-        f"<b>{e(who)}</b> bought <b>${e(t.symbol)}</b>" + (f" — {e(t.name)}" if t.name else ""),
-        "",
-        f"Size ≈ <b>{fmt_usd(t.usd_value)}</b> · Price {fmt_usd(t.price_usd)}",
-        f"Liq {fmt_usd(t.liquidity_usd)} · MC {fmt_usd(t.market_cap)}"
-        + (f" · Alpha Score <b>{t.alpha_score}</b>" if t.alpha_score is not None else ""),
-        "",
-        f"<code>{e(t.token_address)}</code>",
-    ]
+    if t.side == "sell":
+        if t.pct_sold is not None and t.pct_sold >= 99:
+            how = "<b>FULL EXIT</b>"
+        elif t.pct_sold is not None:
+            how = f"sold <b>{t.pct_sold:.0f}%</b> of position"
+        else:
+            how = "partial sell"
+        if t.pnl_usd is not None:
+            icon = "🟢" if t.pnl_usd >= 0 else "🔴"
+            sign = "+" if t.pnl_usd >= 0 else "-"
+            pnl = (f"{icon} P&amp;L on this sale ≈ <b>{sign}{fmt_usd(abs(t.pnl_usd))}</b> ({fmt_pct(t.pnl_pct)}) "
+                   f"· avg buy {fmt_usd(t.cost_basis_usd)}")
+        else:
+            pnl = "P&amp;L unknown (bought before tracking started)"
+        lines = [
+            f"🔻 <b>WALLET SELL</b> · {e(t.chain.value)} · {how}",
+            f"<b>{e(who)}</b> sold <b>${e(t.symbol)}</b>" + (f" — {e(t.name)}" if t.name else ""),
+            "",
+            f"Size ≈ <b>{fmt_usd(t.usd_value)}</b> · Price {fmt_usd(t.price_usd)}",
+            pnl,
+            f"Liq {fmt_usd(t.liquidity_usd)} · MC {fmt_usd(t.market_cap)}",
+            "",
+            f"<code>{e(t.token_address)}</code>",
+        ]
+    else:
+        lines = [
+            f"🐋 <b>WALLET BUY</b> · {e(t.chain.value)}" + (" · <i>first buy</i>" if t.first_buy else " · <i>adding</i>"),
+            f"<b>{e(who)}</b> bought <b>${e(t.symbol)}</b>" + (f" — {e(t.name)}" if t.name else ""),
+            "",
+            f"Size ≈ <b>{fmt_usd(t.usd_value)}</b> · Price {fmt_usd(t.price_usd)}",
+            f"Liq {fmt_usd(t.liquidity_usd)} · MC {fmt_usd(t.market_cap)}"
+            + (f" · Alpha Score <b>{t.alpha_score}</b>" if t.alpha_score is not None else ""),
+            "",
+            f"<code>{e(t.token_address)}</code>",
+        ]
     links = [f'<a href="{EXPLORER_TX[t.chain].format(e(t.tx_hash))}">Tx</a>',
              f'<a href="{EXPLORER_WALLET[t.chain].format(e(t.wallet))}">Wallet</a>']
     if t.pair_url:
