@@ -6,8 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings
-from app.models import Badge, Base, Chain, Signal, SignalOutcome, Token
-from app.performance import compute_outcome, performance_summary, update_outcomes
+from app.models import Badge, Base, Chain, MarketSnapshot, Signal, SignalOutcome, Token
+from app.performance import compute_from_snapshots, compute_outcome, performance_summary, update_outcomes
 
 T0 = 1_800_000_000
 M = 15 * 60
@@ -82,7 +82,7 @@ def test_update_outcomes_schedule_and_summary():
         gecko = FakeGecko(series)
         st = await update_outcomes(s, gecko, Settings(perf_max_calls_per_run=10))
         await s.commit()
-        assert st == {"due": 3, "calls": 3, "measured": 3}      # the 30-minute-old signal is not due yet
+        assert st == {"due": 3, "calls": 3, "measured": 3, "from_snapshots": 0}  # 30-min-old signal not due yet
         rows = {o.symbol: o for o in (await s.execute(select(SignalOutcome))).scalars()}
         assert rows["T0"].horizon_hours == 6 and rows["T0"].r_6h == 50.0
         assert rows["T1"].r_6h == -50.0 and rows["T2"].horizon_hours == 1
@@ -118,4 +118,41 @@ def test_rate_limit_is_not_an_attempt_and_stops_the_run():
         assert g.calls == 1 and st["measured"] == 0           # stopped after the first failure
         o = (await s.execute(select(SignalOutcome))).scalars().one()
         assert o.attempts == 0 and "unavailable" in o.error   # retried later, never given up for it
+    _db(body)
+
+
+
+def test_compute_from_snapshots_and_gap_rejection():
+    # one snapshot per minute for 7h: +80% peak at minute 90, 1h price 1.2, 6h price 0.9
+    snaps = []
+    for m in range(0, 7 * 60):
+        p = 1.0 + (0.8 if m == 90 else 0.0) + (0.2 if 55 <= m <= 65 else 0) - (0.1 if 355 <= m <= 365 else 0)
+        snaps.append((T0 + m * 60, p))
+    out = compute_from_snapshots(1.0, T0, snaps, now=T0 + 7 * 3600)
+    assert out["horizon_hours"] == 6 and out["r_1h"] == 20.0 and out["r_6h"] == -10.0
+    assert out["peak_pct"] == 80.0 and out["peak_minutes"] == 90
+    gappy = [x for x in snaps if not (T0 + 2 * 3600 <= x[0] <= T0 + 3 * 3600)]   # 1h hole: could hide a crash
+    assert compute_from_snapshots(1.0, T0, gappy, now=T0 + 7 * 3600) is None
+    assert compute_from_snapshots(1.0, T0, snaps[:10], now=T0 + 7 * 3600) is None  # does not reach 1h
+
+
+def test_update_prefers_snapshots_and_spends_no_calls():
+    async def body(s):
+        now = datetime.now(timezone.utc)
+        t = Token(chain=Chain.solana, address="mS", symbol="SNAP", name="", pair_address="pS",
+                  discovery_sources=[], alpha_score=88, badge=Badge.strong_alpha)
+        s.add(t)
+        await s.flush()
+        created = now - timedelta(hours=2)
+        s.add(Signal(token_id=t.id, score=88, badge=Badge.strong_alpha, price_usd=1.0, payload={}, created_at=created))
+        for m in range(0, 121):
+            s.add(MarketSnapshot(token_id=t.id, price_usd=1.5 if m >= 60 else 1.0,
+                                 captured_at=created + timedelta(minutes=m)))
+        await s.commit()
+        g = FakeGecko({})
+        st = await update_outcomes(s, g, Settings())
+        await s.commit()
+        o = (await s.execute(select(SignalOutcome))).scalars().one()
+        assert g.calls == 0 and st["from_snapshots"] == 1
+        assert (o.source, o.horizon_hours, o.r_1h) == ("snapshots", 1, 50.0)
     _db(body)

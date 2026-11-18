@@ -636,6 +636,7 @@ class Scanner:
         self.holdings = HoldingsChecker(self.settings)
         self._security_sem = asyncio.Semaphore(6)
         self._cycle_no = 0
+        self._followup: set[tuple[Chain, str]] = set()
 
     # ---- 1. discovery ---------------------------------------------------
     async def discover(self, stats: CycleStats) -> dict[tuple[Chain, str], set[str]]:
@@ -689,8 +690,46 @@ class Scanner:
         except Exception:
             log.warning("could not load tracked-wallet buys", exc_info=True)
 
+        # Follow every signalled token for 25h, even after it falls below the filters, so performance can
+        # be measured from our own per-minute snapshots (losers included, no survivorship bias).
+        self._followup = set()
+        try:
+            async with SessionLocal() as session:
+                since = datetime.now(timezone.utc) - timedelta(hours=25)
+                for chain, addr in (await session.execute(
+                    select(Token.chain, Token.address).join(Signal, Signal.token_id == Token.id)
+                    .where(Signal.created_at >= since).distinct()
+                )).all():
+                    if chain in self.chains:
+                        key = (chain, _norm_addr(chain, addr))
+                        found[key].add("signal_followup")
+                        self._followup.add(key)
+        except Exception:
+            log.warning("could not load signal follow-ups", exc_info=True)
+
         stats.candidates = len(found)
         return found
+
+    async def snapshot_followups(self, metrics: list[MarketMetrics], scored: set[tuple[Chain, str]]) -> int:
+        """Price snapshots for signalled tokens that were not scored this cycle (fell below the filters)."""
+        todo = [m for m in metrics if (m.chain, m.address) in self._followup and (m.chain, m.address) not in scored]
+        if not todo:
+            return 0
+        n = 0
+        async with SessionLocal() as session:
+            ids = dict((await session.execute(
+                select(Token.address, Token.id).where(Token.address.in_([m.address for m in todo]))
+            )).all())
+            for m in todo:
+                tid = ids.get(m.address)
+                if tid is None or m.price_usd is None:
+                    continue
+                session.add(MarketSnapshot(token_id=tid, price_usd=m.price_usd, liquidity_usd=m.liquidity_usd,
+                                           volume_h1=m.volume_h1, market_cap=m.effective_mcap,
+                                           buys_h1=m.buys_h1, sells_h1=m.sells_h1))
+                n += 1
+            await session.commit()
+        return n
 
     # ---- 2. market enrichment -------------------------------------------
     async def enrich(self, candidates: dict[tuple[Chain, str], set[str]]) -> list[MarketMetrics]:
@@ -897,6 +936,10 @@ class Scanner:
         survivors.sort(key=lambda m: m.volume_h1 or 0.0, reverse=True)
         survivors = survivors[: self.settings.max_tokens_per_cycle]
         stats.passed_filters = len(survivors)
+        try:
+            await self.snapshot_followups(metrics, {(m.chain, m.address) for m in survivors})
+        except Exception:
+            log.warning("follow-up snapshots failed", exc_info=True)
 
         sec_results = await self._audit_with_deadline(survivors, stats)
 

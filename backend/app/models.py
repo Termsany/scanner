@@ -277,6 +277,7 @@ class SignalOutcome(Base):
     trough_pct: Mapped[float | None] = mapped_column(Float)  # worst low within 24h (or so far)
     peak_minutes: Mapped[int | None] = mapped_column(Integer)
     horizon_hours: Mapped[int] = mapped_column(Integer, default=0)  # 0 / 1 / 6 / 24: horizons measured so far
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # snapshots | candles
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(String(160))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

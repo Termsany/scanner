@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.models import Signal, SignalOutcome, Token
+from app.models import MarketSnapshot, Signal, SignalOutcome, Token
 from app.repository import utc
 
 log = logging.getLogger("performance")
@@ -66,6 +66,44 @@ def compute_outcome(entry: float, t0: int, candles: list[list[float]], now: int)
     return out
 
 
+SNAP_TOLERANCE_S = 10 * 60      # a snapshot within ±10 min of a horizon stands for the price at it
+SNAP_MAX_GAP_S = 30 * 60        # a longer gap could hide a peak or a crash: use candles instead
+
+
+def compute_from_snapshots(entry: float, t0: int, snaps: list[tuple[int, float]], now: int) -> dict[str, Any] | None:
+    """Same output as compute_outcome, from the scanner's own per-minute price snapshots.
+    None when the snapshots do not cover the elapsed window well enough (caller falls back to candles)."""
+    if not entry:
+        return None
+    end = min(now, t0 + 24 * 3600)
+    pts = sorted((ts, p) for ts, p in snaps if t0 - SNAP_TOLERANCE_S <= ts <= end and p)
+    if len(pts) < 2:
+        return None
+    reached = [h for h in HORIZONS if t0 + h * 3600 <= now]
+    if not reached:
+        return None
+    covered_until = t0 + reached[-1] * 3600
+    span = [ts for ts, _ in pts if ts <= covered_until + SNAP_TOLERANCE_S]
+    if not span or span[0] > t0 + SNAP_TOLERANCE_S:
+        return None
+    if any(b - a > SNAP_MAX_GAP_S for a, b in zip(span, span[1:])):
+        return None
+    out: dict[str, Any] = {"horizon_hours": 0}
+    for h in reached:
+        target = t0 + h * 3600
+        near = min(pts, key=lambda x: abs(x[0] - target))
+        if abs(near[0] - target) > SNAP_TOLERANCE_S:
+            return None
+        out[f"r_{h}h"] = _pct(near[1], entry)
+        out["horizon_hours"] = h
+    window = [(ts, p) for ts, p in pts if ts >= t0]
+    peak_ts, peak = max(window, key=lambda x: x[1])
+    out["peak_pct"] = _pct(peak, entry)
+    out["trough_pct"] = _pct(min(p for _, p in window), entry)
+    out["peak_minutes"] = max(0, (peak_ts - t0) // 60)
+    return out
+
+
 def _due(o: SignalOutcome | None, age_h: float) -> bool:
     if o is None:
         return age_h >= 1
@@ -90,14 +128,35 @@ async def update_outcomes(session: AsyncSession, gecko, settings: Settings | Non
     due = [(sig, tok) for sig, tok in rows
            if tok.pair_address and _due(have.get(sig.id), (now - utc(sig.created_at)).total_seconds() / 3600)]
     # Oldest first: a signal about to pass 24h must not miss its last measurement.
-    calls = measured = 0
-    for sig, tok in due[: s.perf_max_calls_per_run]:
+    calls = measured = from_snaps = 0
+    now_ts = int(now.timestamp())
+    for sig, tok in due:
         t0 = int(utc(sig.created_at).timestamp())
-        o = have.get(sig.id) or SignalOutcome(
-            signal_id=sig.id, chain=tok.chain, symbol=tok.symbol, token_address=tok.address, score=sig.score,
-            signal_time=utc(sig.created_at), entry_price=sig.price_usd, horizon_hours=0, attempts=0)
-        if sig.id not in have:
+        o = have.get(sig.id)
+        if o is None:
+            o = SignalOutcome(
+                signal_id=sig.id, chain=tok.chain, symbol=tok.symbol, token_address=tok.address, score=sig.score,
+                signal_time=utc(sig.created_at), entry_price=sig.price_usd, horizon_hours=0, attempts=0)
             session.add(o)
+            have[sig.id] = o
+        # 1) our own per-minute snapshots (free, includes tokens that fell below the filters)
+        snaps = [(int(utc(ts).timestamp()), p) for ts, p in (await session.execute(
+            select(MarketSnapshot.captured_at, MarketSnapshot.price_usd).where(
+                MarketSnapshot.token_id == tok.id,
+                MarketSnapshot.captured_at >= utc(sig.created_at) - timedelta(seconds=SNAP_TOLERANCE_S),
+                MarketSnapshot.captured_at <= utc(sig.created_at) + timedelta(hours=24, minutes=10))
+        )).all()]
+        res = compute_from_snapshots(sig.price_usd or 0.0, t0, snaps, now_ts)
+        if res is not None and res["horizon_hours"] > o.horizon_hours:
+            for k, v in res.items():
+                setattr(o, k, v)
+            o.source, o.error = "snapshots", None
+            from_snaps += 1
+            measured += 1
+            continue
+        # 2) gaps: GeckoTerminal candles, within this run's call budget
+        if calls >= s.perf_max_calls_per_run:
+            continue
         calls += 1
         try:
             candles = await gecko.ohlcv(tok.chain, tok.pair_address, aggregate_minutes=CANDLE_MINUTES,
@@ -108,16 +167,16 @@ async def update_outcomes(session: AsyncSession, gecko, settings: Settings | Non
             log.info("performance: GeckoTerminal unavailable (%s); stopping this run", type(exc).__name__)
             break
         o.attempts += 1
-        res = compute_outcome(sig.price_usd or 0.0, t0, candles, int(now.timestamp()))
+        res = compute_outcome(sig.price_usd or 0.0, t0, candles, now_ts)
         if res["horizon_hours"] == 0 and not candles:
             o.error = "no candles for pool"
             continue
         for k, v in res.items():
             setattr(o, k, v)
-        o.error = None
+        o.source, o.error = "candles", None
         measured += 1
     await session.flush()
-    return {"due": len(due), "calls": calls, "measured": measured}
+    return {"due": len(due), "calls": calls, "measured": measured, "from_snapshots": from_snaps}
 
 
 # ---------------------------------------------------------------------------
