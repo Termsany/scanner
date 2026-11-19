@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.models import LivePosition
+from app.models import Chain, LivePosition
 from app.repository import utc
 
 router = APIRouter(prefix="/api/live", tags=["live"])
@@ -65,7 +65,9 @@ def _pos(p: LivePosition) -> dict[str, Any]:
 # ---- live market data (cached so a page polling every few seconds costs little) ----
 PRICE_TTL = 3.0
 BALANCE_TTL = 10.0
+SOL_TTL = 60.0
 _cache: dict[str, tuple[float, Any]] = {}
+_decimals: dict[str, int] = {}   # never changes for a mint
 
 
 async def _cached(key: str, ttl: float, fetch) -> Any:
@@ -81,15 +83,40 @@ async def _cached(key: str, ttl: float, fetch) -> Any:
 
 
 async def jupiter_prices(http: httpx.AsyncClient, mints: list[str]) -> dict[str, dict[str, float]]:
-    """{mint: {"usd": price, "decimals": n}} from Jupiter's price API (50 ids per call)."""
+    """{mint: {"usd": price, "decimals": n}}.
+
+    Jupiter's free API is kept for trading (the worker shares its per-IP limit), so the page polls DexScreener
+    for token prices and asks Jupiter only for decimals it has not seen (once per mint) and SOL (once a minute).
+    """
+    from app.live import SOL_MINT
+    from app.scanner_worker import _f, select_primary_pair
+
     s = get_settings()
+    tokens = [m for m in mints if m != SOL_MINT]
+    need = [m for m in tokens if m not in _decimals]
+    sol = _cache.get("solpx")
+    want_sol = SOL_MINT in mints and not (sol and time.monotonic() - sol[0] < SOL_TTL)
+    if need or want_sol:
+        ids = need + ([SOL_MINT] if want_sol else [])
+        r = await http.get(f"{s.jupiter_api_url}/price/v3", params={"ids": ",".join(ids[:50])}, timeout=8)
+        if r.status_code == 200:
+            for mint, d in (r.json() or {}).items():
+                if d and d.get("decimals") is not None:
+                    _decimals[mint] = int(d["decimals"])
+                if mint == SOL_MINT and d and d.get("usdPrice"):
+                    _cache["solpx"] = (time.monotonic(), float(d["usdPrice"]))
     out: dict[str, dict[str, float]] = {}
-    for i in range(0, len(mints), 50):
-        r = await http.get(f"{s.jupiter_api_url}/price/v3", params={"ids": ",".join(mints[i:i + 50])}, timeout=8)
-        r.raise_for_status()
-        for mint, d in (r.json() or {}).items():
-            if d and d.get("usdPrice") is not None:
-                out[mint] = {"usd": float(d["usdPrice"]), "decimals": int(d.get("decimals") or 0)}
+    for i in range(0, len(tokens), 30):
+        batch = tokens[i:i + 30]
+        r = await http.get(f"https://api.dexscreener.com/tokens/v1/solana/{','.join(batch)}", timeout=8)
+        pairs = r.json() if r.status_code == 200 and isinstance(r.json(), list) else []
+        for m in batch:
+            pair = select_primary_pair(Chain.solana, m, pairs)
+            px = _f(pair.get("priceUsd")) if pair else None
+            if px and m in _decimals:
+                out[m] = {"usd": px, "decimals": _decimals[m]}
+    if (sol := _cache.get("solpx")) and SOL_MINT in mints:
+        out[SOL_MINT] = {"usd": sol[1], "decimals": 9}
     return out
 
 

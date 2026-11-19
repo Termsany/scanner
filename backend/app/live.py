@@ -127,6 +127,47 @@ def _key(base: str, account: str) -> str:
     return base if account == "main" else f"{base}:{account}"
 
 
+class JupiterGate:
+    """One gate for every Jupiter call in the process: all accounts share the free API's per-IP limit.
+
+    Calls are spaced at least `interval` seconds apart; a 429 is retried with backoff (Retry-After honoured)
+    instead of failing the trade.
+    """
+
+    def __init__(self, interval: float = 1.1, retries: int = 4) -> None:
+        self.interval, self.retries = interval, retries
+        self._lock = asyncio.Lock()
+        self._last = 0.0
+
+    async def _slot(self) -> None:
+        async with self._lock:
+            wait = self._last + self.interval - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = time.monotonic()
+
+    async def request(self, http: httpx.AsyncClient, method: str, url: str, **kw) -> httpx.Response:
+        r: httpx.Response | None = None
+        for attempt in range(self.retries + 1):
+            await self._slot()
+            r = await http.request(method, url, **kw)
+            if r.status_code != 429 or attempt == self.retries:
+                return r
+            try:
+                pause = min(float(r.headers.get("retry-after") or 0), 10.0)
+            except ValueError:
+                pause = 0.0
+            pause = pause or 1.5 * (attempt + 1)
+            log.warning("jupiter 429 on %s, retry %d in %.1fs", url.rsplit("/", 2)[-1], attempt + 1, pause)
+            await asyncio.sleep(pause)
+        return r  # type: ignore[return-value]
+
+
+JUPITER = JupiterGate()
+_sol_px: tuple[float, float] = (0.0, 0.0)   # (monotonic time, USD per SOL), shared by all accounts
+SOL_PRICE_TTL = 20.0
+
+
 class JupiterExecutor:
     """Quotes real routes. In dry mode stops there; in live mode signs and sends."""
 
@@ -153,16 +194,28 @@ class JupiterExecutor:
             raise SwapError(f"{method}: {body['error'].get('message', body['error'])}"[:250])
         return body.get("result")
 
+    async def _prices(self, mints: list[str]) -> dict[str, Any]:
+        r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/price/v3",
+                                  params={"ids": ",".join(mints)})
+        if r.status_code != 200:
+            raise SwapError(f"price API {r.status_code}: {r.text[:120]}")
+        data = r.json() or {}
+        sol = (data.get(SOL_MINT) or {}).get("usdPrice")
+        if sol:
+            global _sol_px
+            _sol_px = (time.monotonic(), float(sol))
+        return data
+
     async def sol_price(self) -> float:
-        r = await self.http.get(f"{self.s.jupiter_api_url}/price/v3", params={"ids": SOL_MINT})
-        r.raise_for_status()
-        px = float((r.json().get(SOL_MINT) or {}).get("usdPrice") or 0)
-        if px <= 0:
+        if time.monotonic() - _sol_px[0] < SOL_PRICE_TTL:
+            return _sol_px[1]
+        await self._prices([SOL_MINT])
+        if _sol_px[1] <= 0:
             raise SwapError("no SOL price")
-        return px
+        return _sol_px[1]
 
     async def quote(self, input_mint: str, output_mint: str, amount: int) -> dict[str, Any]:
-        r = await self.http.get(f"{self.s.jupiter_api_url}/swap/v1/quote", params={
+        r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/swap/v1/quote", params={
             "inputMint": input_mint, "outputMint": output_mint, "amount": str(amount),
             "slippageBps": self.s.live_slippage_bps, "restrictIntermediateTokens": "true",
         })
@@ -191,7 +244,7 @@ class JupiterExecutor:
     async def _send(self, q: dict[str, Any]) -> tuple[str, bool]:
         from solders.transaction import VersionedTransaction
 
-        r = await self.http.post(f"{self.s.jupiter_api_url}/swap/v1/swap", json={
+        r = await JUPITER.request(self.http, "POST", f"{self.s.jupiter_api_url}/swap/v1/swap", json={
             "quoteResponse": q, "userPublicKey": self.pubkey, "wrapAndUnwrapSol": True,
             "dynamicComputeUnitLimit": True,
             "prioritizationFeeLamports": {"priorityLevelWithMaxLamports": {
@@ -215,21 +268,19 @@ class JupiterExecutor:
         return sig, False   # not confirmed in time: the caller checks balances
 
     # ---- trades ------------------------------------------------------------
-    async def _decimals(self, mint: str) -> int:
-        r = await self.http.get(f"{self.s.jupiter_api_url}/price/v3", params={"ids": mint})
-        r.raise_for_status()
-        d = (r.json() or {}).get(mint) or {}
-        if d.get("decimals") is None:
-            raise SwapError("token decimals unknown")
-        return int(d["decimals"])
-
     async def buy(self, mint: str, usd: float, max_price: float | None = None) -> Fill:
+        decimals = None
+        if max_price:   # one price call gives SOL's price and the token's decimals
+            d = ((await self._prices([SOL_MINT, mint])).get(mint) or {}).get("decimals")
+            if d is None:
+                raise SwapError("token decimals unknown")
+            decimals = int(d)
         px = await self.sol_price()
         lamports = int(usd / px * LAMPORTS)
         q = await self.quote(SOL_MINT, mint, lamports)
-        if max_price:
+        if decimals is not None:
             # price we would actually pay per token, from the live quote (includes price impact)
-            pay = usd / (int(q["outAmount"]) / 10 ** await self._decimals(mint))
+            pay = usd / (int(q["outAmount"]) / 10 ** decimals)
             if pay > max_price:
                 raise ChaseError(pay, max_price)
         if self.mode == "dry":

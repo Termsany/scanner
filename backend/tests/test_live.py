@@ -301,3 +301,27 @@ def test_max_chase_skips_buys_far_above_the_leaders_price():
     rows = _db(body)
     assert [c[1] for c in x.calls] == ["OK"] and [r.token_address for r in rows] == ["OK"]
     assert any("+27% above" in n for n in notes)
+
+
+def test_jupiter_gate_retries_429_and_spaces_calls():
+    import httpx
+    import respx
+
+    from app.live import JupiterGate
+
+    gate = JupiterGate(interval=0.05, retries=3)
+
+    async def go():
+        with respx.mock:
+            route = respx.get("https://jup.test/q").mock(side_effect=[
+                httpx.Response(429, headers={"retry-after": "0.01"}),
+                httpx.Response(429, headers={"retry-after": "0.01"}),
+                httpx.Response(200, json={"ok": True}),
+            ])
+            async with httpx.AsyncClient() as http:
+                t0 = asyncio.get_running_loop().time()
+                r = await gate.request(http, "GET", "https://jup.test/q")
+                return r, route.call_count, asyncio.get_running_loop().time() - t0
+
+    r, calls, took = asyncio.run(go())
+    assert r.status_code == 200 and calls == 3 and took >= 0.1   # 3 calls spaced >= 0.05s apart
