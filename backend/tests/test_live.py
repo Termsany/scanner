@@ -27,7 +27,8 @@ class FakeExec:
 
     pay_price = None   # price per token the quote would give (for the max-chase guard)
 
-    async def buy(self, mint, usd, max_price=None):
+    async def buy(self, mint, usd, max_price=None, slippage_bps=None):
+        self.last_bps = slippage_bps
         if max_price and self.pay_price and self.pay_price > max_price:
             from app.live import ChaseError
             raise ChaseError(self.pay_price, max_price)
@@ -337,8 +338,8 @@ class BalExec(FakeExec):
     async def token_balance(self, mint):
         return self.bal.get(mint, 0)
 
-    async def buy(self, mint, usd, max_price=None):
-        f = await super().buy(mint, usd, max_price)
+    async def buy(self, mint, usd, max_price=None, slippage_bps=None):
+        f = await super().buy(mint, usd, max_price, slippage_bps)
         self.bal[mint] = self.bal.get(mint, 0) + f.tokens_raw
         return f
 
@@ -612,3 +613,73 @@ def test_tracker_records_every_trade_of_unconditional_leader():
         return [(r.tx_hash, r.wallet == LEADER, r.telegram_sent) for r in rows]
 
     assert _db(body) == [("a", True, True), ("b", True, True)]   # recorded, no Telegram alert (too small)
+
+
+def test_slippage_failure_retries_with_wider_slippage(monkeypatch):
+    import base64
+    import json as _json
+    from urllib.parse import parse_qs, urlparse
+
+    import httpx
+    import respx
+    from solders.hash import Hash
+    from solders.keypair import Keypair
+    from solders.message import MessageV0
+    from solders.system_program import TransferParams, transfer
+    from solders.transaction import VersionedTransaction
+
+    import app.live as live_mod
+    from app.live import SOL_MINT, JupiterExecutor
+
+    kp = Keypair()
+    msg = MessageV0.try_compile(kp.pubkey(), [transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=kp.pubkey(),
+                                                                       lamports=1))], [], Hash.default())
+    unsigned = base64.b64encode(bytes(VersionedTransaction(msg, [kp]))).decode()
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(live_mod.asyncio, "sleep", lambda s: real_sleep(0))
+    monkeypatch.setattr(live_mod, "JUPITER", live_mod.JupiterGate(interval=0))
+    live_mod._sol_px = (0.0, 0.0)
+    MINT = "Mint111111111111111111111111111111111111111"
+    st = {"bps": [], "tokens": 0}
+
+    def rpc(req):
+        m = _json.loads(req.content)["method"]
+        if m == "sendTransaction":
+            if len(st["bps"]) == 1:   # first attempt: simulation fails with Jupiter 6001
+                return httpx.Response(200, json={"error": {"code": -32002, "message":
+                    "Transaction simulation failed: Error processing Instruction 6: custom program error: 0x1771"}})
+            return httpx.Response(200, json={"result": "SIGOK"})
+        if m == "getSignatureStatuses":
+            st["tokens"] = 7000
+            return httpx.Response(200, json={"result": {"value": [{"confirmationStatus": "confirmed", "err": None}]}})
+        if m == "getBalance":
+            return httpx.Response(200, json={"result": {"value": 2_000_000_000}})
+        if m == "getTokenAccountsByOwner":
+            return httpx.Response(200, json={"result": {"value": [
+                {"account": {"data": {"parsed": {"info": {"tokenAmount": {"amount": str(st["tokens"])}}}}}}]}})
+        return httpx.Response(404)
+
+    def quote(req):
+        st["bps"].append(int(parse_qs(urlparse(str(req.url)).query)["slippageBps"][0]))
+        return httpx.Response(200, json={"outAmount": "7000"})
+
+    with respx.mock:
+        respx.post("https://rpc.test/").mock(side_effect=rpc)
+        respx.get(url__regex=r"https://jup\.test/price/v3.*").mock(return_value=httpx.Response(200, json={
+            SOL_MINT: {"usdPrice": 100.0, "decimals": 9}}))
+        respx.get(url__regex=r"https://jup\.test/swap/v1/quote.*").mock(side_effect=quote)
+        respx.post("https://jup.test/swap/v1/swap").mock(return_value=httpx.Response(200, json={
+            "swapTransaction": unsigned, "lastValidBlockHeight": 10**12}))
+
+        async def go():
+            x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/"),
+                                live=True, private_key=str(kp))
+            try:
+                return await x.buy(MINT, 20.0, slippage_bps=2500)
+            finally:
+                await x.close()
+
+        f = asyncio.run(go())
+
+    assert f.signature == "SIGOK" and f.tokens_raw == 7000
+    assert st["bps"] == [2500, 4000]          # 25% first, then 1.6x after the slippage failure

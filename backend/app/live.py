@@ -51,6 +51,15 @@ class Dropped(SwapError):
     """The transaction's blockhash expired without it landing: nothing happened on-chain, safe to retry."""
 
 
+class SlippageError(Dropped):
+    """Price moved past the allowed slippage (Jupiter error 6001 / 0x1771): nothing was swapped, retry."""
+
+
+def _is_slippage(err: object) -> bool:
+    s = str(err)
+    return "0x1771" in s or "'Custom': 6001" in s or "Custom(6001)" in s
+
+
 class ChaseError(Exception):
     """The price already ran too far past the leader's: skip instead of buying the top."""
 
@@ -77,7 +86,8 @@ class Executor(Protocol):
 
     async def sol_balance(self) -> float: ...
     async def sol_price(self) -> float: ...
-    async def buy(self, mint: str, usd: float, max_price: float | None = None) -> Fill: ...
+    async def buy(self, mint: str, usd: float, max_price: float | None = None,
+                  slippage_bps: int | None = None) -> Fill: ...
     async def sell(self, mint: str, tokens_raw: int) -> Fill: ...
     async def token_balance(self, mint: str) -> int: ...
     async def close(self) -> None: ...
@@ -219,10 +229,11 @@ class JupiterExecutor:
             raise SwapError("no SOL price")
         return _sol_px[1]
 
-    async def quote(self, input_mint: str, output_mint: str, amount: int) -> dict[str, Any]:
+    async def quote(self, input_mint: str, output_mint: str, amount: int,
+                    slippage_bps: int | None = None) -> dict[str, Any]:
         r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/swap/v1/quote", params={
             "inputMint": input_mint, "outputMint": output_mint, "amount": str(amount),
-            "slippageBps": self.s.live_slippage_bps, "restrictIntermediateTokens": "true",
+            "slippageBps": slippage_bps or self.s.live_slippage_bps, "restrictIntermediateTokens": "true",
         })
         if r.status_code != 200:
             raise SwapError(f"no route ({r.status_code}): {r.text[:150]}")
@@ -265,8 +276,13 @@ class JupiterExecutor:
         # First send with preflight (a doomed swap fails here, not on-chain). Then re-broadcast the same signed
         # transaction every ~2 s until it confirms or its blockhash expires: under load, nodes drop transactions
         # and a single send often never lands.
-        sig = await self._rpc("sendTransaction", [raw, {
-            "encoding": "base64", "skipPreflight": False, "maxRetries": 0, "preflightCommitment": "confirmed"}])
+        try:
+            sig = await self._rpc("sendTransaction", [raw, {
+                "encoding": "base64", "skipPreflight": False, "maxRetries": 0, "preflightCommitment": "confirmed"}])
+        except SwapError as exc:
+            if _is_slippage(exc):
+                raise SlippageError("price moved past the slippage limit (simulation)") from exc
+            raise
         deadline = time.monotonic() + 90
         n = 0
         while time.monotonic() < deadline:
@@ -275,6 +291,8 @@ class JupiterExecutor:
             st = ((await self._rpc("getSignatureStatuses", [[sig]])) or {}).get("value", [None])[0]
             if st:
                 if st.get("err"):
+                    if _is_slippage(st["err"]):
+                        raise SlippageError("price moved past the slippage limit (on-chain, fee only)")
                     raise SwapError(f"transaction failed: {st['err']}"[:250])
                 if st.get("confirmationStatus") in ("confirmed", "finalized"):
                     return sig, True
@@ -291,14 +309,25 @@ class JupiterExecutor:
         return sig, False   # unknown after 90 s: the caller checks balances
 
     # ---- trades ------------------------------------------------------------
-    async def buy(self, mint: str, usd: float, max_price: float | None = None) -> Fill:
-        try:
-            return await self._buy_once(mint, usd, max_price)
-        except Dropped as exc:     # never landed: nothing was spent, so one fresh attempt (new quote, chase re-checked)
-            log.warning("buy %s dropped (%s); retrying once with a fresh quote", mint[:8], exc)
-            return await self._buy_once(mint, usd, max_price)
+    def _wider(self, bps: int) -> int:
+        return min(int(bps * 1.6), self.s.live_max_slippage_bps)
 
-    async def _buy_once(self, mint: str, usd: float, max_price: float | None = None) -> Fill:
+    async def buy(self, mint: str, usd: float, max_price: float | None = None,
+                  slippage_bps: int | None = None) -> Fill:
+        bps = slippage_bps or self.s.live_slippage_bps
+        for attempt in range(3):   # nothing is spent when a swap is dropped or hits slippage: try again, fresh quote
+            try:
+                return await self._buy_once(mint, usd, max_price, bps)
+            except Dropped as exc:
+                if attempt == 2:
+                    raise
+                if isinstance(exc, SlippageError):
+                    bps = self._wider(bps)
+                log.warning("buy %s: %s; retrying with a fresh quote (slippage %.0f%%)", mint[:8], exc, bps / 100)
+        raise SwapError("unreachable")
+
+    async def _buy_once(self, mint: str, usd: float, max_price: float | None = None,
+                        bps: int | None = None) -> Fill:
         decimals = None
         if max_price:   # one price call gives SOL's price and the token's decimals
             d = ((await self._prices([SOL_MINT, mint])).get(mint) or {}).get("decimals")
@@ -307,7 +336,7 @@ class JupiterExecutor:
             decimals = int(d)
         px = await self.sol_price()
         lamports = int(usd / px * LAMPORTS)
-        q = await self.quote(SOL_MINT, mint, lamports)
+        q = await self.quote(SOL_MINT, mint, lamports, bps)
         if decimals is not None:
             # price we would actually pay per token, from the live quote (includes price impact)
             pay = usd / (int(q["outAmount"]) / 10 ** decimals)
@@ -325,16 +354,19 @@ class JupiterExecutor:
         return Fill(sig, max(sol0 - sol1, 0.0), got, px)
 
     async def sell(self, mint: str, tokens_raw: int) -> Fill:
-        for attempt in range(3):   # a dropped sell sold nothing: try again (fresh quote) rather than stay stuck
+        bps = self.s.live_slippage_bps
+        for attempt in range(4):   # a dropped sell sold nothing: try again (fresh quote) rather than stay stuck
             try:
-                return await self._sell_once(mint, tokens_raw)
+                return await self._sell_once(mint, tokens_raw, bps)
             except Dropped as exc:
-                if attempt == 2:
+                if attempt == 3:
                     raise
-                log.warning("sell %s dropped (%s); retrying with a fresh quote", mint[:8], exc)
+                if isinstance(exc, SlippageError):
+                    bps = self._wider(bps)
+                log.warning("sell %s: %s; retrying with a fresh quote (slippage %.0f%%)", mint[:8], exc, bps / 100)
         raise SwapError("unreachable")
 
-    async def _sell_once(self, mint: str, tokens_raw: int) -> Fill:
+    async def _sell_once(self, mint: str, tokens_raw: int, bps: int | None = None) -> Fill:
         px = await self.sol_price()
         if self.mode == "dry":
             q = await self.quote(mint, SOL_MINT, tokens_raw)
@@ -344,7 +376,7 @@ class JupiterExecutor:
         amount = min(tokens_raw, held)
         if amount <= 0:
             raise SwapError("no tokens left to sell")
-        q = await self.quote(mint, SOL_MINT, amount)
+        q = await self.quote(mint, SOL_MINT, amount, bps)
         sol0 = await self.sol_balance()
         sig, ok = await self._send(q)
         await asyncio.sleep(1)
@@ -517,7 +549,8 @@ class CopyEngine:
         chase = self.s.live_max_chase_pct
         max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None and not free) else None
         try:
-            f = await self.x.buy(t.token_address, self.a.size_usd, max_price=max_price)
+            f = await self.x.buy(t.token_address, self.a.size_usd, max_price=max_price,
+                                 slippage_bps=self.s.live_slippage_bps_unconditional if free else None)
         except ChaseError as exc:
             over = (exc.pay / t.price_usd - 1) * 100
             log.info("live: skip buy %s (price +%.0f%% over the leader's, limit +%.0f%%)", sym, over, chase)

@@ -90,6 +90,8 @@ class Settings(BaseSettings):
     live_max_open_usd: float = 100.0             # total cost of open positions never exceeds this
     live_max_daily_loss_usd: float = 50.0        # realized loss in 24h above this: pause new buys
     live_slippage_bps: int = 1_500               # 15%: memecoins move fast; the quote's minimum out still applies
+    live_slippage_bps_unconditional: int = 2_500 # 25% first try for LIVE_UNCONDITIONAL_WALLETS (fresh launches)
+    live_max_slippage_bps: int = 5_000           # retries after a slippage failure widen up to this (50%)
     live_priority_fee_lamports: int = 1_000_000  # cap on priority fee per swap (0.001 SOL)
     live_min_liquidity_usd: float = 10_000.0
     # Skip a copy buy when the live quote's price per token is more than this % above the price recorded with
