@@ -62,7 +62,56 @@ function Stat({ label, value, sub, cls }: { label: string; value: string; sub?: 
   );
 }
 
-function PositionRows({ rows, now }: { rows: LivePositionOut[]; now: number }) {
+function SellButtons({ p, onSell }: { p: LivePositionOut; onSell: (p: LivePositionOut, share: number) => Promise<void> }) {
+  const [confirm, setConfirm] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (p.manual_sell_frac) return <span className="block text-warn">Selling {(p.manual_sell_frac * 100).toFixed(0)}%…</span>;
+  if (confirm != null) {
+    return (
+      <span className="mt-1 flex flex-wrap items-center gap-1">
+        <span className="text-muted">Sell {confirm * 100}%?</span>
+        <button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onSell(p, confirm);
+            } finally {
+              setBusy(false);
+              setConfirm(null);
+            }
+          }}
+          className="rounded border border-bear/60 px-1.5 py-0.5 text-bear disabled:opacity-50"
+        >
+          Yes, sell
+        </button>
+        <button onClick={() => setConfirm(null)} className="rounded border border-line px-1.5 py-0.5 text-muted">
+          Cancel
+        </button>
+      </span>
+    );
+  }
+  return (
+    <span className="mt-1 flex gap-1">
+      <button onClick={() => setConfirm(0.5)} className="rounded border border-line px-1.5 py-0.5 text-muted hover:text-ink">
+        Sell 50%
+      </button>
+      <button onClick={() => setConfirm(1)} className="rounded border border-bear/50 px-1.5 py-0.5 text-bear hover:bg-bear/10">
+        Sell 100%
+      </button>
+    </span>
+  );
+}
+
+function PositionRows({
+  rows,
+  now,
+  onSell,
+}: {
+  rows: LivePositionOut[];
+  now: number;
+  onSell: (p: LivePositionOut, share: number) => Promise<void>;
+}) {
   return (
     <>
       {rows.map((p) => {
@@ -84,7 +133,10 @@ function PositionRows({ rows, now }: { rows: LivePositionOut[]; now: number }) {
             <td className={`num px-3 py-2 text-right ${tone(pnl)}`}>{money(pnl, true)}</td>
             <td className="px-3 py-2 text-xs">
               {p.status === "open" ? (
-                <span className="text-accent">Open</span>
+                <>
+                  <span className="text-accent">Open</span>
+                  <SellButtons p={p} onSell={onSell} />
+                </>
               ) : p.status === "failed" ? (
                 <span className="text-bear" title={p.error ?? ""}>Failed: {(p.error ?? "").slice(0, 60)}</span>
               ) : (
@@ -156,6 +208,15 @@ export function LiveView() {
       ctl.abort();
     };
   }, [password, load]);
+
+  async function sellPosition(p: LivePositionOut, share: number) {
+    try {
+      await api.liveSell(password, p.id, share);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Sell request failed.");
+    }
+    await load(password);
+  }
 
   async function togglePause() {
     if (!data) return;
@@ -302,7 +363,7 @@ export function LiveView() {
                   </tr>
                 </thead>
                 <tbody>
-                  <PositionRows rows={all} now={now} />
+                  <PositionRows rows={all} now={now} onSell={sellPosition} />
                 </tbody>
               </table>
             )}

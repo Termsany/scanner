@@ -102,6 +102,13 @@ export const api = {
       body: JSON.stringify({ paused }),
     }),
 
+  liveSell: (password: string, id: number, share: number) =>
+    request<{ queued: boolean; message: string }>(`/api/live/positions/${id}/sell`, {
+      method: "POST",
+      headers: { "X-Live-Password": password },
+      body: JSON.stringify({ share }),
+    }),
+
   signals: (minScore: number, limit = 30, signal?: AbortSignal) =>
     request<SignalOut[]>(`/api/signals${qs({ min_score: minScore, limit })}`, { signal }),
 

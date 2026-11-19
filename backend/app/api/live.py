@@ -54,7 +54,7 @@ def _pos(p: LivePosition) -> dict[str, Any]:
         "leader_wallet": p.leader_wallet, "status": p.status, "cost_usd": p.cost_usd, "sol_spent": p.sol_spent,
         "proceeds_usd": p.proceeds_usd, "proceeds_sol": p.proceeds_sol, "pnl_usd": p.pnl_usd,
         "tokens_left": p.tokens_raw, "tokens_bought": p.tokens_bought_raw,
-        "buy_signature": p.buy_signature, "fills": p.fills or [], "exit_reason": p.exit_reason, "error": p.error,
+        "buy_signature": p.buy_signature, "manual_sell_frac": p.manual_sell_frac, "fills": p.fills or [], "exit_reason": p.exit_reason, "error": p.error,
         "opened_at": utc(p.opened_at).isoformat() if p.opened_at else None,
         "closed_at": utc(p.closed_at).isoformat() if p.closed_at else None,
     }
@@ -89,3 +89,18 @@ async def pause(body: PauseIn, session: Session, _: Auth) -> dict[str, bool]:
     await set_paused(session, body.paused)
     await session.commit()
     return {"paused": body.paused}
+
+
+class SellIn(BaseModel):
+    share: float   # 0.25 | 0.5 | 1.0
+
+
+@router.post("/positions/{position_id}/sell")
+async def sell(position_id: int, body: SellIn, session: Session, _: Auth) -> dict[str, Any]:
+    """Queue a manual sell; the worker executes it within seconds and reports on Telegram."""
+    from app.live import request_manual_sell
+
+    ok, note = await request_manual_sell(session, position_id, body.share)
+    if not ok:
+        raise HTTPException(409, note)
+    return {"queued": True, "message": note}

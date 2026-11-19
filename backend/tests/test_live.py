@@ -186,3 +186,39 @@ def test_load_keypair_formats():
     kp = Keypair()
     assert str(load_keypair(str(kp)).pubkey()) == str(kp.pubkey())
     assert str(load_keypair(json.dumps(list(bytes(kp)))).pubkey()) == str(kp.pubkey())
+
+
+def test_manual_sell_partial_then_full():
+    from app.live import request_manual_sell
+
+    x = FakeExec()
+    notes = []
+
+    async def note(t):
+        notes.append(t)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), notify=note)
+        await eng.step(sess)
+        sess.add(_trade(mint="MS"))
+        await sess.commit()
+        await eng.step(sess)
+        pos = (await sess.execute(select(LivePosition))).scalars().one()
+
+        assert (await request_manual_sell(sess, pos.id, 0.3))[0] is False        # only 25/50/100%
+        ok, _ = await request_manual_sell(sess, pos.id, 0.5)
+        assert ok and (await request_manual_sell(sess, pos.id, 1.0))[0] is False  # one request at a time
+        await eng.step(sess)
+        await sess.refresh(pos)
+        assert pos.status == "open" and pos.tokens_raw == "500000" and pos.manual_sell_frac is None
+
+        assert (await request_manual_sell(sess, pos.id, 1.0))[0]
+        await eng.step(sess)
+        await sess.refresh(pos)
+        assert pos.status == "closed" and pos.exit_reason == "manual"
+        assert (await request_manual_sell(sess, pos.id, 1.0))[0] is False        # closed
+        return pos
+
+    p = _db(body)
+    assert [c[0] for c in x.calls] == ["buy", "sell", "sell"]
+    assert abs(p.pnl_usd - 30.0) < 1e-6 and any("manual" in n for n in notes)

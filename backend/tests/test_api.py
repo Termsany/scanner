@@ -435,3 +435,32 @@ def test_live_dashboard_requires_password(monkeypatch):
             c.get("/api/live", headers={"X-Live-Password": "wrong"})
         assert c.get("/api/live", headers={"X-Live-Password": "s3cret-pass"}).status_code == 429   # locked out
     live_api._fails.clear()
+
+
+def test_live_manual_sell_endpoint(monkeypatch):
+    from app.api import live as live_api
+    from app.models import LivePosition
+
+    s = get_settings()
+    live_api._fails.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "pw-123")
+    monkeypatch.setattr(s, "live_mode", "dry")
+
+    async def mk():
+        async with SessionLocal() as ses:
+            p = LivePosition(mode="dry", token_address="T1", symbol="T1", leader_wallet="L", leader_trade_id=1,
+                             status="open", cost_usd=20.0, tokens_raw="100")
+            ses.add(p)
+            await ses.commit()
+            return p.id
+
+    with TestClient(app) as c:
+        pid = c.portal.call(mk)
+        h = {"X-Live-Password": "pw-123"}
+        assert c.post(f"/api/live/positions/{pid}/sell", json={"share": 1.0}).status_code == 401
+        r = c.post(f"/api/live/positions/{pid}/sell", json={"share": 1.0}, headers=h)
+        assert r.status_code == 200 and r.json()["queued"]
+        assert c.post(f"/api/live/positions/{pid}/sell", json={"share": 0.5}, headers=h).status_code == 409
+        opened = c.get("/api/live", headers=h).json()["open"]
+        assert any(p["id"] == pid and p["manual_sell_frac"] == 1.0 for p in opened)
+    live_api._fails.clear()

@@ -228,6 +228,20 @@ async def set_paused(session: AsyncSession, paused: bool) -> None:
     await _put(session, PAUSED, "1" if paused else "0")
 
 
+async def request_manual_sell(session: AsyncSession, position_id: int, share: float) -> tuple[bool, str]:
+    """Queue a manual sell; the worker (which holds the key) executes it within a few seconds."""
+    if share not in (0.25, 0.5, 1.0):
+        return False, "Share must be 25%, 50% or 100%"
+    pos = await session.get(LivePosition, position_id)
+    if pos is None or pos.status != "open":
+        return False, "Position is not open"
+    if pos.manual_sell_frac:
+        return False, f"Already selling {pos.manual_sell_frac * 100:.0f}% of ${pos.symbol or pos.token_address[:6]}"
+    pos.manual_sell_frac = share
+    await session.commit()
+    return True, f"Selling {share * 100:.0f}% of ${pos.symbol or pos.token_address[:6]}…"
+
+
 async def realized_24h(session: AsyncSession, mode: str) -> float:
     since = _now() - timedelta(hours=24)
     v = (await session.execute(select(func.sum(LivePosition.pnl_usd)).where(
@@ -393,6 +407,12 @@ class CopyEngine:
         opened = (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", LivePosition.mode == self.x.mode))).scalars().all()
         for pos in opened:
+            if pos.manual_sell_frac:
+                share, pos.manual_sell_frac = pos.manual_sell_frac, None
+                await session.commit()        # clear first: a crash never repeats a manual sell
+                await self._sell(session, pos, share, "manual")
+                await session.commit()
+                continue
             failed = [x for x in (pos.fills or []) if x.get("side") == "sell_failed"]
             if failed and len(failed) < MAX_SELL_ATTEMPTS:
                 last = failed[-1]

@@ -405,6 +405,7 @@ export interface LivePositionOut {
   tokens_left: string;
   tokens_bought: string;
   buy_signature: string | null;
+  manual_sell_frac: number | null;
   fills: LiveFill[];
   exit_reason: string | null;
   error: string | null;

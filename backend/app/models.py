@@ -320,6 +320,8 @@ class LivePosition(Base):
     error: Mapped[str | None] = mapped_column(String(300))
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Owner asked to sell this share by hand (dashboard / Telegram); the worker executes and clears it
+    manual_sell_frac: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class SignalOutcome(Base):

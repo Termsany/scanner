@@ -36,7 +36,7 @@ BADGE_TEXT = {Badge.strong_alpha: "STRONG ALPHA", Badge.moderate: "MODERATE", Ba
 BACKLOG_MINUTES = 10   # on startup, don't post signals older than this
 SEND_INTERVAL = 1.1    # Telegram allows ~1 msg/s per chat
 MENU_LIMIT = 30        # wallets per /wallets menu
-SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token", "performance", "paper", "live"}
+SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token", "performance", "paper", "live", "sell"}
 
 
 def fmt_usd(v: float | None) -> str:
@@ -279,6 +279,9 @@ class TelegramAlerts:
         msg = cq.get("message") or {}
         chat_id = (msg.get("chat") or {}).get("id")
         data = str(cq.get("data") or "")
+        if self._is_owner(chat_id) and re.fullmatch(r"(s|sc):\d+:\d+|sx", data):
+            await self._sell_callback(cq, chat_id, msg.get("message_id"), data)
+            return
         if not self._is_owner(chat_id) or not re.fullmatch(r"[tux]:\d+", data):
             await self._call("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Not allowed"})
             return
@@ -304,6 +307,55 @@ class TelegramAlerts:
         await self._call("editMessageText", {"chat_id": chat_id, "message_id": msg.get("message_id"), "text": text,
                                              "parse_mode": "HTML", "disable_web_page_preview": True,
                                              "reply_markup": markup or {"inline_keyboard": []}})
+
+    async def sell_menu(self) -> tuple[str, dict[str, Any] | None]:
+        from app.live import live_status
+
+        async with SessionLocal() as s:
+            st = await live_status(s, self.settings)
+        if st["mode"] == "off" or not st["open"]:
+            return "No open copy-trading positions.", None
+        rows = []
+        lines = ["<b>Open positions</b> — tap to sell (you confirm next)"]
+        for p in st["open"]:
+            sym = p.symbol or p.token_address[:6]
+            pending = f" · selling {p.manual_sell_frac * 100:.0f}%…" if p.manual_sell_frac else ""
+            sold = f", sold ${p.proceeds_usd:,.2f}" if p.proceeds_usd else ""
+            lines.append(f"${e(sym)}: cost ${p.cost_usd:,.2f}{sold}{pending}")
+            rows.append([{"text": f"${sym} sell 50%", "callback_data": f"s:{p.id}:50"},
+                         {"text": f"${sym} sell 100%", "callback_data": f"s:{p.id}:100"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    async def _sell_callback(self, cq: dict[str, Any], chat_id, message_id, data: str) -> None:
+        from app.live import request_manual_sell
+        from app.models import LivePosition
+
+        async def edit(text: str, markup: dict[str, Any] | None = None) -> None:
+            await self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text,
+                                                 "parse_mode": "HTML",
+                                                 "reply_markup": markup or {"inline_keyboard": []}})
+
+        if data == "sx":
+            await self._call("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Cancelled"})
+            text, markup = await self.sell_menu()
+            await edit(text, markup)
+            return
+        kind, pid, pct = data.split(":")
+        if kind == "s":   # ask for confirmation first
+            async with SessionLocal() as s:
+                pos = await s.get(LivePosition, int(pid))
+            sym = (pos.symbol or pos.token_address[:6]) if pos else "?"
+            await self._call("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            await edit(f"Sell <b>{pct}%</b> of ${e(sym)} now at market price?",
+                       {"inline_keyboard": [[{"text": f"✅ Yes, sell {pct}%", "callback_data": f"sc:{pid}:{pct}"},
+                                             {"text": "Cancel", "callback_data": "sx"}]]})
+            return
+        async with SessionLocal() as s:
+            ok, note = await request_manual_sell(s, int(pid), int(pct) / 100)
+        log.info("manual sell %s %s%% -> %s", pid, pct, note)
+        await self._call("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": note[:190]})
+        tail = "\nThe result arrives here in a few seconds." if ok else ""
+        await edit(("⏳ " if ok else "⚠️ ") + e(note) + tail)
 
     # ---- alerts -----------------------------------------------------------
     async def _skip_backlog(self) -> None:
@@ -492,6 +544,7 @@ class TelegramAlerts:
                     "/performance [24h|7d] — how signals did after they fired\n"
                     "/paper [24h|7d] — paper-trading results per strategy\n"
                     "/live [on|off] — copy-trading status, pause or resume buys\n"
+                    "/sell — sell an open copy-trading position by hand\n"
                     "/wallets — smart wallets with Track buttons\n"
                     "/track &lt;address&gt; [name] — buy alerts for any wallet (chain auto-detected)\n"
                     "/untrack &lt;address&gt;\n"
@@ -673,8 +726,9 @@ class TelegramAlerts:
                                                      "<code>wallets</code> or /help.")
                         continue
                     first = text.split()[0].split("@")[0].lower()
-                    if first in ("/wallets", "/tracked") and owner:
-                        body, markup = await (self.wallets_menu() if first == "/wallets" else self.tracked_menu())
+                    if first in ("/wallets", "/tracked", "/sell") and owner:
+                        body, markup = await (self.wallets_menu() if first == "/wallets" else
+                                              self.tracked_menu() if first == "/tracked" else self.sell_menu())
                         log.info("command %s in owner chat -> %d buttons", first,
                                  len((markup or {}).get("inline_keyboard", [])))
                         await self.send(chat_id, body, markup)
