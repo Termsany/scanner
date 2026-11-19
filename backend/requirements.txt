@@ -16,6 +16,9 @@ redis>=5.2,<7.0               # redis.asyncio client; optional at runtime
 
 # --- AI analyst ---------------------------------------------------------------
 openai>=1.55,<3.0             # OpenAI-compatible async client (also works with Gemini's OpenAI endpoint)
+# --- Live copy trading (Solana transaction signing) --------------------------
+solders>=0.21,<1.0
+
 # Telegram uses the Bot HTTP API directly via httpx (no extra dependency)
 
 # --- Dev / test -------------------------------------------------------------

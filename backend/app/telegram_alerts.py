@@ -36,7 +36,7 @@ BADGE_TEXT = {Badge.strong_alpha: "STRONG ALPHA", Badge.moderate: "MODERATE", Ba
 BACKLOG_MINUTES = 10   # on startup, don't post signals older than this
 SEND_INTERVAL = 1.1    # Telegram allows ~1 msg/s per chat
 MENU_LIMIT = 30        # wallets per /wallets menu
-SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token", "performance", "paper"}
+SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token", "performance", "paper", "live"}
 
 
 def fmt_usd(v: float | None) -> str:
@@ -491,6 +491,7 @@ class TelegramAlerts:
                     "/status — scanner health\n"
                     "/performance [24h|7d] — how signals did after they fired\n"
                     "/paper [24h|7d] — paper-trading results per strategy\n"
+                    "/live [on|off] — copy-trading status, pause or resume buys\n"
                     "/wallets — smart wallets with Track buttons\n"
                     "/track &lt;address&gt; [name] — buy alerts for any wallet (chain auto-detected)\n"
                     "/untrack &lt;address&gt;\n"
@@ -584,6 +585,40 @@ class TelegramAlerts:
                          f"MC {fmt_usd(token.market_cap or token.fdv)}")
             if token.pair_url:
                 lines.append(f'<a href="{e(token.pair_url)}">DexScreener</a>')
+            return "\n".join(lines)
+
+        if cmd == "/live":
+            if not self._is_owner(chat_id):
+                return "Only the bot owner can use /live."
+            from app.live import live_status, set_paused
+
+            async with SessionLocal() as s:
+                if args and args[0].lower() in ("off", "stop", "pause"):
+                    await set_paused(s, True)
+                    await s.commit()
+                    return "⏸ Copy trading paused: no new buys. Open positions still sell when the wallet sells."
+                if args and args[0].lower() in ("on", "start", "resume"):
+                    await set_paused(s, False)
+                    await s.commit()
+                    return "▶️ Copy trading resumed."
+                st = await live_status(s, self.settings)
+            if st["mode"] == "off":
+                return "Copy trading is off (LIVE_MODE=off on the server)."
+            lines = [f"<b>Copy trading · {'🟢 LIVE' if st['mode'] == 'live' else '🧪 DRY-RUN'}</b>"
+                     f"{' · ⏸ paused' if st['paused'] else ''}",
+                     f"Copying: {', '.join(e(w[:4] + '…' + w[-4:]) for w in st['wallets'])}",
+                     f"${st['size_usd']:.0f} per buy · max ${st['max_open_usd']:.0f} open"]
+            if st["pubkey"]:
+                lines.append(f"Trading wallet: <code>{e(st['pubkey'])}</code>")
+            r = st["realized_usd"]
+            lines.append(f"Realized: {'+' if r >= 0 else '−'}${abs(r):,.2f} ({len(st['closed'])} closed, "
+                         f"{len(st['failed'])} failed)")
+            if st["open"]:
+                lines += ["", "<b>Open</b>"] + [
+                    f"${e(p.symbol or p.token_address[:6])}: cost ${p.cost_usd:,.2f}"
+                    f"{', sold $' + format(p.proceeds_usd, ',.2f') if p.proceeds_usd else ''}"
+                    for p in st["open"]]
+            lines.append("\n/live off — pause new buys · /live on — resume")
             return "\n".join(lines)
 
         if cmd == "/paper":

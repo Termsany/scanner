@@ -79,6 +79,25 @@ class Settings(BaseSettings):
     paper_mirror_wallets: list[str] = Field(default_factory=list)
     paper_mirror_max_hold_hours: int = 24 * 7
 
+    # Live copy trading (REAL money, Solana via Jupiter). Off unless LIVE_MODE=live AND a key is set.
+    #   off     nothing runs
+    #   dry     quotes real Jupiter routes and logs what it would do; never signs or sends
+    #   live    signs and sends swaps from LIVE_PRIVATE_KEY's wallet
+    live_mode: str = "off"
+    live_private_key: str | None = None          # base58 secret key or JSON byte array; set by the owner only
+    live_wallets: list[str] = Field(default_factory=list)   # Solana wallets to copy
+    live_size_usd: float = 30.0                  # per buy
+    live_max_open_usd: float = 100.0             # total cost of open positions never exceeds this
+    live_max_daily_loss_usd: float = 50.0        # realized loss in 24h above this: pause new buys
+    live_slippage_bps: int = 1_500               # 15%: memecoins move fast; the quote's minimum out still applies
+    live_priority_fee_lamports: int = 1_000_000  # cap on priority fee per swap (0.001 SOL)
+    live_min_liquidity_usd: float = 10_000.0
+    live_sol_reserve: float = 0.02               # SOL kept back for fees
+    live_interval_seconds: float = 3.0
+    live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
+    live_rpc_url: str | None = None              # defaults to SOLANA_RPC_URL
+    jupiter_api_url: str = "https://lite-api.jup.ag"
+
     # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)
     perf_interval_seconds: int = 300
     perf_max_calls_per_run: int = 15             # = 3 calls/min on average

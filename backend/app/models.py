@@ -294,6 +294,34 @@ class PaperPosition(Base):
     leader_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # last leader sell copied
 
 
+class LivePosition(Base):
+    """A real (or dry-run) copy trade of a leader wallet on Solana."""
+
+    __tablename__ = "live_positions"
+    __table_args__ = (Index("ix_live_status", "status"), Index("ix_live_opened", "opened_at"))
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mode: Mapped[str] = mapped_column(String(8))                        # dry | live
+    token_address: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(64), default="")
+    leader_wallet: Mapped[str] = mapped_column(String(64))
+    leader_trade_id: Mapped[int] = mapped_column(Integer)               # last leader trade acted on
+    status: Mapped[str] = mapped_column(String(8), default="open")      # open | closed | failed
+    cost_usd: Mapped[float] = mapped_column(Float)
+    sol_spent: Mapped[float] = mapped_column(Float, default=0.0)
+    tokens_raw: Mapped[str] = mapped_column(String(40), default="0")    # still held (raw units)
+    tokens_bought_raw: Mapped[str] = mapped_column(String(40), default="0")
+    proceeds_sol: Mapped[float] = mapped_column(Float, default=0.0)
+    proceeds_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    pnl_usd: Mapped[float | None] = mapped_column(Float)
+    buy_signature: Mapped[str | None] = mapped_column(String(128))
+    fills: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)  # [{side, sig, sol, tokens_raw, usd, at}]
+    exit_reason: Mapped[str | None] = mapped_column(String(24))
+    error: Mapped[str | None] = mapped_column(String(300))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SignalOutcome(Base):
     """What happened after a signal, from GeckoTerminal 15-minute candles of its pool (so tokens that crashed
     out of the scanner's filters are still measured: no survivorship bias)."""

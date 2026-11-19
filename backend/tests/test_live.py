@@ -1,0 +1,188 @@
+import asyncio
+import json
+import tempfile
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.config import Settings
+from app.live import CopyEngine, Fill, SwapError, load_keypair, set_paused
+from app.models import Base, Chain, LivePosition, WalletTrade
+
+LEADER = "DULX3e6vt1ZpHq3AdCUBZLPZ1CrhApdNKcewMPxZQRXf"
+OTHER = "Other1111111111111111111111111111111111111"
+
+
+class FakeExec:
+    def __init__(self, mode="live", fail_sell=0, fail_buy=False):
+        self.mode, self.pubkey = mode, "Me111"
+        self.calls, self.fail_sell, self.fail_buy, self.n = [], fail_sell, fail_buy, 0
+
+    async def sol_balance(self):
+        return 1.0
+
+    async def sol_price(self):
+        return 150.0
+
+    async def buy(self, mint, usd):
+        self.calls.append(("buy", mint, usd))
+        if self.fail_buy:
+            raise SwapError("no route")
+        self.n += 1
+        return Fill(f"sig{self.n}", usd / 150.0, 1_000_000, 150.0)
+
+    async def sell(self, mint, tokens_raw):
+        self.calls.append(("sell", mint, tokens_raw))
+        if self.fail_sell:
+            self.fail_sell -= 1
+            raise SwapError("rpc down")
+        self.n += 1
+        return Fill(f"sig{self.n}", tokens_raw / 1_000_000 * 0.4, tokens_raw, 150.0)   # 2x on a $30 buy
+
+    async def close(self):
+        pass
+
+
+def _db(body):
+    async def go():
+        tmp = tempfile.mkdtemp()
+        eng = create_async_engine(f"sqlite+aiosqlite:///{tmp}/l.db".replace("\\", "/"))
+        async with eng.begin() as c:
+            await c.run_sync(Base.metadata.create_all)
+        try:
+            async with async_sessionmaker(eng, expire_on_commit=False)() as s:
+                return await body(s)
+        finally:
+            await eng.dispose()
+    return asyncio.run(go())
+
+
+def _s(**kw):
+    return Settings(live_mode="live", live_wallets=[LEADER], live_size_usd=30, live_max_open_usd=100,
+                    live_min_liquidity_usd=10_000, **kw)
+
+
+_n = [0]
+
+
+def _trade(wallet=LEADER, side="buy", mint="M1", pct_sold=None, remaining=None, age_s=5, liq=50_000, kind=None):
+    _n[0] += 1
+    at = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    return WalletTrade(chain=Chain.solana, wallet=wallet, token_address=mint, symbol=mint, tx_hash=f"t{_n[0]}",
+                       amount=1, price_usd=1.0, liquidity_usd=liq, side=side, kind=kind or side,
+                       pct_sold=pct_sold, remaining_amount=remaining, block_time=at, detected_at=at)
+
+
+def _run(steps):
+    """steps: list of lists of trades added before each engine step. Returns (positions, executor, notes)."""
+    x = FakeExec()
+    notes = []
+
+    async def note(text):
+        notes.append(text)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), notify=note)
+        await eng.step(sess)                # first run: sets the cursor only
+        for batch in steps:
+            if callable(batch):
+                await batch(sess)
+                continue
+            sess.add_all(batch)
+            await sess.commit()
+            await eng.step(sess)
+        return (await sess.execute(select(LivePosition).order_by(LivePosition.id))).scalars().all()
+
+    return _db(body), x, notes
+
+
+def test_copy_buy_then_partial_and_full_sell():
+    pos, x, notes = _run([
+        [_trade()],
+        [_trade(side="sell", pct_sold=50, remaining=1)],
+        [_trade(side="sell", pct_sold=100, remaining=0)],
+    ])
+    assert [c[0] for c in x.calls] == ["buy", "sell", "sell"]
+    assert x.calls[1][2] == 500_000 and x.calls[2][2] == 500_000
+    p = pos[0]
+    assert p.status == "closed" and p.exit_reason == "leader_sold" and p.tokens_raw == "0"
+    assert abs(p.pnl_usd - 30.0) < 1e-6          # bought $30, sold for $60
+    assert any("Bought" in n for n in notes) and any("Closed" in n for n in notes)
+
+
+def test_ignores_other_wallets_old_buys_low_liquidity_and_duplicates():
+    pos, x, notes = _run([
+        [_trade(wallet=OTHER, mint="A")],
+        [_trade(mint="B", age_s=600)],
+        [_trade(mint="C", liq=2_000)],
+        [_trade(mint="D"), _trade(mint="D")],
+    ])
+    assert [c[1] for c in x.calls] == ["D"]
+    assert len(pos) == 1
+    assert any("min old" in n for n in notes) and any("liquidity" in n for n in notes)
+
+
+def test_open_cap_and_pause():
+    pos, x, notes = _run([
+        [_trade(mint="A"), _trade(mint="B"), _trade(mint="C"), _trade(mint="D")],   # $30 x3 = $90; 4th > $100
+    ])
+    assert [c[1] for c in x.calls] == ["A", "B", "C"]
+    assert any("limit" in n for n in notes)
+
+    async def pause(sess):
+        await set_paused(sess, True)
+        await sess.commit()
+
+    pos, x, notes = _run([pause, [_trade(mint="E")], [_trade(mint="E", side="sell", remaining=0)]])
+    assert x.calls == [] and any("paused" in n for n in notes)
+
+
+def test_sell_retry_and_transfer_exit():
+    x_holder = {}
+
+    pos, x, notes = _run([
+        [_trade(mint="R")],
+        [_trade(mint="R", side="sell", kind="transfer")],   # leader moved tokens out: full exit
+    ])
+    assert pos[0].status == "closed"
+
+    x = FakeExec(fail_sell=2)
+    async def body(sess):
+        eng = CopyEngine(x, _s())
+        await eng.step(sess)
+        sess.add(_trade(mint="Q"))
+        await sess.commit()
+        await eng.step(sess)
+        sess.add(_trade(mint="Q", side="sell", remaining=0))
+        await sess.commit()
+        await eng.step(sess)             # fails
+        await eng.step(sess)             # retry fails
+        await eng.step(sess)             # retry succeeds
+        return (await sess.execute(select(LivePosition))).scalars().one()
+    p = _db(body)
+    assert p.status == "closed" and [c[0] for c in x.calls].count("sell") == 3
+    del x_holder
+
+
+def test_failed_buy_is_recorded():
+    x = FakeExec(fail_buy=True)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s())
+        await eng.step(sess)
+        sess.add(_trade(mint="F"))
+        await sess.commit()
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().one()
+
+    p = _db(body)
+    assert p.status == "failed" and "no route" in p.error
+
+
+def test_load_keypair_formats():
+    from solders.keypair import Keypair
+
+    kp = Keypair()
+    assert str(load_keypair(str(kp)).pubkey()) == str(kp.pubkey())
+    assert str(load_keypair(json.dumps(list(bytes(kp)))).pubkey()) == str(kp.pubkey())
