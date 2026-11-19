@@ -47,6 +47,14 @@ class SwapError(Exception):
     pass
 
 
+class ChaseError(Exception):
+    """The price already ran too far past the leader's: skip instead of buying the top."""
+
+    def __init__(self, pay: float, limit: float) -> None:
+        super().__init__(f"price ran: would pay {pay:.4g} vs limit {limit:.4g}")
+        self.pay, self.limit = pay, limit
+
+
 @dataclass
 class Fill:
     signature: str
@@ -65,7 +73,7 @@ class Executor(Protocol):
 
     async def sol_balance(self) -> float: ...
     async def sol_price(self) -> float: ...
-    async def buy(self, mint: str, usd: float) -> Fill: ...
+    async def buy(self, mint: str, usd: float, max_price: float | None = None) -> Fill: ...
     async def sell(self, mint: str, tokens_raw: int) -> Fill: ...
     async def close(self) -> None: ...
 
@@ -207,10 +215,23 @@ class JupiterExecutor:
         return sig, False   # not confirmed in time: the caller checks balances
 
     # ---- trades ------------------------------------------------------------
-    async def buy(self, mint: str, usd: float) -> Fill:
+    async def _decimals(self, mint: str) -> int:
+        r = await self.http.get(f"{self.s.jupiter_api_url}/price/v3", params={"ids": mint})
+        r.raise_for_status()
+        d = (r.json() or {}).get(mint) or {}
+        if d.get("decimals") is None:
+            raise SwapError("token decimals unknown")
+        return int(d["decimals"])
+
+    async def buy(self, mint: str, usd: float, max_price: float | None = None) -> Fill:
         px = await self.sol_price()
         lamports = int(usd / px * LAMPORTS)
         q = await self.quote(SOL_MINT, mint, lamports)
+        if max_price:
+            # price we would actually pay per token, from the live quote (includes price impact)
+            pay = usd / (int(q["outAmount"]) / 10 ** await self._decimals(mint))
+            if pay > max_price:
+                raise ChaseError(pay, max_price)
         if self.mode == "dry":
             self._dry_n += 1
             return Fill(f"dry-{self._dry_n}", lamports / LAMPORTS, int(q["outAmount"]), px)
@@ -385,8 +406,16 @@ class CopyEngine:
             if "already holding" not in why:
                 await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
             return
+        chase = self.s.live_max_chase_pct
+        max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None) else None
         try:
-            f = await self.x.buy(t.token_address, self.a.size_usd)
+            f = await self.x.buy(t.token_address, self.a.size_usd, max_price=max_price)
+        except ChaseError as exc:
+            over = (exc.pay / t.price_usd - 1) * 100
+            log.info("live: skip buy %s (price +%.0f%% over the leader's, limit +%.0f%%)", sym, over, chase)
+            await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: price already +{over:.0f}% above where "
+                              f"{t.wallet_label or t.wallet[:6]} bought (limit +{chase:.0f}%)")
+            return
         except Exception as exc:
             log.warning("live: buy %s failed: %s", sym, exc)
             session.add(LivePosition(mode=self.x.mode, account=self.a.name, token_address=t.token_address, symbol=t.symbol or "",

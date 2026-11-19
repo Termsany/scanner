@@ -25,7 +25,12 @@ class FakeExec:
     async def sol_price(self):
         return 150.0
 
-    async def buy(self, mint, usd):
+    pay_price = None   # price per token the quote would give (for the max-chase guard)
+
+    async def buy(self, mint, usd, max_price=None):
+        if max_price and self.pay_price and self.pay_price > max_price:
+            from app.live import ChaseError
+            raise ChaseError(self.pay_price, max_price)
         self.calls.append(("buy", mint, usd))
         if self.fail_buy:
             raise SwapError("no route")
@@ -271,3 +276,28 @@ def test_two_accounts_copy_the_same_buy_with_their_own_budget():
     assert (len(a_main["open"]), len(a_main["closed"])) == (4, 1)
     assert (len(a_big["open"]), len(a_big["closed"])) == (6, 1)
     assert a_big["open_cost_usd"] == 300
+
+
+def test_max_chase_skips_buys_far_above_the_leaders_price():
+    x = FakeExec()
+    notes = []
+
+    async def note(t):
+        notes.append(t)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_max_chase_pct=10), notify=note)
+        await eng.step(sess)
+        x.pay_price = 1.27                    # leader's price 1.0 -> +27%: skip
+        sess.add(_trade(mint="RUN"))
+        await sess.commit()
+        await eng.step(sess)
+        x.pay_price = 1.05                    # +5%: buy
+        sess.add(_trade(mint="OK"))
+        await sess.commit()
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().all()
+
+    rows = _db(body)
+    assert [c[1] for c in x.calls] == ["OK"] and [r.token_address for r in rows] == ["OK"]
+    assert any("+27% above" in n for n in notes)

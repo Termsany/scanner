@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     live_slippage_bps: int = 1_500               # 15%: memecoins move fast; the quote's minimum out still applies
     live_priority_fee_lamports: int = 1_000_000  # cap on priority fee per swap (0.001 SOL)
     live_min_liquidity_usd: float = 10_000.0
+    # Skip a copy buy when the live quote's price per token is more than this % above the price recorded with
+    # the leader's buy (we would be buying the leader's pump). None = no limit.
+    live_max_chase_pct: float | None = 10.0
     live_sol_reserve: float = 0.02               # SOL kept back for fees
     live_interval_seconds: float = 3.0
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
