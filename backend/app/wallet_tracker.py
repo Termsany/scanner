@@ -70,7 +70,7 @@ class Trade:
     block_time: datetime | None = None
     side: str = "buy"             # buy | sell
     kind: str = "buy"             # buy | sell | transfer
-    remaining: float | None = None  # wallet balance of the token after the trade (sells)
+    remaining: float | None = None  # wallet balance of the token after the trade (Solana: buys and sells)
 
 
 Buy = Trade  # backwards-compatible name
@@ -120,8 +120,8 @@ def solana_trades_from_tx(tx: dict[str, Any], wallet: str, signature: str) -> li
     for mint, d in delta.items():
         if mint in SOLANA_QUOTES or d == 0:
             continue
-        if d > 0:
-            out.append(Trade(Chain.solana, wallet, mint, d, signature, when))
+        if d > 0:   # remaining = balance after the buy, so remaining - amount = what it already held
+            out.append(Trade(Chain.solana, wallet, mint, d, signature, when, remaining=max(post[mint], 0.0)))
         else:
             out.append(Trade(Chain.solana, wallet, mint, -d, signature, when, side="sell",
                              kind="sell" if received else "transfer", remaining=max(post[mint], 0.0)))

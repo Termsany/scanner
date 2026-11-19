@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     live_sell_manual_with_leader: bool = True
     # Watch the copied wallets over LIVE_RPC_URL's WebSocket (~1 s) instead of waiting for the tracker's poll
     live_fast_detection: bool = True
+    # Copy these leaders' buys only when they open a token they did not hold before (no add-ons / DCA)
+    live_new_tokens_only_wallets: list[str] = Field(default_factory=list)
     live_sol_reserve: float = 0.02               # SOL kept back for fees
     live_interval_seconds: float = 3.0
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds

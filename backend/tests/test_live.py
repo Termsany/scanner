@@ -378,3 +378,44 @@ def test_leader_sells_also_sell_manual_tokens():
     assert x.bal == {"MAN": 0, "ONLY": 0}
     assert pos.status == "closed" and pos.tokens_raw == "0"
     assert sum("your own" in n for n in notes) == 3
+
+
+def test_new_tokens_only_leader_skips_add_on_buys():
+    pos, x, notes = None, FakeExec(), []
+    s = _s(live_new_tokens_only_wallets=[LEADER])
+
+    def buy(mint, amount, remaining, first=True):
+        t = _trade(mint=mint)
+        t.amount, t.remaining_amount, t.first_buy = amount, remaining, first
+        return t
+
+    async def note(t):
+        notes.append(t)
+
+    async def body(sess):
+        eng = CopyEngine(x, s, notify=note)
+        await eng.step(sess)
+        sess.add_all([
+            buy("NEW", 100, 100),                 # held 0 before: copy
+            buy("ADD", 100, 350),                 # held 250 before: skip
+            buy("OLD", 100, None, first=False),   # no balance info, seen before: skip
+            buy("UNK", 100, None, first=True),    # no balance info, first time: copy
+        ])
+        sess.add(_trade(wallet=OTHER, mint="ADD2"))   # other leaders are not restricted
+        await sess.commit()
+        await eng.step(sess)
+
+    _db(body)
+    assert [c[1] for c in x.calls] == ["NEW", "UNK"]
+    assert not any("already holding" in n for n in notes)    # skipped silently
+
+
+def test_buy_trades_record_balance_after():
+    from app.wallet_tracker import solana_trades_from_tx
+
+    W = LEADER
+    tx = {"blockTime": 1, "meta": {"err": None,
+          "preTokenBalances": [{"owner": W, "mint": "M", "uiTokenAmount": {"uiAmount": 250.0}}],
+          "postTokenBalances": [{"owner": W, "mint": "M", "uiTokenAmount": {"uiAmount": 350.0}}]}}
+    [t] = solana_trades_from_tx(tx, W, "s")
+    assert (t.side, t.amount, t.remaining) == ("buy", 100.0, 350.0)

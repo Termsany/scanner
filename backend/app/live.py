@@ -423,6 +423,13 @@ class CopyEngine:
     async def _skip_reason(self, session: AsyncSession, t: WalletTrade) -> str | None:
         if await is_paused(session):
             return "paused (/live on to resume)"
+        if t.wallet in self.s.live_new_tokens_only_wallets:
+            if t.remaining_amount is not None:
+                before = t.remaining_amount - t.amount          # leader's balance before this buy
+                if before > max(t.amount, 1.0) * 1e-6:
+                    return "already holding: leader added to a token it held (new tokens only)"
+            elif not t.first_buy:                               # older rows without balances: fall back
+                return "already holding: leader bought this token before (new tokens only)"
         seen = utc(t.block_time) or utc(t.detected_at)
         if seen and (_now() - seen).total_seconds() > MAX_TRADE_AGE_SECONDS:
             return f"leader buy is {(_now() - seen).total_seconds() / 60:.0f} min old"
