@@ -20,11 +20,11 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import Settings, get_settings
-from app.models import Chain, SmartWallet
+from app.models import Chain, SmartWallet, WalletTrade
 from app.wallet_tracker import WalletTracker, solana_trades_from_tx
 
 log = logging.getLogger("fast_watch")
@@ -137,13 +137,19 @@ class FastWatcher:
             except IntegrityError:
                 await session.rollback()                # the poller stored it first: nothing to do
                 return 0
+            stored = (await session.execute(select(func.count(WalletTrade.id)).where(
+                WalletTrade.chain == Chain.solana, WalletTrade.tx_hash == sig))).scalar() or 0
+        bt = trades[0].block_time
+        lag = (datetime.now(timezone.utc) - bt).total_seconds() if bt else -1
+        sides = "/".join(t.side for t in trades)
+        if not stored:   # under TRACKER_MIN_BUY_USD, no DEX pair, too little liquidity...: same filters as the poller
+            log.info("fast: %s %s %s filtered out (%.1fs after the block)", wallet[:6], sides, sig[:12], lag)
+            return 0
         self.handled += 1
         wake_engines()
-        bt = trades[0].block_time
-        lag = (datetime.now(timezone.utc) - bt).total_seconds() if bt else None
-        log.info("fast: %s %s %s recorded %.1fs after the block (%.1fs to fetch + record)", wallet[:6],
-                 "/".join(t.side for t in trades), sig[:12], lag if lag is not None else -1, time.monotonic() - t0)
-        return len(trades)
+        log.info("fast: %s %s %s recorded %.1fs after the block (%.1fs to fetch + record)", wallet[:6], sides,
+                 sig[:12], lag, time.monotonic() - t0)
+        return stored
 
     # ---- connection -----------------------------------------------------------
     async def run_forever(self) -> None:
