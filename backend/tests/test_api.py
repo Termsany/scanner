@@ -426,7 +426,7 @@ def test_live_dashboard_requires_password(monkeypatch):
         assert c.get("/api/live").status_code == 401
         assert c.get("/api/live", headers={"X-Live-Password": "nope"}).status_code == 401
         r = c.get("/api/live", headers={"X-Live-Password": "s3cret-pass"})
-        assert r.status_code == 200 and r.json()["paused"] is False and r.json()["open"] == []
+        assert r.status_code == 200 and r.json()["paused"] is False and r.json()["accounts"][0]["open"] == []
         r = c.post("/api/live/pause", json={"paused": True}, headers={"X-Live-Password": "s3cret-pass"})
         assert r.status_code == 200
         assert c.get("/api/live", headers={"X-Live-Password": "s3cret-pass"}).json()["paused"] is True
@@ -461,6 +461,6 @@ def test_live_manual_sell_endpoint(monkeypatch):
         r = c.post(f"/api/live/positions/{pid}/sell", json={"share": 1.0}, headers=h)
         assert r.status_code == 200 and r.json()["queued"]
         assert c.post(f"/api/live/positions/{pid}/sell", json={"share": 0.5}, headers=h).status_code == 409
-        opened = c.get("/api/live", headers=h).json()["open"]
+        opened = c.get("/api/live", headers=h).json()["accounts"][0]["open"]
         assert any(p["id"] == pid and p["manual_sell_frac"] == 1.0 for p in opened)
     live_api._fails.clear()

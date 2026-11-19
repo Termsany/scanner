@@ -50,7 +50,7 @@ Auth = Annotated[None, Depends(check_password)]
 
 def _pos(p: LivePosition) -> dict[str, Any]:
     return {
-        "id": p.id, "mode": p.mode, "token_address": p.token_address, "symbol": p.symbol,
+        "id": p.id, "mode": p.mode, "account": p.account or "main", "token_address": p.token_address, "symbol": p.symbol,
         "leader_wallet": p.leader_wallet, "status": p.status, "cost_usd": p.cost_usd, "sol_spent": p.sol_spent,
         "proceeds_usd": p.proceeds_usd, "proceeds_sol": p.proceeds_sol, "pnl_usd": p.pnl_usd,
         "tokens_left": p.tokens_raw, "tokens_bought": p.tokens_bought_raw,
@@ -64,17 +64,16 @@ def _pos(p: LivePosition) -> dict[str, Any]:
 async def live(session: Session, _: Auth) -> dict[str, Any]:
     from app.live import live_status
 
-    s = get_settings()
-    st = await live_status(session, s)
+    st = await live_status(session, get_settings())
     return {
-        "mode": st["mode"], "paused": st["paused"], "pubkey": st["pubkey"], "wallets": st["wallets"],
-        "size_usd": st["size_usd"], "max_open_usd": st["max_open_usd"],
-        "max_daily_loss_usd": s.live_max_daily_loss_usd,
-        "realized_usd": st["realized_usd"], "realized_24h": st["realized_24h"],
-        "open_cost_usd": sum(p.cost_usd for p in st["open"]),
-        "open": [_pos(p) for p in st["open"]],
-        "closed": [_pos(p) for p in st["closed"]],
-        "failed": [_pos(p) for p in st["failed"]][:30],
+        "mode": st["mode"], "paused": st["paused"],
+        "accounts": [
+            {**{k: v for k, v in a.items() if k not in ("open", "closed", "failed")},
+             "open": [_pos(p) for p in a["open"]],
+             "closed": [_pos(p) for p in a["closed"]],
+             "failed": [_pos(p) for p in a["failed"]][:30]}
+            for a in st["accounts"]
+        ],
     }
 
 

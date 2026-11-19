@@ -17,13 +17,15 @@ import asyncio
 import base64
 import json
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -77,13 +79,55 @@ def load_keypair(secret: str):
     return Keypair.from_base58_string(secret)
 
 
+@dataclass
+class Account:
+    """One trading wallet with its own budget. "main" uses the LIVE_* settings."""
+    name: str
+    size_usd: float
+    max_open_usd: float
+    max_daily_loss_usd: float
+    wallets: list[str]
+    private_key: str | None = None
+
+
+def accounts_from_settings(s: Settings) -> list[Account]:
+    out = [Account("main", s.live_size_usd, s.live_max_open_usd, s.live_max_daily_loss_usd,
+                   list(s.live_wallets), s.live_private_key)]
+    for cfg in s.live_accounts:
+        name = str(cfg.get("name", "")).strip().lower()
+        if not re.fullmatch(r"[a-z0-9_]{1,24}", name) or name == "main" or any(a.name == name for a in out):
+            log.error("live: bad or duplicate account name %r in LIVE_ACCOUNTS", name)
+            continue
+        size = float(cfg.get("size_usd", s.live_size_usd))
+        max_open = float(cfg.get("max_open_usd", size * 5))
+        out.append(Account(
+            name, size, max_open, float(cfg.get("max_daily_loss_usd", max_open / 2)),
+            list(cfg.get("wallets") or s.live_wallets),
+            os.environ.get(f"LIVE_PRIVATE_KEY_{name.upper()}") or cfg.get("private_key"),
+        ))
+    return out
+
+
+def _acct(name: str):
+    """SQL filter for one account's positions (rows from before accounts existed belong to main)."""
+    if name == "main":
+        return or_(LivePosition.account.is_(None), LivePosition.account == "main")
+    return LivePosition.account == name
+
+
+def _key(base: str, account: str) -> str:
+    return base if account == "main" else f"{base}:{account}"
+
+
 class JupiterExecutor:
     """Quotes real routes. In dry mode stops there; in live mode signs and sends."""
 
-    def __init__(self, s: Settings, live: bool) -> None:
+    def __init__(self, s: Settings, live: bool, private_key: str | None = None) -> None:
         self.s = s
         self.mode = "live" if live else "dry"
-        self.kp = load_keypair(s.live_private_key) if (live or s.live_private_key) else None
+        self.kp = load_keypair(private_key) if private_key else None
+        if live and self.kp is None:
+            raise SwapError("live mode needs a private key")
         self.pubkey = str(self.kp.pubkey()) if self.kp else None
         self.rpc_url = s.live_rpc_url or s.solana_rpc_url
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(20.0), headers={"User-Agent": "alpha-scanner/0.1"})
@@ -242,10 +286,11 @@ async def request_manual_sell(session: AsyncSession, position_id: int, share: fl
     return True, f"Selling {share * 100:.0f}% of ${pos.symbol or pos.token_address[:6]}…"
 
 
-async def realized_24h(session: AsyncSession, mode: str) -> float:
+async def realized_24h(session: AsyncSession, mode: str, account: str = "main") -> float:
     since = _now() - timedelta(hours=24)
     v = (await session.execute(select(func.sum(LivePosition.pnl_usd)).where(
-        LivePosition.mode == mode, LivePosition.status == "closed", LivePosition.closed_at >= since))).scalar()
+        LivePosition.mode == mode, LivePosition.status == "closed", LivePosition.closed_at >= since,
+        _acct(account)))).scalar()
     return float(v or 0.0)
 
 
@@ -261,20 +306,27 @@ def _share(t: WalletTrade) -> float:
 
 
 class CopyEngine:
-    def __init__(self, executor: Executor, settings: Settings | None = None, notify=None) -> None:
+    def __init__(self, executor: Executor, settings: Settings | None = None, notify=None,
+                 account: Account | None = None) -> None:
         self.x = executor
         self.s = settings or get_settings()
-        self.wallets = set(self.s.live_wallets)
+        self.a = account or accounts_from_settings(self.s)[0]
+        self.wallets = set(self.a.wallets)
         self.notify = notify or (lambda text: asyncio.sleep(0))
+        self.cursor = _key(CURSOR, self.a.name)
 
     def _tag(self) -> str:
-        return "🟢 LIVE" if self.x.mode == "live" else "🧪 DRY-RUN"
+        tag = "🟢 LIVE" if self.x.mode == "live" else "🧪 DRY-RUN"
+        return tag if self.a.name == "main" else f"{tag} [{self.a.name}]"
+
+    def _mine(self):
+        return (LivePosition.mode == self.x.mode, _acct(self.a.name))
 
     async def step(self, session: AsyncSession) -> None:
         max_id = (await session.execute(select(func.max(WalletTrade.id)))).scalar() or 0
-        cur = await _get(session, CURSOR)
+        cur = await _get(session, self.cursor)
         if cur is None:                       # first run: copy from now on only
-            await _put(session, CURSOR, str(max_id))
+            await _put(session, self.cursor, str(max_id))
             await session.commit()
             return
         since = int(cur)
@@ -288,9 +340,9 @@ class CopyEngine:
                         await self._on_buy(session, t)
                     elif (t.side or "") == "sell":
                         await self._on_sell(session, t)
-                await _put(session, CURSOR, str(t.id))
+                await _put(session, self.cursor, str(t.id))
                 await session.commit()        # one trade at a time: a crash never repeats a swap
-            await _put(session, CURSOR, str(max_id))
+            await _put(session, self.cursor, str(max_id))
             await session.commit()
         await self._housekeeping(session)
 
@@ -305,15 +357,15 @@ class CopyEngine:
             return f"liquidity ${t.liquidity_usd or 0:,.0f} < ${self.s.live_min_liquidity_usd:,.0f}"
         exists = (await session.execute(select(LivePosition.id).where(
             LivePosition.token_address == t.token_address, LivePosition.status == "open",
-            LivePosition.mode == self.x.mode))).first()
+            *self._mine()))).first()
         if exists:
             return "already holding"
         open_cost = (await session.execute(select(func.sum(LivePosition.cost_usd)).where(
-            LivePosition.status == "open", LivePosition.mode == self.x.mode))).scalar() or 0.0
-        if open_cost + self.s.live_size_usd > self.s.live_max_open_usd + 1e-6:
-            return f"limit: ${open_cost:,.0f} already open (max ${self.s.live_max_open_usd:,.0f})"
-        loss = await realized_24h(session, self.x.mode)
-        if loss <= -self.s.live_max_daily_loss_usd:
+            LivePosition.status == "open", *self._mine()))).scalar() or 0.0
+        if open_cost + self.a.size_usd > self.a.max_open_usd + 1e-6:
+            return f"limit: ${open_cost:,.0f} already open (max ${self.a.max_open_usd:,.0f})"
+        loss = await realized_24h(session, self.x.mode, self.a.name)
+        if loss <= -self.a.max_daily_loss_usd:
             return f"daily loss limit hit (${loss:,.2f} in 24h)"
         if self.x.mode == "live":
             bal = await self.x.sol_balance()
@@ -321,7 +373,7 @@ class CopyEngine:
                 px = await self.x.sol_price()
             except Exception:
                 px = None
-            if px and bal - self.s.live_sol_reserve < self.s.live_size_usd / px:
+            if px and bal - self.s.live_sol_reserve < self.a.size_usd / px:
                 return f"not enough SOL ({bal:.3f})"
         return None
 
@@ -334,16 +386,16 @@ class CopyEngine:
                 await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
             return
         try:
-            f = await self.x.buy(t.token_address, self.s.live_size_usd)
+            f = await self.x.buy(t.token_address, self.a.size_usd)
         except Exception as exc:
             log.warning("live: buy %s failed: %s", sym, exc)
-            session.add(LivePosition(mode=self.x.mode, token_address=t.token_address, symbol=t.symbol or "",
+            session.add(LivePosition(mode=self.x.mode, account=self.a.name, token_address=t.token_address, symbol=t.symbol or "",
                                      leader_wallet=t.wallet, leader_trade_id=t.id, status="failed",
                                      cost_usd=0.0, error=str(exc)[:300], closed_at=_now()))
             await self.notify(f"{self._tag()} ❌ Buy ${sym} failed: {str(exc)[:200]}")
             return
         session.add(LivePosition(
-            mode=self.x.mode, token_address=t.token_address, symbol=t.symbol or "", leader_wallet=t.wallet,
+            mode=self.x.mode, account=self.a.name, token_address=t.token_address, symbol=t.symbol or "", leader_wallet=t.wallet,
             leader_trade_id=t.id, status="open", cost_usd=f.usd, sol_spent=f.sol, tokens_raw=str(f.tokens_raw),
             tokens_bought_raw=str(f.tokens_raw), buy_signature=f.signature,
             fills=[{"side": "buy", "sig": f.signature, "sol": f.sol, "tokens_raw": str(f.tokens_raw),
@@ -357,7 +409,7 @@ class CopyEngine:
     async def _on_sell(self, session: AsyncSession, t: WalletTrade) -> None:
         pos = (await session.execute(select(LivePosition).where(
             LivePosition.token_address == t.token_address, LivePosition.leader_wallet == t.wallet,
-            LivePosition.status == "open", LivePosition.mode == self.x.mode))).scalars().first()
+            LivePosition.status == "open", *self._mine()))).scalars().first()
         if pos is None:
             return
         pos.leader_trade_id = t.id
@@ -405,7 +457,7 @@ class CopyEngine:
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Retry failed sells; sell everything after LIVE_MAX_HOLD_HOURS."""
         opened = (await session.execute(select(LivePosition).where(
-            LivePosition.status == "open", LivePosition.mode == self.x.mode))).scalars().all()
+            LivePosition.status == "open", *self._mine()))).scalars().all()
         for pos in opened:
             if pos.manual_sell_frac:
                 share, pos.manual_sell_frac = pos.manual_sell_frac, None
@@ -429,19 +481,25 @@ class CopyEngine:
 
 
 async def live_status(session: AsyncSession, settings: Settings | None = None) -> dict[str, Any]:
+    """Status of every trading account. Pausing applies to all accounts."""
     s = settings or get_settings()
     mode = s.live_mode if s.live_mode in ("dry", "live") else "off"
-    rows = (await session.execute(select(LivePosition).where(LivePosition.mode == mode)
-                                  .order_by(LivePosition.opened_at.desc()).limit(200))).scalars().all()
-    closed = [r for r in rows if r.status == "closed"]
-    return {
-        "mode": mode, "paused": await is_paused(session), "pubkey": await _get(session, PUBKEY),
-        "wallets": list(s.live_wallets), "size_usd": s.live_size_usd, "max_open_usd": s.live_max_open_usd,
-        "open": [r for r in rows if r.status == "open"], "closed": closed,
-        "failed": [r for r in rows if r.status == "failed"],
-        "realized_usd": sum(r.pnl_usd or 0 for r in closed),
-        "realized_24h": await realized_24h(session, mode),
-    }
+    accounts = []
+    for a in accounts_from_settings(s):
+        rows = (await session.execute(select(LivePosition).where(LivePosition.mode == mode, _acct(a.name))
+                                      .order_by(LivePosition.opened_at.desc()).limit(200))).scalars().all()
+        closed = [r for r in rows if r.status == "closed"]
+        opened = [r for r in rows if r.status == "open"]
+        accounts.append({
+            "name": a.name, "active": mode == "dry" or bool(a.private_key),
+            "pubkey": await _get(session, _key(PUBKEY, a.name)), "wallets": a.wallets,
+            "size_usd": a.size_usd, "max_open_usd": a.max_open_usd, "max_daily_loss_usd": a.max_daily_loss_usd,
+            "open": opened, "closed": closed, "failed": [r for r in rows if r.status == "failed"],
+            "open_cost_usd": sum(r.cost_usd for r in opened),
+            "realized_usd": sum(r.pnl_usd or 0 for r in closed),
+            "realized_24h": await realized_24h(session, mode, a.name),
+        })
+    return {"mode": mode, "paused": await is_paused(session), "accounts": accounts}
 
 
 class LiveTrader:
@@ -466,26 +524,40 @@ class LiveTrader:
         if mode not in ("dry", "live"):
             log.info("Live copy trading off (LIVE_MODE=%s)", mode)
             return
-        if not self.s.live_wallets:
-            log.warning("Live copy trading: LIVE_WALLETS is empty, nothing to copy")
-            return
-        if mode == "live" and not self.s.live_private_key:
-            log.error("LIVE_MODE=live but LIVE_PRIVATE_KEY is not set: not trading")
-            return
-        try:
-            x = JupiterExecutor(self.s, live=(mode == "live"))
-        except Exception as exc:
-            log.error("Live copy trading: bad LIVE_PRIVATE_KEY (%s)", type(exc).__name__)
-            return
-        engine = CopyEngine(x, self.s, notify=self._telegram)
+        loops = []
+        for a in accounts_from_settings(self.s):
+            env = "LIVE_PRIVATE_KEY" if a.name == "main" else f"LIVE_PRIVATE_KEY_{a.name.upper()}"
+            if not a.wallets:
+                log.warning("live[%s]: no wallets to copy", a.name)
+                continue
+            if mode == "live" and not a.private_key:
+                log.warning("live[%s]: %s is not set, account idle", a.name, env)
+                await self._telegram(f"⏸ Copy account [{a.name}] is idle: add {env} on the server to start it "
+                                     f"(${a.size_usd:.0f} per buy, max ${a.max_open_usd:.0f} open).")
+                continue
+            try:
+                x = JupiterExecutor(self.s, live=(mode == "live"), private_key=a.private_key)
+            except Exception as exc:
+                log.error("live[%s]: bad %s (%s)", a.name, env, type(exc).__name__)
+                await self._telegram(f"❌ Copy account [{a.name}]: {env} is not a valid Solana key.")
+                continue
+            loops.append(self._run_account(a, x, mode))
+        if loops:
+            await asyncio.gather(*loops)
+
+    async def _run_account(self, a: Account, x: JupiterExecutor, mode: str) -> None:
+        from app.db import SessionLocal
+
+        engine = CopyEngine(x, self.s, notify=self._telegram, account=a)
         async with SessionLocal() as session:
             if x.pubkey:
-                await _put(session, PUBKEY, x.pubkey)
+                await _put(session, _key(PUBKEY, a.name), x.pubkey)
             await session.commit()
-        log.info("Live copy trading started: mode=%s wallet=%s copying=%s $%.0f/trade max $%.0f open",
-                 mode, x.pubkey, ",".join(self.s.live_wallets), self.s.live_size_usd, self.s.live_max_open_usd)
-        await self._telegram(f"{engine._tag()} copy trading started\nCopying: {', '.join(self.s.live_wallets)}\n"
-                             f"${self.s.live_size_usd:.0f} per buy · max ${self.s.live_max_open_usd:.0f} open"
+        log.info("Live copy trading started: account=%s mode=%s wallet=%s copying=%s $%.0f/trade max $%.0f open",
+                 a.name, mode, x.pubkey, ",".join(a.wallets), a.size_usd, a.max_open_usd)
+        await self._telegram(f"{engine._tag()} copy trading started\nCopying: {', '.join(a.wallets)}\n"
+                             f"${a.size_usd:.0f} per buy · max ${a.max_open_usd:.0f} open · "
+                             f"pause after ${a.max_daily_loss_usd:.0f} loss/24h"
                              + (f"\nTrading wallet: {x.pubkey}" if x.pubkey else ""))
         try:
             while True:
@@ -496,7 +568,7 @@ class LiveTrader:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    log.exception("live step failed")
+                    log.exception("live[%s] step failed", a.name)
                 await asyncio.sleep(max(self.s.live_interval_seconds - (time.monotonic() - t0), 1))
         finally:
             await x.close()

@@ -313,12 +313,14 @@ class TelegramAlerts:
 
         async with SessionLocal() as s:
             st = await live_status(s, self.settings)
-        if st["mode"] == "off" or not st["open"]:
+        opened = [(a["name"], p) for a in st["accounts"] for p in a["open"]]
+        if st["mode"] == "off" or not opened:
             return "No open copy-trading positions.", None
         rows = []
         lines = ["<b>Open positions</b> — tap to sell (you confirm next)"]
-        for p in st["open"]:
-            sym = p.symbol or p.token_address[:6]
+        multi = len(st["accounts"]) > 1
+        for acct, p in opened:
+            sym = (p.symbol or p.token_address[:6]) + (f" [{acct}]" if multi else "")
             pending = f" · selling {p.manual_sell_frac * 100:.0f}%…" if p.manual_sell_frac else ""
             sold = f", sold ${p.proceeds_usd:,.2f}" if p.proceeds_usd else ""
             lines.append(f"${e(sym)}: cost ${p.cost_usd:,.2f}{sold}{pending}")
@@ -658,20 +660,20 @@ class TelegramAlerts:
             if st["mode"] == "off":
                 return "Copy trading is off (LIVE_MODE=off on the server)."
             lines = [f"<b>Copy trading · {'🟢 LIVE' if st['mode'] == 'live' else '🧪 DRY-RUN'}</b>"
-                     f"{' · ⏸ paused' if st['paused'] else ''}",
-                     f"Copying: {', '.join(e(w[:4] + '…' + w[-4:]) for w in st['wallets'])}",
-                     f"${st['size_usd']:.0f} per buy · max ${st['max_open_usd']:.0f} open"]
-            if st["pubkey"]:
-                lines.append(f"Trading wallet: <code>{e(st['pubkey'])}</code>")
-            r = st["realized_usd"]
-            lines.append(f"Realized: {'+' if r >= 0 else '−'}${abs(r):,.2f} ({len(st['closed'])} closed, "
-                         f"{len(st['failed'])} failed)")
-            if st["open"]:
-                lines += ["", "<b>Open</b>"] + [
-                    f"${e(p.symbol or p.token_address[:6])}: cost ${p.cost_usd:,.2f}"
-                    f"{', sold $' + format(p.proceeds_usd, ',.2f') if p.proceeds_usd else ''}"
-                    for p in st["open"]]
-            lines.append("\n/live off — pause new buys · /live on — resume")
+                     f"{' · ⏸ paused' if st['paused'] else ''}"]
+            for a in st["accounts"]:
+                lines += ["", f"<b>[{e(a['name'])}]</b>{'' if a['active'] else ' · idle (no key)'}",
+                          f"Copying: {', '.join(e(w[:4] + '…' + w[-4:]) for w in a['wallets'])}",
+                          f"${a['size_usd']:.0f} per buy · ${a['open_cost_usd']:,.0f} of ${a['max_open_usd']:.0f} open"]
+                if a["pubkey"]:
+                    lines.append(f"Trading wallet: <code>{e(a['pubkey'])}</code>")
+                r = a["realized_usd"]
+                lines.append(f"Realized: {'+' if r >= 0 else '−'}${abs(r):,.2f} ({len(a['closed'])} closed, "
+                             f"{len(a['failed'])} failed)")
+                for p in a["open"]:
+                    sold = f", sold ${p.proceeds_usd:,.2f}" if p.proceeds_usd else ""
+                    lines.append(f"  • ${e(p.symbol or p.token_address[:6])}: cost ${p.cost_usd:,.2f}{sold}")
+            lines.append("\n/live off — pause new buys (all accounts) · /live on — resume · /sell")
             return "\n".join(lines)
 
         if cmd == "/paper":

@@ -222,3 +222,52 @@ def test_manual_sell_partial_then_full():
     p = _db(body)
     assert [c[0] for c in x.calls] == ["buy", "sell", "sell"]
     assert abs(p.pnl_usd - 30.0) < 1e-6 and any("manual" in n for n in notes)
+
+
+def test_accounts_from_settings(monkeypatch):
+    from app.live import accounts_from_settings
+
+    monkeypatch.setenv("LIVE_PRIVATE_KEY_BIG", "k-big")
+    s = Settings(live_wallets=[LEADER], live_private_key="k-main", live_accounts=[
+        {"name": "Big", "size_usd": 50, "max_open_usd": 500},
+        {"name": "bad name!", "size_usd": 1},
+        {"name": "main", "size_usd": 1},
+    ])
+    accts = accounts_from_settings(s)
+    assert [a.name for a in accts] == ["main", "big"]
+    big = accts[1]
+    assert (big.size_usd, big.max_open_usd, big.max_daily_loss_usd) == (50, 500, 250)
+    assert big.wallets == [LEADER] and big.private_key == "k-big" and accts[0].private_key == "k-main"
+
+
+def test_two_accounts_copy_the_same_buy_with_their_own_budget():
+    from app.live import Account, live_status
+
+    s = _s()
+    main = Account("main", 20, 100, 50, [LEADER])
+    big = Account("big", 50, 500, 250, [LEADER])
+    xm, xb = FakeExec(), FakeExec()
+
+    async def body(sess):
+        em, eb = CopyEngine(xm, s, account=main), CopyEngine(xb, s, account=big)
+        await em.step(sess)
+        await eb.step(sess)
+        sess.add_all([_trade(mint=f"T{i}") for i in range(7)])
+        await sess.commit()
+        await em.step(sess)
+        await eb.step(sess)
+        sess.add(_trade(mint="T0", side="sell", remaining=0))
+        await sess.commit()
+        await em.step(sess)
+        await eb.step(sess)
+        return await live_status(sess, Settings(live_mode="live", live_wallets=[LEADER],
+                                                 live_accounts=[{"name": "big", "size_usd": 50, "max_open_usd": 500}]))
+
+    st = _db(body)
+    assert [c[2] for c in xm.calls if c[0] == "buy"] == [20] * 5            # $100 / $20
+    assert [c[2] for c in xb.calls if c[0] == "buy"] == [50] * 7            # $500 cap not reached
+    assert sum(1 for c in xm.calls if c[0] == "sell") == 1 and sum(1 for c in xb.calls if c[0] == "sell") == 1
+    a_main, a_big = st["accounts"]
+    assert (len(a_main["open"]), len(a_main["closed"])) == (4, 1)
+    assert (len(a_big["open"]), len(a_big["closed"])) == (6, 1)
+    assert a_big["open_cost_usd"] == 300

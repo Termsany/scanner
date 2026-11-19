@@ -393,6 +393,7 @@ export interface LiveFill {
 export interface LivePositionOut {
   id: number;
   mode: "dry" | "live";
+  account: string;
   token_address: string;
   symbol: string;
   leader_wallet: string;
@@ -416,6 +417,12 @@ export interface LivePositionOut {
 export interface LiveStatus {
   mode: "off" | "dry" | "live";
   paused: boolean;
+  accounts: LiveAccount[];
+}
+
+export interface LiveAccount {
+  name: string;
+  active: boolean;
   pubkey: string | null;
   wallets: string[];
   size_usd: number;

@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
     live_rpc_url: str | None = None              # defaults to SOLANA_RPC_URL
     jupiter_api_url: str = "https://lite-api.jup.ag"
+    # Extra trading wallets copying the same leaders with their own budget, e.g.
+    # LIVE_ACCOUNTS=[{"name": "big", "size_usd": 50, "max_open_usd": 500, "max_daily_loss_usd": 250}]
+    # Each one's key goes in LIVE_PRIVATE_KEY_<NAME> (LIVE_PRIVATE_KEY_BIG); without it the account stays idle.
+    live_accounts: list[dict[str, Any]] = Field(default_factory=list)
     live_dashboard_password: str | None = None   # unlocks /live on the dashboard; unset = page disabled
 
     # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)

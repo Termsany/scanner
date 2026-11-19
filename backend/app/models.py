@@ -302,6 +302,7 @@ class LivePosition(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     mode: Mapped[str] = mapped_column(String(8))                        # dry | live
+    account: Mapped[str | None] = mapped_column(String(32), nullable=True)  # trading wallet; NULL = "main"
     token_address: Mapped[str] = mapped_column(String(64))
     symbol: Mapped[str] = mapped_column(String(64), default="")
     leader_wallet: Mapped[str] = mapped_column(String(64))
