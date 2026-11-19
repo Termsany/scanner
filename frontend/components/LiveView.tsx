@@ -513,7 +513,8 @@ function AccountSection({
   now: number;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
 }) {
-  const all = [...data.open, ...data.closed, ...data.failed].sort((x, y) =>
+  // failed buys spent nothing: they stay out of the table (count only, in the Budget card)
+  const all = [...data.open, ...data.closed].sort((x, y) =>
     (y.opened_at ?? "").localeCompare(x.opened_at ?? ""),
   );
   const sellPosition = onSell;
@@ -586,9 +587,11 @@ function AccountSection({
           sub={`${data.closed.length} closed · 24h ${money(data.realized_24h, true)}`}
         />
         <Stat
-          label="Failed"
-          value={`${data.failed.length}`}
-          sub={`buys that did not go through · limit ${money(data.max_open_usd)}`}
+          label="Budget"
+          value={`${money(data.open_cost_usd)} / ${money(data.max_open_usd)}`}
+          sub={`${money(data.size_usd)} per buy${
+            data.failed.length ? ` · ${data.failed.length} buys didn't go through (nothing spent)` : ""
+          }`}
         />
       </section>
 
