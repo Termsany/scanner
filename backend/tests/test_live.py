@@ -489,3 +489,79 @@ def test_token_screener_rules():
     none = asyncio.run(run(None))
     assert not none.ok and "no buy" in none.reason                                   # fail closed
     assert asyncio.run(run(None, live_screen_fail_closed=False)).ok
+
+
+def test_dropped_buy_is_rebroadcast_then_retried_with_fresh_quote(monkeypatch):
+    import base64
+    import json as _json
+
+    import httpx
+    import respx
+    from solders.hash import Hash
+    from solders.keypair import Keypair
+    from solders.message import MessageV0
+    from solders.system_program import TransferParams, transfer
+    from solders.transaction import VersionedTransaction
+
+    import app.live as live_mod
+    from app.live import SOL_MINT, JupiterExecutor
+
+    kp = Keypair()
+    msg = MessageV0.try_compile(kp.pubkey(), [transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=kp.pubkey(),
+                                                                       lamports=1))], [], Hash.default())
+    unsigned = base64.b64encode(bytes(VersionedTransaction(msg, [kp]))).decode()
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(live_mod.asyncio, "sleep", lambda s: real_sleep(0))
+    monkeypatch.setattr(live_mod, "JUPITER", live_mod.JupiterGate(interval=0))
+    live_mod._sol_px = (0.0, 0.0)
+
+    state = {"attempt": 0, "sends": 0, "quotes": 0, "tokens": 0}
+    MINT = "Mint111111111111111111111111111111111111111"
+
+    def rpc(req):
+        body = _json.loads(req.content)
+        m = body["method"]
+        if m == "sendTransaction":
+            state["sends"] += 1
+            return httpx.Response(200, json={"result": f"SIG{state['attempt']}"})
+        if m == "getSignatureStatuses":
+            if state["attempt"] == 2:            # second attempt lands
+                state["tokens"] = 5000
+                return httpx.Response(200, json={"result": {"value": [{"confirmationStatus": "confirmed", "err": None}]}})
+            return httpx.Response(200, json={"result": {"value": [None]}})
+        if m == "getBlockHeight":
+            return httpx.Response(200, json={"result": 200})          # past lastValidBlockHeight=100 -> expired
+        if m == "getBalance":
+            return httpx.Response(200, json={"result": {"value": 2_000_000_000 - state["tokens"] * 10}})
+        if m == "getTokenAccountsByOwner":
+            accts = [{"account": {"data": {"parsed": {"info": {"tokenAmount": {"amount": str(state["tokens"])}}}}}}]
+            return httpx.Response(200, json={"result": {"value": accts}})
+        return httpx.Response(404)
+
+    def quote(req):
+        state["quotes"] += 1
+        state["attempt"] += 1
+        return httpx.Response(200, json={"outAmount": "5000", "inAmount": "1"})
+
+    with respx.mock:
+        respx.post("https://rpc.test/").mock(side_effect=rpc)
+        respx.get(url__regex=r"https://jup\.test/price/v3.*").mock(return_value=httpx.Response(200, json={
+            SOL_MINT: {"usdPrice": 100.0, "decimals": 9}, MINT: {"usdPrice": 0.004, "decimals": 0}}))
+        respx.get(url__regex=r"https://jup\.test/swap/v1/quote.*").mock(side_effect=quote)
+        respx.post("https://jup.test/swap/v1/swap").mock(return_value=httpx.Response(200, json={
+            "swapTransaction": unsigned, "lastValidBlockHeight": 100}))
+
+        async def go():
+            x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/"),
+                                live=True, private_key=str(kp))
+            try:
+                return await x.buy(MINT, 20.0, max_price=1.0)
+            finally:
+                await x.close()
+
+        f = asyncio.run(go())
+
+    assert f.signature == "SIG2" and f.tokens_raw == 5000
+    assert state["quotes"] == 2                       # fresh quote for the retry
+    assert state["sends"] > 3                         # first attempt was re-broadcast before it expired

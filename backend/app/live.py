@@ -47,6 +47,10 @@ class SwapError(Exception):
     pass
 
 
+class Dropped(SwapError):
+    """The transaction's blockhash expired without it landing: nothing happened on-chain, safe to retry."""
+
+
 class ChaseError(Exception):
     """The price already ran too far past the leader's: skip instead of buying the top."""
 
@@ -251,25 +255,50 @@ class JupiterExecutor:
             "prioritizationFeeLamports": {"priorityLevelWithMaxLamports": {
                 "maxLamports": self.s.live_priority_fee_lamports, "priorityLevel": "veryHigh"}},
         })
-        if r.status_code != 200 or not r.json().get("swapTransaction"):
+        body = r.json() if r.status_code == 200 else {}
+        if not body.get("swapTransaction"):
             raise SwapError(f"swap build failed ({r.status_code}): {r.text[:150]}")
-        tx = VersionedTransaction.from_bytes(base64.b64decode(r.json()["swapTransaction"]))
+        last_valid = body.get("lastValidBlockHeight")
+        tx = VersionedTransaction.from_bytes(base64.b64decode(body["swapTransaction"]))
         signed = VersionedTransaction(tx.message, [self.kp])
-        sig = await self._rpc("sendTransaction", [base64.b64encode(bytes(signed)).decode(), {
-            "encoding": "base64", "skipPreflight": False, "maxRetries": 3, "preflightCommitment": "confirmed"}])
-        deadline = time.monotonic() + 75
+        raw = base64.b64encode(bytes(signed)).decode()
+        # First send with preflight (a doomed swap fails here, not on-chain). Then re-broadcast the same signed
+        # transaction every ~2 s until it confirms or its blockhash expires: under load, nodes drop transactions
+        # and a single send often never lands.
+        sig = await self._rpc("sendTransaction", [raw, {
+            "encoding": "base64", "skipPreflight": False, "maxRetries": 0, "preflightCommitment": "confirmed"}])
+        deadline = time.monotonic() + 90
+        n = 0
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
+            n += 1
             st = ((await self._rpc("getSignatureStatuses", [[sig]])) or {}).get("value", [None])[0]
             if st:
                 if st.get("err"):
                     raise SwapError(f"transaction failed: {st['err']}"[:250])
                 if st.get("confirmationStatus") in ("confirmed", "finalized"):
                     return sig, True
-        return sig, False   # not confirmed in time: the caller checks balances
+                continue        # processed: landed, waiting for confirmation; no need to resend
+            if last_valid and n % 3 == 0:
+                height = await self._rpc("getBlockHeight", [{"commitment": "confirmed"}])
+                if isinstance(height, int) and height > last_valid:
+                    raise Dropped(f"{sig[:12]}… expired without landing")
+            try:
+                await self._rpc("sendTransaction", [raw, {"encoding": "base64", "skipPreflight": True,
+                                                          "maxRetries": 0}])
+            except Exception as exc:   # a failed re-broadcast is harmless: the next one or the status poll decides
+                log.debug("re-broadcast %s: %s", sig[:12], exc)
+        return sig, False   # unknown after 90 s: the caller checks balances
 
     # ---- trades ------------------------------------------------------------
     async def buy(self, mint: str, usd: float, max_price: float | None = None) -> Fill:
+        try:
+            return await self._buy_once(mint, usd, max_price)
+        except Dropped as exc:     # never landed: nothing was spent, so one fresh attempt (new quote, chase re-checked)
+            log.warning("buy %s dropped (%s); retrying once with a fresh quote", mint[:8], exc)
+            return await self._buy_once(mint, usd, max_price)
+
+    async def _buy_once(self, mint: str, usd: float, max_price: float | None = None) -> Fill:
         decimals = None
         if max_price:   # one price call gives SOL's price and the token's decimals
             d = ((await self._prices([SOL_MINT, mint])).get(mint) or {}).get("decimals")
@@ -296,6 +325,16 @@ class JupiterExecutor:
         return Fill(sig, max(sol0 - sol1, 0.0), got, px)
 
     async def sell(self, mint: str, tokens_raw: int) -> Fill:
+        for attempt in range(3):   # a dropped sell sold nothing: try again (fresh quote) rather than stay stuck
+            try:
+                return await self._sell_once(mint, tokens_raw)
+            except Dropped as exc:
+                if attempt == 2:
+                    raise
+                log.warning("sell %s dropped (%s); retrying with a fresh quote", mint[:8], exc)
+        raise SwapError("unreachable")
+
+    async def _sell_once(self, mint: str, tokens_raw: int) -> Fill:
         px = await self.sol_price()
         if self.mode == "dry":
             q = await self.quote(mint, SOL_MINT, tokens_raw)
