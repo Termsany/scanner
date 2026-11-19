@@ -464,3 +464,47 @@ def test_live_manual_sell_endpoint(monkeypatch):
         opened = c.get("/api/live", headers=h).json()["accounts"][0]["open"]
         assert any(p["id"] == pid and p["manual_sell_frac"] == 1.0 for p in opened)
     live_api._fails.clear()
+
+
+def test_live_values_open_positions_at_live_prices(monkeypatch):
+    from app.api import live as live_api
+    from app.live import SOL_MINT
+    from app.models import LivePosition, TrackerCursor
+
+    s = get_settings()
+    live_api._fails.clear()
+    live_api._cache.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "pw-9")
+    monkeypatch.setattr(s, "live_mode", "dry")
+
+    async def prices(http, mints):
+        return {"VAL1": {"usd": 0.002, "decimals": 6}, SOL_MINT: {"usd": 100.0, "decimals": 9}}
+
+    async def balances(http, pubkeys):
+        return {pk: 1.5 for pk in pubkeys}
+
+    monkeypatch.setattr(live_api, "jupiter_prices", prices)
+    monkeypatch.setattr(live_api, "sol_balances", balances)
+
+    async def mk():
+        async with SessionLocal() as ses:
+            # 20,000 tokens left (6 decimals) at $0.002 = $40 now; $10 already sold; cost $20 -> +$30
+            ses.add(LivePosition(mode="dry", token_address="VAL1", symbol="VAL", leader_wallet="L",
+                                 leader_trade_id=1, status="open", cost_usd=20.0, proceeds_usd=10.0,
+                                 tokens_raw=str(20_000 * 10**6)))
+            row = await ses.get(TrackerCursor, "live:pubkey")
+            if row is None:
+                ses.add(TrackerCursor(key="live:pubkey", value="PK1"))
+            await ses.commit()
+
+    with TestClient(app) as c:
+        c.portal.call(mk)
+        d = c.get("/api/live", headers={"X-Live-Password": "pw-9"}).json()
+    main = d["accounts"][0]
+    p = next(x for x in main["open"] if x["token_address"] == "VAL1")
+    assert abs(p["value_usd"] - 40.0) < 1e-6 and abs(p["unrealized_usd"] - 30.0) < 1e-6
+    assert abs(p["unrealized_pct"] - 150.0) < 1e-6
+    assert d["sol_usd"] == 100.0 and main["sol_balance"] == 1.5 and main["sol_balance_usd"] == 150.0
+    assert "leader_activity" in d and "updated_at" in d
+    live_api._fails.clear()
+    live_api._cache.clear()

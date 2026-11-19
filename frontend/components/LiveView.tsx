@@ -12,8 +12,15 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
-import { ago } from "@/lib/format";
-import type { LiveAccount, LivePositionOut, LiveStatus } from "@/lib/types";
+import { ago, pct, price } from "@/lib/format";
+import type {
+  LeaderTrade,
+  LiveAccount,
+  LivePositionOut,
+  LiveStatus,
+} from "@/lib/types";
+
+const REFRESH_MS = 3_000;
 
 const KEY = "alpha-live-password";
 
@@ -166,7 +173,19 @@ function PositionRows({
   return (
     <>
       {rows.map((p) => {
-        const pnl = p.status === "closed" ? p.pnl_usd : null;
+        const live = p.status === "open";
+        const pnl =
+          p.status === "closed"
+            ? p.pnl_usd
+            : live
+              ? (p.unrealized_usd ?? null)
+              : null;
+        const pnlPct =
+          p.status === "closed"
+            ? p.cost_usd
+              ? ((p.pnl_usd ?? 0) / p.cost_usd) * 100
+              : null
+            : (p.unrealized_pct ?? null);
         return (
           <tr
             key={p.id}
@@ -197,8 +216,28 @@ function PositionRows({
             <td className="num px-3 py-2 text-right">
               {p.proceeds_usd ? money(p.proceeds_usd) : "—"}
             </td>
+            <td className="num px-3 py-2 text-right">
+              {live ? (
+                <>
+                  {money(p.value_usd)}
+                  {p.price_usd != null && (
+                    <span className="block text-[10px] text-faint">
+                      @ {price(p.price_usd)}
+                    </span>
+                  )}
+                </>
+              ) : (
+                "—"
+              )}
+            </td>
             <td className={`num px-3 py-2 text-right ${tone(pnl)}`}>
               {money(pnl, true)}
+              {pnlPct != null && (
+                <span className="block text-[10px]">{pct(pnlPct)}</span>
+              )}
+              {live && pnl != null && (
+                <span className="block text-[10px] text-faint">unrealized</span>
+              )}
             </td>
             <td className="px-3 py-2 text-xs">
               {p.status === "open" ? (
@@ -280,12 +319,30 @@ export function LiveView() {
     if (!password) return;
     const ctl = new AbortController();
     load(password, ctl.signal);
-    const id = setInterval(() => load(password, ctl.signal), 15_000);
+    let inFlight = false;
+    const id = setInterval(async () => {
+      if (inFlight || document.hidden) return; // no polling in a background tab
+      inFlight = true;
+      try {
+        await load(password, ctl.signal);
+      } finally {
+        inFlight = false;
+      }
+    }, REFRESH_MS);
+    const onVisible = () => !document.hidden && load(password, ctl.signal);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
       ctl.abort();
     };
   }, [password, load]);
+
+  const [tick, setTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), 1_000);
+    return () => clearInterval(id);
+  }, []);
 
   async function sellPosition(p: LivePositionOut, share: number) {
     try {
@@ -371,6 +428,15 @@ export function LiveView() {
             {data.paused ? " · PAUSED" : ""}
           </span>
         )}
+        {data && (
+          <span className="num inline-flex items-center gap-1.5 text-[11px] text-muted">
+            <span
+              className={`size-1.5 rounded-full ${tick - now < REFRESH_MS * 3 ? "animate-pulse bg-bull" : "bg-warn"}`}
+            />
+            updated {Math.max(0, Math.round((tick - now) / 1000))}s ago
+            {data.sol_usd ? ` · SOL ${money(data.sol_usd)}` : ""}
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2">
           {data && data.mode !== "off" && (
             <button
@@ -423,6 +489,7 @@ export function LiveView() {
             Pausing stops new buys on every account; open positions still sell
             with the wallet.
           </p>
+          <LeaderFeed rows={data.leader_activity} now={tick} />
           {data.accounts.map((a) => (
             <AccountSection
               key={a.name}
@@ -486,25 +553,42 @@ function AccountSection({
 
       <section className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat
+          label="Wallet"
+          value={
+            data.sol_balance != null
+              ? `${data.sol_balance.toFixed(3)} SOL`
+              : "—"
+          }
+          sub={
+            data.sol_balance_usd != null
+              ? `≈ ${money(data.sol_balance_usd)} free to trade`
+              : "balance unavailable"
+          }
+        />
+        <Stat
+          label="Open now"
+          value={
+            data.open_value_usd != null
+              ? money(data.open_value_usd)
+              : money(data.open_cost_usd)
+          }
+          cls={tone(data.unrealized_usd)}
+          sub={`${data.open.length} positions · cost ${money(data.open_cost_usd)}${
+            data.unrealized_usd != null
+              ? ` · ${money(data.unrealized_usd, true)} unrealized`
+              : ""
+          }`}
+        />
+        <Stat
           label="Realized P&L"
           value={money(data.realized_usd, true)}
           cls={tone(data.realized_usd)}
-          sub={`${data.closed.length} closed trades`}
-        />
-        <Stat
-          label="Last 24h"
-          value={money(data.realized_24h, true)}
-          cls={tone(data.realized_24h)}
-        />
-        <Stat
-          label="Open"
-          value={money(data.open_cost_usd)}
-          sub={`${data.open.length} positions · limit ${money(data.max_open_usd)}`}
+          sub={`${data.closed.length} closed · 24h ${money(data.realized_24h, true)}`}
         />
         <Stat
           label="Failed"
           value={`${data.failed.length}`}
-          sub="buys that did not go through"
+          sub={`buys that did not go through · limit ${money(data.max_open_usd)}`}
         />
       </section>
 
@@ -525,6 +609,7 @@ function AccountSection({
                 <th className="px-3 py-2 text-right">Opened</th>
                 <th className="px-3 py-2 text-right">Cost</th>
                 <th className="px-3 py-2 text-right">Sold for</th>
+                <th className="px-3 py-2 text-right">Value now</th>
                 <th className="px-3 py-2 text-right">P&amp;L</th>
                 <th className="px-3 py-2 text-left">Status</th>
                 <th className="px-3 py-2 text-left">Fills</th>
@@ -536,6 +621,51 @@ function AccountSection({
           </table>
         )}
       </section>
+    </section>
+  );
+}
+
+function LeaderFeed({ rows, now }: { rows: LeaderTrade[]; now: number }) {
+  if (!rows.length) return null;
+  return (
+    <section className="card mt-4 overflow-x-auto">
+      <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">
+        Copied wallet activity
+      </h2>
+      <ul className="divide-y divide-line/60 text-sm">
+        {rows.map((t) => (
+          <li
+            key={t.id}
+            className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-4 py-2"
+          >
+            <span
+              className={`w-10 text-xs font-bold ${t.side === "buy" ? "text-bull" : "text-bear"}`}
+            >
+              {t.side === "buy" ? "BUY" : "SELL"}
+            </span>
+            <a
+              href={`/token/solana/${t.token_address}`}
+              className="font-semibold hover:underline"
+            >
+              ${t.symbol || short(t.token_address)}
+            </a>
+            <span className="num text-muted">
+              {t.usd != null ? money(t.usd) : "—"}
+              {t.side === "sell" && t.pct_sold != null
+                ? ` · ${t.pct_sold.toFixed(0)}% of holding`
+                : ""}
+              {t.kind === "transfer" ? " · transfer out" : ""}
+            </span>
+            <span className="num text-xs text-faint">
+              {t.label || short(t.wallet)}
+            </span>
+            <span className="num ml-auto text-xs text-muted">
+              {ago(t.at, now)}
+            </span>
+            <TxLink sig={t.tx} />
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

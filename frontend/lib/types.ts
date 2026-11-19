@@ -412,18 +412,43 @@ export interface LivePositionOut {
   error: string | null;
   opened_at: string | null;
   closed_at: string | null;
+  price_usd?: number | null;
+  value_usd?: number | null;
+  unrealized_usd?: number | null;
+  unrealized_pct?: number | null;
+}
+
+export interface LeaderTrade {
+  id: number;
+  wallet: string;
+  label: string;
+  side: "buy" | "sell";
+  kind: string;
+  symbol: string;
+  token_address: string;
+  usd: number | null;
+  pct_sold: number | null;
+  tx: string;
+  at: string;
 }
 
 export interface LiveStatus {
   mode: "off" | "dry" | "live";
   paused: boolean;
+  sol_usd: number | null;
+  updated_at: string;
   accounts: LiveAccount[];
+  leader_activity: LeaderTrade[];
 }
 
 export interface LiveAccount {
   name: string;
   active: boolean;
   pubkey: string | null;
+  sol_balance: number | null;
+  sol_balance_usd: number | null;
+  open_value_usd: number | null;
+  unrealized_usd: number | null;
   wallets: string[];
   size_usd: number;
   max_open_usd: number;
