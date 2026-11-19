@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     live_fast_detection: bool = True
     # Copy these leaders' buys only when they open a token they did not hold before (no add-ons / DCA)
     live_new_tokens_only_wallets: list[str] = Field(default_factory=list)
+    # Copy these leaders with no per-trade conditions: no liquidity minimum, chase limit or scanner check, and the
+    # tracker records all their trades (no $ minimum). Account limits (budget, daily loss, SOL, pause) still apply.
+    live_unconditional_wallets: list[str] = Field(default_factory=list)
     # Scanner check before every copy buy (RugCheck + DexScreener, scored like the scanner); see app/screen.py
     live_screen_enabled: bool = True
     live_min_alpha_score: int | None = 70

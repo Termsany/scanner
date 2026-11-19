@@ -385,19 +385,25 @@ class WalletTracker:
         pairs = await self._price(trades)
         regroup = datetime.now(timezone.utc) - timedelta(minutes=self.s.tracker_regroup_minutes)
         alerts = 0
+        copy_all = set(self.s.live_unconditional_wallets)
         for t in trades:
             pair = pairs.get((t.chain, t.token))
-            if not pair:
+            free = t.wallet in copy_all     # copied with no conditions: record every trade, even tiny / no pair
+            if not pair and not free:
                 continue  # no DEX pair: spam / not tradable
+            pair = pair or {}
             base = pair.get("baseToken") or {}
             price = float(pair.get("priceUsd") or 0) or None
             liq = float((pair.get("liquidity") or {}).get("usd") or 0)
             usd = t.amount * price if price else None
             symbol = str(base.get("symbol") or "")
-            if symbol.upper() in SKIP_SYMBOLS or liq < self.s.tracker_min_liquidity_usd:
+            quiet = False                   # recorded for copying, but too small to alert on Telegram
+            if symbol.upper() in SKIP_SYMBOLS:
                 continue
-            if usd is None or usd < self.s.tracker_min_buy_usd:
-                continue
+            if liq < self.s.tracker_min_liquidity_usd or usd is None or usd < self.s.tracker_min_buy_usd:
+                if not free:
+                    continue
+                quiet = True
             exists = (await session.execute(select(WalletTrade.id).where(
                 WalletTrade.chain == t.chain, WalletTrade.tx_hash == t.tx_hash, WalletTrade.token_address == t.token
             ))).first()
@@ -423,7 +429,7 @@ class WalletTracker:
                     pnl_usd = round(t.amount * (price - cost), 2)
                     pnl_pct = round((price / cost - 1.0) * 100.0, 1)
             full_exit = t.side == "sell" and pct_sold is not None and pct_sold >= FULL_EXIT_PCT
-            alert = t.kind != "transfer" and (not recent or full_exit)
+            alert = t.kind != "transfer" and (not recent or full_exit) and not quiet
 
             tok = (await session.execute(select(Token.alpha_score).where(
                 Token.chain == t.chain, Token.address == t.token))).scalar_one_or_none()

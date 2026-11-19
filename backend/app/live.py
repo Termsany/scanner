@@ -473,7 +473,8 @@ class CopyEngine:
         seen = utc(t.block_time) or utc(t.detected_at)
         if seen and (_now() - seen).total_seconds() > MAX_TRADE_AGE_SECONDS:
             return f"leader buy is {(_now() - seen).total_seconds() / 60:.0f} min old"
-        if (t.liquidity_usd or 0) < self.s.live_min_liquidity_usd:
+        free = t.wallet in self.s.live_unconditional_wallets   # copy as-is: no liquidity / chase / scanner check
+        if not free and (t.liquidity_usd or 0) < self.s.live_min_liquidity_usd:
             return f"liquidity ${t.liquidity_usd or 0:,.0f} < ${self.s.live_min_liquidity_usd:,.0f}"
         exists = (await session.execute(select(LivePosition.id).where(
             LivePosition.token_address == t.token_address, LivePosition.status == "open",
@@ -505,7 +506,8 @@ class CopyEngine:
             if "already holding" not in why:
                 await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
             return
-        if self.screener is not None:
+        free = t.wallet in self.s.live_unconditional_wallets
+        if self.screener is not None and not free:
             res = await self.screener.check(t.token_address, t.wallet_label or t.wallet[:6])
             if not res.ok:
                 log.info("live: skip buy %s (scanner: %s)", sym, res.reason)
@@ -513,7 +515,7 @@ class CopyEngine:
                 return
             log.info("live: %s passed the scanner (%s)", sym, res.reason)
         chase = self.s.live_max_chase_pct
-        max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None) else None
+        max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None and not free) else None
         try:
             f = await self.x.buy(t.token_address, self.a.size_usd, max_price=max_price)
         except ChaseError as exc:

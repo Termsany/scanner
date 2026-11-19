@@ -565,3 +565,50 @@ def test_dropped_buy_is_rebroadcast_then_retried_with_fresh_quote(monkeypatch):
     assert f.signature == "SIG2" and f.tokens_raw == 5000
     assert state["quotes"] == 2                       # fresh quote for the retry
     assert state["sends"] > 3                         # first attempt was re-broadcast before it expired
+
+
+def test_unconditional_leader_ignores_liquidity_chase_and_scanner():
+    from app.screen import ScreenResult
+
+    class NoScreen:
+        async def check(self, mint, label=""):
+            return ScreenResult(False, "Alpha Score 10 < 70", 10)
+
+    x = FakeExec()
+    x.pay_price = 5.0            # +400% over the leader's price
+    s = _s(live_unconditional_wallets=[LEADER], live_max_chase_pct=10)
+
+    async def body(sess):
+        eng = CopyEngine(x, s, screener=NoScreen())
+        await eng.step(sess)
+        sess.add(_trade(mint="FREE", liq=900))            # tiny pool, price ran, scanner says no: still copied
+        sess.add(_trade(wallet=OTHER, mint="GATED", liq=900))
+        await sess.commit()
+        await eng.step(sess)
+
+    _db(body)
+    assert [c[1] for c in x.calls] == ["FREE"]
+
+
+def test_tracker_records_every_trade_of_unconditional_leader():
+    import httpx
+
+    from app.wallet_tracker import Trade, WalletTracker
+
+    def dex(req):
+        return httpx.Response(200, json=[{"baseToken": {"address": "THIN", "symbol": "THIN"}, "priceUsd": "1",
+                                          "liquidity": {"usd": 900}}])
+
+    s = Settings(tracker_min_buy_usd=100, tracker_min_liquidity_usd=5_000, live_unconditional_wallets=[LEADER])
+
+    async def body(sess):
+        t = WalletTracker(s, http=httpx.AsyncClient(transport=httpx.MockTransport(dex)))
+        await t.record(sess, [Trade(Chain.solana, LEADER, "THIN", 5.0, "a"),        # $5, $900 pool
+                              Trade(Chain.solana, LEADER, "NOPAIR", 5.0, "b"),      # no DEX pair at all
+                              Trade(Chain.solana, OTHER, "THIN", 5.0, "c")], {})    # other wallet: filtered
+        await sess.commit()
+        rows = (await sess.execute(select(WalletTrade).order_by(WalletTrade.id))).scalars().all()
+        await t.http.aclose()
+        return [(r.tx_hash, r.wallet == LEADER, r.telegram_sent) for r in rows]
+
+    assert _db(body) == [("a", True, True), ("b", True, True)]   # recorded, no Telegram alert (too small)
