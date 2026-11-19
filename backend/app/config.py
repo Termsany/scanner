@@ -68,6 +68,17 @@ class Settings(BaseSettings):
 
     gecko_discovery_every_cycles: int = 3        # GeckoTerminal trending/new lists: 8 calls -> every 3rd cycle
 
+    # Paper trading (simulation only, no real money)
+    paper_enabled: bool = True
+    paper_interval_seconds: int = 60
+    paper_size_usd: float = 100.0
+    paper_slippage_pct: float = 1.5             # charged on entry AND exit (pump.fun fee + slippage)
+    paper_no_price_minutes: int = 60            # no market price this long: close at last known price
+    # wallet_mirror copies these tracked wallets (buy with them, sell the same share when they sell).
+    # Empty = every tracked wallet.
+    paper_mirror_wallets: list[str] = Field(default_factory=list)
+    paper_mirror_max_hold_hours: int = 24 * 7
+
     # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)
     perf_interval_seconds: int = 300
     perf_max_calls_per_run: int = 15             # = 3 calls/min on average

@@ -255,6 +255,45 @@ class SmartWallet(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class PaperPosition(Base):
+    """A simulated trade (no real money). One open position per strategy and token at a time."""
+
+    __tablename__ = "paper_positions"
+    __table_args__ = (
+        Index("ix_paper_strategy_status", "strategy", "status"),
+        Index("ix_paper_entry_time", "entry_time"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy: Mapped[str] = mapped_column(String(32))
+    chain: Mapped[Chain] = mapped_column(Enum(Chain, native_enum=False, length=16, values_callable=_enum_values))
+    token_address: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(64), default="")
+    trigger: Mapped[str] = mapped_column(String(160), default="")      # e.g. "auto 2/3 bought $380", "score 86"
+    trigger_wallet: Mapped[str | None] = mapped_column(String(64))     # wallet_follow: exit when it sells
+    status: Mapped[str] = mapped_column(String(8), default="open")    # open | closed
+    size_usd: Mapped[float] = mapped_column(Float)
+    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    entry_price: Mapped[float] = mapped_column(Float)                 # market price at the trigger
+    fill_price: Mapped[float] = mapped_column(Float)                  # after simulated slippage + fees
+    tp_pct: Mapped[float] = mapped_column(Float)
+    sl_pct: Mapped[float] = mapped_column(Float)
+    max_hold_minutes: Mapped[int] = mapped_column(Integer)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    last_priced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    peak_pct: Mapped[float | None] = mapped_column(Float)             # vs market entry price
+    trough_pct: Mapped[float | None] = mapped_column(Float)
+    exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_price: Mapped[float | None] = mapped_column(Float)           # market price at exit
+    exit_reason: Mapped[str | None] = mapped_column(String(24))       # take_profit | stop_loss | time | leader_sold | no_price
+    pnl_usd: Mapped[float | None] = mapped_column(Float)              # net of simulated costs
+    pnl_pct: Mapped[float | None] = mapped_column(Float)
+    # wallet_mirror: partial exits that copy the leader's sells
+    remaining_frac: Mapped[float | None] = mapped_column(Float, nullable=True, default=1.0)
+    proceeds_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)
+    leader_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # last leader sell copied
+
+
 class SignalOutcome(Base):
     """What happened after a signal, from GeckoTerminal 15-minute candles of its pool (so tokens that crashed
     out of the scanner's filters are still measured: no survivorship bias)."""

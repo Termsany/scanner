@@ -1,4 +1,4 @@
-import { Activity, BarChart3, HeartPulse, Radar, ScanSearch, ShieldCheck, Timer, Trophy, Wifi, WifiOff, Zap } from "lucide-react";
+import { Activity, BarChart3, FlaskConical, HeartPulse, Radar, ScanSearch, ShieldCheck, Timer, Trophy, Wifi, WifiOff, Zap } from "lucide-react";
 
 import { ago, pct } from "@/lib/format";
 import type { SocketState } from "@/lib/useLiveSignals";
@@ -44,6 +44,9 @@ export function TelemetryBar({ status, socket, now }: { status: ScannerStatus | 
         <div className="ml-auto flex items-center gap-3">
           <a href="/performance" className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink">
             <BarChart3 className="size-3.5" /> Performance
+          </a>
+          <a href="/paper" className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink">
+            <FlaskConical className="size-3.5" /> Paper
           </a>
           <p className="hidden text-[11px] text-faint lg:block">Automated heuristics, not financial advice.</p>
           <span

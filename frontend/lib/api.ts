@@ -4,6 +4,7 @@ import type {
   ChartData,
   ChartInterval,
   PaginatedTokens,
+  PaperSummary,
   Performance,
   ScannerStatus,
   SignalOut,
@@ -82,6 +83,9 @@ export const api = {
 
   performance: (hours: number, signal?: AbortSignal) =>
     request<Performance>(`/api/performance${qs({ hours })}`, { signal }),
+
+  paper: (hours: number, signal?: AbortSignal) =>
+    request<PaperSummary>(`/api/paper${qs({ hours })}`, { signal }),
 
   signals: (minScore: number, limit = 30, signal?: AbortSignal) =>
     request<SignalOut[]>(`/api/signals${qs({ min_score: minScore, limit })}`, { signal }),

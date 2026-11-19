@@ -36,7 +36,7 @@ BADGE_TEXT = {Badge.strong_alpha: "STRONG ALPHA", Badge.moderate: "MODERATE", Ba
 BACKLOG_MINUTES = 10   # on startup, don't post signals older than this
 SEND_INTERVAL = 1.1    # Telegram allows ~1 msg/s per chat
 MENU_LIMIT = 30        # wallets per /wallets menu
-SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token", "performance"}
+SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token", "performance", "paper"}
 
 
 def fmt_usd(v: float | None) -> str:
@@ -408,6 +408,31 @@ class TelegramAlerts:
         lines.append("<i>Peaks are highs, not executed trades. Not financial advice.</i>")
         return "\n".join(lines)
 
+    async def paper_text(self, hours: int = 24 * 7) -> str:
+        from app.paper import paper_summary
+
+        async with SessionLocal() as s:
+            p = await paper_summary(s, hours=hours, recent_limit=0, settings=self.settings)
+        window = f"{hours // 24}d" if hours % 24 == 0 and hours >= 48 else f"{hours}h"
+        lines = [f"🧪 <b>Paper trading · last {window}</b>",
+                 f"${p['size_usd']:.0f} per trade · {p['slippage_pct']:.1f}% slippage per fill (simulated)", ""]
+        if not any(st["trades"] for st in p["strategies"]):
+            lines.append("No paper trades yet. They open on the next tracked-wallet buy or 80+ signal.")
+            return "\n".join(lines)
+        for st in p["strategies"]:
+            if not st["trades"]:
+                lines.append(f"<b>{e(st['name'])}</b>: no trades")
+                continue
+            wr = "—" if st["win_rate"] is None else f"{st['win_rate'] * 100:.0f}%"
+            sign = "+" if st["realized_usd"] >= 0 else "−"
+            lines.append(f"<b>{e(st['name'])}</b>: {st['closed']} closed · win {wr} · "
+                         f"{sign}${abs(st['realized_usd']):,.2f} ({fmt_pct(st['return_pct'])})")
+            if st["open"]:
+                u = st["unrealized_usd"]
+                lines.append(f"   {st['open']} open · unrealized {'+' if u >= 0 else '−'}${abs(u):,.2f}")
+        lines.append("<i>Simulation only, no real trades. Not financial advice.</i>")
+        return "\n".join(lines)
+
     async def _maybe_daily_report(self) -> None:
         hour = self.settings.telegram_daily_report_hour
         chat = self.settings.telegram_chat_id
@@ -425,6 +450,8 @@ class TelegramAlerts:
                 row.value = today
             await s.commit()
         await self.send(chat, await self.performance_text(24))
+        if self.settings.paper_enabled:
+            await self.send(chat, await self.paper_text(24))
 
     async def _alerts_loop(self) -> None:
         await self._skip_backlog()
@@ -463,6 +490,7 @@ class TelegramAlerts:
                     "/token &lt;address&gt; — score card\n"
                     "/status — scanner health\n"
                     "/performance [24h|7d] — how signals did after they fired\n"
+                    "/paper [24h|7d] — paper-trading results per strategy\n"
                     "/wallets — smart wallets with Track buttons\n"
                     "/track &lt;address&gt; [name] — buy alerts for any wallet (chain auto-detected)\n"
                     "/untrack &lt;address&gt;\n"
@@ -557,6 +585,12 @@ class TelegramAlerts:
             if token.pair_url:
                 lines.append(f'<a href="{e(token.pair_url)}">DexScreener</a>')
             return "\n".join(lines)
+
+        if cmd == "/paper":
+            hours = 24 * 7
+            if args and args[0].rstrip("dh").isdigit():
+                hours = int(args[0].rstrip("dh")) * (24 if args[0].endswith("d") else 1)
+            return await self.paper_text(min(max(hours, 1), 24 * 90))
 
         if cmd == "/performance":
             hours = 24

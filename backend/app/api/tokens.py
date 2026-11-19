@@ -172,6 +172,17 @@ async def get_performance(
     return await performance_summary(session, hours=hours, min_score=min_score)
 
 
+@router.get("/paper")
+async def get_paper(
+    session: Session,
+    hours: Annotated[int, Query(ge=1, le=24 * 90)] = 24 * 7,
+) -> dict:
+    """Paper-trading results per strategy (simulated $ size per trade, slippage on both fills)."""
+    from app.paper import paper_summary
+
+    return await paper_summary(session, hours=hours)
+
+
 @router.get("/status", response_model=ScannerStatus)
 async def get_status(session: Session) -> ScannerStatus:
     """KPI bar: active tokens, 24h high-alpha signals, top gainer caught, live pulse."""

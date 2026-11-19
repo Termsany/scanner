@@ -324,3 +324,57 @@ export interface Performance {
   best: { symbol: string; chain: Chain; score: number; peak_pct: number; peak_minutes: number; token_address: string }[];
   recent: PerfRow[];
 }
+
+export interface PaperStrategy {
+  name: string;
+  title: string;
+  tp_pct: number;
+  sl_pct: number;
+  mirror: boolean;
+  max_hold_minutes: number;
+  trades: number;
+  open: number;
+  closed: number;
+  wins: number;
+  win_rate: number | null;
+  realized_usd: number;
+  unrealized_usd: number;
+  invested_usd: number;
+  return_pct: number | null;
+  avg_pnl_pct: number | null;
+  best_pct: number | null;
+  worst_pct: number | null;
+  exit_reasons: Record<string, number>;
+}
+
+export interface PaperPositionOut {
+  id: number;
+  strategy: string;
+  chain: Chain;
+  token_address: string;
+  symbol: string;
+  trigger: string;
+  status: "open" | "closed";
+  size_usd: number;
+  entry_time: string | null;
+  entry_price: number;
+  last_price: number | null;
+  peak_pct: number | null;
+  trough_pct: number | null;
+  exit_time: string | null;
+  exit_price: number | null;
+  exit_reason: string | null;
+  pnl_usd: number | null;
+  pnl_pct: number | null;
+  remaining_pct: number;
+}
+
+export interface PaperSummary {
+  hours: number;
+  size_usd: number;
+  slippage_pct: number;
+  generated_at: string;
+  mirror_wallets: string[];
+  strategies: PaperStrategy[];
+  positions: PaperPositionOut[];
+}
