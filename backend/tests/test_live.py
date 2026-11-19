@@ -419,3 +419,73 @@ def test_buy_trades_record_balance_after():
           "postTokenBalances": [{"owner": W, "mint": "M", "uiTokenAmount": {"uiAmount": 350.0}}]}}
     [t] = solana_trades_from_tx(tx, W, "s")
     assert (t.side, t.amount, t.remaining) == ("buy", 100.0, 350.0)
+
+
+def test_scanner_screen_blocks_failed_tokens():
+    from app.screen import ScreenResult
+
+    class FakeScreen:
+        async def check(self, mint, label=""):
+            return {"GOOD": ScreenResult(True, "Alpha Score 78", 78),
+                    "LOW": ScreenResult(False, "Alpha Score 45 < 70", 45)}.get(mint, ScreenResult(False, "no data"))
+
+    x, notes = FakeExec(), []
+
+    async def note(t):
+        notes.append(t)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), notify=note, screener=FakeScreen())
+        await eng.step(sess)
+        sess.add_all([_trade(mint="GOOD"), _trade(mint="LOW"), _trade(mint="NODATA")])
+        await sess.commit()
+        await eng.step(sess)
+
+    _db(body)
+    assert [c[1] for c in x.calls] == ["GOOD"]
+    assert any("Alpha Score 45 < 70" in n for n in notes) and any("no data" in n for n in notes)
+
+
+def test_token_screener_rules():
+    from app.screen import TokenScreener
+
+    MINT = "Mint111111111111111111111111111111111111111"
+    pair = {"chainId": "solana", "pairAddress": "P1", "baseToken": {"address": MINT, "symbol": "T"},
+            "quoteToken": {"address": "So11111111111111111111111111111111111111112", "symbol": "SOL"},
+            "priceUsd": "0.001", "liquidity": {"usd": 60_000}, "volume": {"h1": 90_000, "h24": 400_000},
+            "txns": {"h1": {"buys": 400, "sells": 250}, "m5": {"buys": 40, "sells": 20}},
+            "priceChange": {"h1": 30, "m5": 4}, "marketCap": 500_000, "fdv": 500_000,
+            "pairCreatedAt": int((datetime.now(timezone.utc) - timedelta(hours=3)).timestamp() * 1000)}
+
+    class Dex:
+        async def pairs_for_tokens(self, chain, addrs):
+            return [pair]
+
+    def rug_report(mint_auth=None, freeze=None, top=5.0, rugged=False):
+        return {"mintAuthority": mint_auth, "freezeAuthority": freeze, "rugged": rugged, "score": 100,
+                "risks": [{"name": "Rugged", "level": "danger", "description": "x"}] if rugged else [],
+                "topHolders": [{"owner": f"H{i}", "address": f"A{i}", "pct": top} for i in range(10)],
+                "totalHolders": 900, "markets": [{"pubkey": "P1", "lp": {"lpLockedPct": 100}}]}
+
+    class Rug:
+        def __init__(self, rep):
+            self.rep = rep
+
+        async def report(self, mint):
+            return self.rep
+
+    async def run(rep, **kw):
+        sc = TokenScreener(Settings(**kw), dex=Dex(), rugcheck=Rug(rep))
+        return await sc.check(MINT, "DULX")
+
+    ok = asyncio.run(run(rug_report(), live_min_alpha_score=None))
+    assert ok.ok and ok.score is not None
+    assert not asyncio.run(run(rug_report(mint_auth="X"), live_min_alpha_score=None)).ok
+    assert not asyncio.run(run(rug_report(freeze="X"), live_min_alpha_score=None)).ok
+    assert "top 10" in asyncio.run(run(rug_report(top=8.0), live_min_alpha_score=None)).reason   # 80% > 50%
+    assert "RUGGED" in asyncio.run(run(rug_report(rugged=True), live_min_alpha_score=None)).reason
+    hi = asyncio.run(run(rug_report(), live_min_alpha_score=101))
+    assert not hi.ok and "< 101" in hi.reason
+    none = asyncio.run(run(None))
+    assert not none.ok and "no buy" in none.reason                                   # fail closed
+    assert asyncio.run(run(None, live_screen_fail_closed=False)).ok

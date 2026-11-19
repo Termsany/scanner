@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     live_fast_detection: bool = True
     # Copy these leaders' buys only when they open a token they did not hold before (no add-ons / DCA)
     live_new_tokens_only_wallets: list[str] = Field(default_factory=list)
+    # Scanner check before every copy buy (RugCheck + DexScreener, scored like the scanner); see app/screen.py
+    live_screen_enabled: bool = True
+    live_min_alpha_score: int | None = 70
+    live_max_top10_pct: float = 50.0
+    live_screen_fail_closed: bool = True          # check unavailable -> skip the buy
     live_sol_reserve: float = 0.02               # SOL kept back for fees
     live_interval_seconds: float = 3.0
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds

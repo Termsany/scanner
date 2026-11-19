@@ -380,8 +380,9 @@ def _share(t: WalletTrade) -> float:
 
 class CopyEngine:
     def __init__(self, executor: Executor, settings: Settings | None = None, notify=None,
-                 account: Account | None = None) -> None:
+                 account: Account | None = None, screener=None) -> None:
         self.x = executor
+        self.screener = screener          # app.screen.TokenScreener, shared by all accounts; None = no check
         self.s = settings or get_settings()
         self.a = account or accounts_from_settings(self.s)[0]
         self.wallets = set(self.a.wallets)
@@ -465,6 +466,13 @@ class CopyEngine:
             if "already holding" not in why:
                 await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
             return
+        if self.screener is not None:
+            res = await self.screener.check(t.token_address, t.wallet_label or t.wallet[:6])
+            if not res.ok:
+                log.info("live: skip buy %s (scanner: %s)", sym, res.reason)
+                await self.notify(f"{self._tag()} 🛡 Skipped ${sym}: scanner says {res.reason}")
+                return
+            log.info("live: %s passed the scanner (%s)", sym, res.reason)
         chase = self.s.live_max_chase_pct
         max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None) else None
         try:
@@ -643,6 +651,11 @@ class LiveTrader:
             log.info("Live copy trading off (LIVE_MODE=%s)", mode)
             return
         loops = []
+        self._screener = None
+        if self.s.live_screen_enabled:
+            from app.screen import TokenScreener
+
+            self._screener = TokenScreener(self.s)
         for a in accounts_from_settings(self.s):
             env = "LIVE_PRIVATE_KEY" if a.name == "main" else f"LIVE_PRIVATE_KEY_{a.name.upper()}"
             if not a.wallets:
@@ -671,7 +684,7 @@ class LiveTrader:
     async def _run_account(self, a: Account, x: JupiterExecutor, mode: str) -> None:
         from app.db import SessionLocal
 
-        engine = CopyEngine(x, self.s, notify=self._telegram, account=a)
+        engine = CopyEngine(x, self.s, notify=self._telegram, account=a, screener=self._screener)
         async with SessionLocal() as session:
             if x.pubkey:
                 await _put(session, _key(PUBKEY, a.name), x.pubkey)
