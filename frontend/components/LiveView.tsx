@@ -433,6 +433,23 @@ export function LiveView() {
             <span
               className={`size-1.5 rounded-full ${tick - now < REFRESH_MS * 3 ? "animate-pulse bg-bull" : "bg-warn"}`}
             />
+            <span
+              className={`rounded border px-1.5 py-0.5 text-xs font-semibold ${tone(
+                data.accounts.reduce(
+                  (s, a) => s + a.realized_usd + (a.unrealized_usd ?? 0),
+                  0,
+                ),
+              )}`}
+            >
+              Live P&amp;L{" "}
+              {money(
+                data.accounts.reduce(
+                  (s, a) => s + a.realized_usd + (a.unrealized_usd ?? 0),
+                  0,
+                ),
+                true,
+              )}
+            </span>
             updated {Math.max(0, Math.round((tick - now) / 1000))}s ago
             {data.sol_usd ? ` · SOL ${money(data.sol_usd)}` : ""}
           </span>
@@ -567,16 +584,15 @@ function AccountSection({
           }
         />
         <Stat
-          label="Open now"
-          value={
-            data.open_value_usd != null
-              ? money(data.open_value_usd)
-              : money(data.open_cost_usd)
-          }
-          cls={tone(data.unrealized_usd)}
-          sub={`${data.open.length} positions · cost ${money(data.open_cost_usd)}${
-            data.unrealized_usd != null
-              ? ` · ${money(data.unrealized_usd, true)} unrealized`
+          label="Live P&L now"
+          value={money(data.realized_usd + (data.unrealized_usd ?? 0), true)}
+          cls={tone(data.realized_usd + (data.unrealized_usd ?? 0))}
+          sub={`realized ${money(data.realized_usd, true)} · open ${money(
+            data.unrealized_usd ?? null,
+            true,
+          )}${
+            data.open.some((p) => p.unrealized_usd == null)
+              ? ` · ${data.open.filter((p) => p.unrealized_usd == null).length} without a price`
               : ""
           }`}
         />
@@ -590,7 +606,9 @@ function AccountSection({
           label="Budget"
           value={`${money(data.open_cost_usd)} / ${money(data.max_open_usd)}`}
           sub={`${money(data.size_usd)} per buy${
-            data.failed.length ? ` · ${data.failed.length} buys didn't go through (nothing spent)` : ""
+            data.failed.length
+              ? ` · ${data.failed.length} buys didn't go through (nothing spent)`
+              : ""
           }`}
         />
       </section>
