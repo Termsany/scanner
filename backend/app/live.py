@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 import httpx
-from sqlalchemy import func, or_, select
+from sqlalchemy import Numeric, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -75,6 +75,7 @@ class Executor(Protocol):
     async def sol_price(self) -> float: ...
     async def buy(self, mint: str, usd: float, max_price: float | None = None) -> Fill: ...
     async def sell(self, mint: str, tokens_raw: int) -> Fill: ...
+    async def token_balance(self, mint: str) -> int: ...
     async def close(self) -> None: ...
 
 
@@ -490,10 +491,40 @@ class CopyEngine:
         pos = (await session.execute(select(LivePosition).where(
             LivePosition.token_address == t.token_address, LivePosition.leader_wallet == t.wallet,
             LivePosition.status == "open", *self._mine()))).scalars().first()
-        if pos is None:
+        share = _share(t)
+        if pos is not None:
+            pos.leader_trade_id = t.id
+            await self._sell(session, pos, share, "leader_sold" if share >= 0.99 else "leader_trim")
+            await session.commit()
+        if self.s.live_sell_manual_with_leader and self.x.mode == "live":
+            await self._sell_manual(session, t, share)
+
+    async def _sell_manual(self, session: AsyncSession, t: WalletTrade, share: float) -> None:
+        """Tokens the owner bought by hand in this wallet follow the leader out too (same share)."""
+        sym = t.symbol or t.token_address[:6]
+        try:
+            held = await self.x.token_balance(t.token_address)
+        except Exception as exc:
+            log.warning("live: balance check for manual %s failed: %s", sym, exc)
             return
-        pos.leader_trade_id = t.id
-        await self._sell(session, pos, _share(t), "leader_sold" if _share(t) >= 0.99 else "leader_trim")
+        bot = (await session.execute(select(func.sum(LivePosition.tokens_raw.cast(Numeric))).where(
+            LivePosition.token_address == t.token_address, LivePosition.status == "open", *self._mine()))).scalar()
+        manual = held - int(bot or 0)
+        amount = manual if share >= 0.99 else int(manual * share)
+        if amount <= 0:
+            return
+        try:
+            f = await self.x.sell(t.token_address, amount)
+        except Exception as exc:
+            log.warning("live: manual sell %s failed: %s", sym, exc)
+            await self.notify(f"{self._tag()} ⚠️ Could not sell your own ${sym} with the wallet: {str(exc)[:160]}\n"
+                              f"Sell it by hand in Phantom.")
+            return
+        log.info("live: SELL manual %s %.0f%% (%d raw) for %.4f SOL ($%.2f) %s", sym, share * 100, f.tokens_raw,
+                 f.sol, f.usd, f.signature)
+        await self.notify(f"{self._tag()} 💰 Sold {share * 100:.0f}% of your own ${sym} (bought by hand) for "
+                          f"{f.sol:.4f} SOL (${f.usd:,.2f}) · {t.wallet_label or t.wallet[:6]} sold\n"
+                          f"{self._tx(f.signature)}")
 
     async def _sell(self, session: AsyncSession, pos: LivePosition, share: float, reason: str) -> bool:
         held = int(pos.tokens_raw)

@@ -325,3 +325,56 @@ def test_jupiter_gate_retries_429_and_spaces_calls():
 
     r, calls, took = asyncio.run(go())
     assert r.status_code == 200 and calls == 3 and took >= 0.1   # 3 calls spaced >= 0.05s apart
+
+
+class BalExec(FakeExec):
+    """FakeExec with an on-chain token balance, including tokens the owner bought by hand."""
+
+    def __init__(self, manual=None):
+        super().__init__()
+        self.bal = dict(manual or {})
+
+    async def token_balance(self, mint):
+        return self.bal.get(mint, 0)
+
+    async def buy(self, mint, usd, max_price=None):
+        f = await super().buy(mint, usd, max_price)
+        self.bal[mint] = self.bal.get(mint, 0) + f.tokens_raw
+        return f
+
+    async def sell(self, mint, tokens_raw):
+        amount = min(tokens_raw, self.bal.get(mint, 0))
+        f = await super().sell(mint, amount)
+        self.bal[mint] -= amount
+        return f
+
+
+def test_leader_sells_also_sell_manual_tokens():
+    x = BalExec(manual={"MAN": 3_000_000, "ONLY": 2_000_000})
+    notes = []
+
+    async def note(t):
+        notes.append(t)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), notify=note)
+        await eng.step(sess)
+        sess.add(_trade(mint="MAN"))                                   # bot buys 1,000,000
+        await sess.commit()
+        await eng.step(sess)
+        sess.add(_trade(mint="MAN", side="sell", pct_sold=50, remaining=1))
+        await sess.commit()
+        await eng.step(sess)
+        assert x.bal["MAN"] == 2_000_000                               # 500k bot + 1.5M manual left
+        sess.add(_trade(mint="MAN", side="sell", pct_sold=100, remaining=0))
+        sess.add(_trade(mint="ONLY", side="sell", pct_sold=100, remaining=0))   # manual-only token
+        await sess.commit()
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().one()
+
+    pos = _db(body)
+    sells = [c[2] for c in x.calls if c[0] == "sell"]
+    assert sells == [500_000, 1_500_000, 500_000, 1_500_000, 2_000_000]
+    assert x.bal == {"MAN": 0, "ONLY": 0}
+    assert pos.status == "closed" and pos.tokens_raw == "0"
+    assert sum("your own" in n for n in notes) == 3

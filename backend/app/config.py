@@ -95,6 +95,8 @@ class Settings(BaseSettings):
     # Skip a copy buy when the live quote's price per token is more than this % above the price recorded with
     # the leader's buy (we would be buying the leader's pump). None = no limit.
     live_max_chase_pct: float | None = 10.0
+    # When the leader sells, also sell the same share of tokens the owner bought by hand in the trading wallet
+    live_sell_manual_with_leader: bool = True
     live_sol_reserve: float = 0.02               # SOL kept back for fees
     live_interval_seconds: float = 3.0
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
