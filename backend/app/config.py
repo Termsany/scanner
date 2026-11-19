@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
     live_rpc_url: str | None = None              # defaults to SOLANA_RPC_URL
     jupiter_api_url: str = "https://lite-api.jup.ag"
+    live_dashboard_password: str | None = None   # unlocks /live on the dashboard; unset = page disabled
 
     # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)
     perf_interval_seconds: int = 300

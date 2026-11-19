@@ -378,3 +378,52 @@ export interface PaperSummary {
   strategies: PaperStrategy[];
   positions: PaperPositionOut[];
 }
+
+export interface LiveFill {
+  side: "buy" | "sell" | "sell_failed";
+  sig?: string;
+  sol?: number;
+  usd?: number;
+  reason?: string;
+  error?: string;
+  share?: number;
+  at: string;
+}
+
+export interface LivePositionOut {
+  id: number;
+  mode: "dry" | "live";
+  token_address: string;
+  symbol: string;
+  leader_wallet: string;
+  status: "open" | "closed" | "failed";
+  cost_usd: number;
+  sol_spent: number;
+  proceeds_usd: number;
+  proceeds_sol: number;
+  pnl_usd: number | null;
+  tokens_left: string;
+  tokens_bought: string;
+  buy_signature: string | null;
+  fills: LiveFill[];
+  exit_reason: string | null;
+  error: string | null;
+  opened_at: string | null;
+  closed_at: string | null;
+}
+
+export interface LiveStatus {
+  mode: "off" | "dry" | "live";
+  paused: boolean;
+  pubkey: string | null;
+  wallets: string[];
+  size_usd: number;
+  max_open_usd: number;
+  max_daily_loss_usd: number;
+  realized_usd: number;
+  realized_24h: number;
+  open_cost_usd: number;
+  open: LivePositionOut[];
+  closed: LivePositionOut[];
+  failed: LivePositionOut[];
+}

@@ -412,3 +412,26 @@ def test_wallet_trades_grouped_into_one_alert(client):
         assert not any("NEW" in t for t in sent)          # 0s old: still waiting for other wallets
     finally:
         client.portal.call(bot.close)
+
+
+def test_live_dashboard_requires_password(monkeypatch):
+    from app.api import live as live_api
+
+    s = get_settings()
+    live_api._fails.clear()
+    with TestClient(app) as c:
+        monkeypatch.setattr(s, "live_dashboard_password", None)
+        assert c.get("/api/live").status_code == 404           # page disabled until a password is set
+        monkeypatch.setattr(s, "live_dashboard_password", "s3cret-pass")
+        assert c.get("/api/live").status_code == 401
+        assert c.get("/api/live", headers={"X-Live-Password": "nope"}).status_code == 401
+        r = c.get("/api/live", headers={"X-Live-Password": "s3cret-pass"})
+        assert r.status_code == 200 and r.json()["paused"] is False and r.json()["open"] == []
+        r = c.post("/api/live/pause", json={"paused": True}, headers={"X-Live-Password": "s3cret-pass"})
+        assert r.status_code == 200
+        assert c.get("/api/live", headers={"X-Live-Password": "s3cret-pass"}).json()["paused"] is True
+        assert c.post("/api/live/pause", json={"paused": False}).status_code == 401
+        for _ in range(10):
+            c.get("/api/live", headers={"X-Live-Password": "wrong"})
+        assert c.get("/api/live", headers={"X-Live-Password": "s3cret-pass"}).status_code == 429   # locked out
+    live_api._fails.clear()

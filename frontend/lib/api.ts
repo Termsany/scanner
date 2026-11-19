@@ -4,6 +4,7 @@ import type {
   ChartData,
   ChartInterval,
   PaginatedTokens,
+  LiveStatus,
   PaperSummary,
   Performance,
   ScannerStatus,
@@ -37,7 +38,11 @@ async function request<T>(path: string, init?: RequestInit & { signal?: AbortSig
   try {
     res = await fetch(`${API_URL}${path}`, {
       ...init,
-      headers: { Accept: "application/json", ...(init?.body ? { "Content-Type": "application/json" } : {}) },
+      headers: {
+        Accept: "application/json",
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...((init?.headers as Record<string, string>) ?? {}),
+      },
       cache: "no-store",
     });
   } catch (err) {
@@ -86,6 +91,16 @@ export const api = {
 
   paper: (hours: number, signal?: AbortSignal) =>
     request<PaperSummary>(`/api/paper${qs({ hours })}`, { signal }),
+
+  live: (password: string, signal?: AbortSignal) =>
+    request<LiveStatus>("/api/live", { headers: { "X-Live-Password": password }, signal }),
+
+  livePause: (password: string, paused: boolean) =>
+    request<{ paused: boolean }>("/api/live/pause", {
+      method: "POST",
+      headers: { "X-Live-Password": password },
+      body: JSON.stringify({ paused }),
+    }),
 
   signals: (minScore: number, limit = 30, signal?: AbortSignal) =>
     request<SignalOut[]>(`/api/signals${qs({ min_score: minScore, limit })}`, { signal }),

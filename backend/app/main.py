@@ -22,6 +22,7 @@ from sqlalchemy import text
 
 from app.ai_analyst import AIAnalyst
 from app.api import ai as ai_routes
+from app.api import live as live_routes
 from app.api import tokens as token_routes
 from app.cache import Cache
 from app.config import get_settings
@@ -90,6 +91,7 @@ app.add_middleware(
 )
 app.include_router(token_routes.router)
 app.include_router(ai_routes.router)
+app.include_router(live_routes.router)
 
 
 @app.get("/healthz", tags=["ops"])
