@@ -97,6 +97,8 @@ class Settings(BaseSettings):
     live_max_chase_pct: float | None = 10.0
     # When the leader sells, also sell the same share of tokens the owner bought by hand in the trading wallet
     live_sell_manual_with_leader: bool = True
+    # Watch the copied wallets over LIVE_RPC_URL's WebSocket (~1 s) instead of waiting for the tracker's poll
+    live_fast_detection: bool = True
     live_sol_reserve: float = 0.02               # SOL kept back for fees
     live_interval_seconds: float = 3.0
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds

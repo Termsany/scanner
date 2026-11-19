@@ -654,6 +654,11 @@ class LiveTrader:
                 continue
             loops.append(self._run_account(a, x, mode))
         if loops:
+            if self.s.live_fast_detection and self.s.live_rpc_url:
+                from app.fast_watch import FastWatcher
+
+                wallets = sorted({w for a in accounts_from_settings(self.s) for w in a.wallets})
+                loops.append(FastWatcher(wallets, self.s).run_forever())
             await asyncio.gather(*loops)
 
     async def _run_account(self, a: Account, x: JupiterExecutor, mode: str) -> None:
@@ -670,9 +675,14 @@ class LiveTrader:
                              f"${a.size_usd:.0f} per buy · max ${a.max_open_usd:.0f} open · "
                              f"pause after ${a.max_daily_loss_usd:.0f} loss/24h"
                              + (f"\nTrading wallet: {x.pubkey}" if x.pubkey else ""))
+        from app.fast_watch import WAKE
+
+        wake = asyncio.Event()
+        WAKE.append(wake)
         try:
             while True:
                 t0 = time.monotonic()
+                wake.clear()
                 try:
                     async with SessionLocal() as session:
                         await engine.step(session)
@@ -680,6 +690,12 @@ class LiveTrader:
                     raise
                 except Exception:
                     log.exception("live[%s] step failed", a.name)
-                await asyncio.sleep(max(self.s.live_interval_seconds - (time.monotonic() - t0), 1))
+                # next tick, or at once when the WebSocket watcher records a copied trade
+                try:
+                    await asyncio.wait_for(wake.wait(),
+                                           timeout=max(self.s.live_interval_seconds - (time.monotonic() - t0), 0.5))
+                except asyncio.TimeoutError:
+                    pass
         finally:
+            WAKE.remove(wake)
             await x.close()
