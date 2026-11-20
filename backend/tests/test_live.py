@@ -683,3 +683,155 @@ def test_slippage_failure_retries_with_wider_slippage(monkeypatch):
 
     assert f.signature == "SIGOK" and f.tokens_raw == 7000
     assert st["bps"] == [2500, 4000]          # 25% first, then 1.6x after the slippage failure
+
+
+# ---- sales made by hand in the wallet (Phantom) ---------------------------------
+
+
+class WalletExec(FakeExec):
+    """FakeExec with a real-looking wallet: token balances and an on-chain history of hand sales."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.balances, self.sales, self.history_calls = {}, {}, 0
+
+    async def buy(self, mint, usd, max_price=None, slippage_bps=None):
+        f = await super().buy(mint, usd, max_price, slippage_bps)
+        self.balances[mint] = self.balances.get(mint, 0) + f.tokens_raw
+        return f
+
+    async def sell(self, mint, tokens_raw):
+        if self.balances.get(mint, 0) <= 0:
+            self.calls.append(("sell", mint, tokens_raw))
+            raise SwapError("no tokens left to sell")
+        f = await super().sell(mint, min(tokens_raw, self.balances[mint]))
+        self.balances[mint] -= f.tokens_raw
+        return f
+
+    async def token_balance(self, mint):
+        return self.balances.get(mint, 0)
+
+    def hand_sell(self, mint, tokens, sol, sig):
+        self.balances[mint] -= tokens
+        self.sales.setdefault(mint, []).append(
+            {"sig": sig, "at": datetime.now(timezone.utc), "tokens_raw": tokens, "sol": sol, "usd": 0.0})
+
+    async def wallet_sales(self, mints, since):
+        self.history_calls += 1
+        return {m: list(self.sales.get(m, [])) for m in mints}
+
+
+def _run_wallet(steps, x=None):
+    x = x or WalletExec()
+    notes = []
+
+    async def note(text):
+        notes.append(text)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0), notify=note)
+        await eng.step(sess)
+        for batch in steps:
+            if callable(batch):
+                batch()
+            else:
+                sess.add_all(batch)
+                await sess.commit()
+            await eng.step(sess)
+        return (await sess.execute(select(LivePosition).order_by(LivePosition.id))).scalars().all()
+
+    return _db(body), x, notes
+
+
+def test_full_hand_sale_closes_position_with_real_proceeds():
+    x = WalletExec()
+    pos, x, notes = _run_wallet([
+        [_trade()],                                               # bot buys 1_000_000 tokens for $30
+        lambda: x.hand_sell("M1", 1_000_000, 0.4, "hand1"),     # owner sells all in Phantom for 0.4 SOL ($60)
+        [],                                                       # second check in a row books it
+    ], x)
+    p = pos[0]
+    assert p.status == "closed" and p.exit_reason == "sold_by_hand" and p.tokens_raw == "0"
+    assert abs(p.proceeds_usd - 60.0) < 1e-6 and abs(p.pnl_usd - 30.0) < 1e-6
+    assert any(f.get("side") == "sell_hand" and f["sigs"] == ["hand1"] for f in p.fills)
+    assert any("sold by hand" in n.lower() or "by hand" in n for n in notes)
+
+
+def test_one_odd_balance_reading_books_nothing():
+    x = WalletExec()
+    pos, x, _ = _run_wallet([
+        [_trade()],
+        lambda: x.hand_sell("M1", 1_000_000, 0.4, "hand1"),     # only one check sees the shortfall
+    ], x)
+    assert pos[0].status == "open" and pos[0].proceeds_usd == 0 and x.history_calls == 0
+
+
+def test_partial_hand_sale_keeps_rest_open_and_leader_sell_closes_it():
+    x = WalletExec()
+    pos, x, _ = _run_wallet([
+        [_trade()],
+        lambda: x.hand_sell("M1", 250_000, 0.1, "hand1"),       # sells a quarter for $15
+        [],
+        [_trade(side="sell", pct_sold=100, remaining=0)],         # leader exits: bot sells the other 750k
+    ], x)
+    p = pos[0]
+    assert p.status == "closed" and p.exit_reason == "leader_sold"
+    assert x.calls[-1] == ("sell", "M1", 750_000)
+    assert abs(p.pnl_usd - (15.0 + 45.0 - 30.0)) < 1e-6           # hand $15 + bot 750k at 2x = $45
+
+
+def test_hand_sale_is_never_booked_twice():
+    x = WalletExec()
+    pos, x, _ = _run_wallet([
+        [_trade()],
+        lambda: x.hand_sell("M1", 250_000, 0.1, "hand1"),
+        [], [], [],
+        lambda: x.hand_sell("M1", 750_000, 0.3, "hand2"),
+        [], [],
+    ], x)
+    p = pos[0]
+    assert p.status == "closed" and p.exit_reason == "sold_by_hand"
+    assert abs(p.proceeds_usd - 60.0) < 1e-6 and abs(p.pnl_usd - 30.0) < 1e-6
+
+
+def test_hand_sale_after_leader_sold_failed_with_no_tokens():
+    x = WalletExec()
+    pos, x, notes = _run_wallet([
+        [_trade()],
+        lambda: x.hand_sell("M1", 1_000_000, 0.6, "hand1"),     # owner took +200% ($90) by hand
+        [_trade(side="sell", pct_sold=100, remaining=0)],         # leader exits, bot finds nothing to sell
+        [],
+    ], x)
+    p = pos[0]
+    assert p.status == "closed" and p.exit_reason == "sold_by_hand" and p.error is None
+    assert abs(p.pnl_usd - 60.0) < 1e-6
+    assert not any(f.get("side") == "sell_failed" for f in p.fills)
+
+
+def test_tokens_gone_without_a_sale_are_not_booked():
+    x = WalletExec()
+
+    def moved():
+        x.balances["M1"] = 0                                     # moved out, no sale in the history
+
+    pos, x, _ = _run_wallet([[_trade()], moved, [], []], x)
+    assert pos[0].status == "open" and pos[0].proceeds_usd == 0
+
+
+def test_tx_deltas_reads_sol_wsol_stables_and_tokens():
+    from app.live import SOL_MINT, _tx_deltas
+    me, usdc = "Me111", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+    def bal(mint, owner, amount):
+        return {"mint": mint, "owner": owner, "uiTokenAmount": {"amount": str(amount)}}
+
+    tx = {"blockTime": 1_700_000_000,
+          "transaction": {"message": {"accountKeys": [{"pubkey": "Pool"}, {"pubkey": me}]}},
+          "meta": {"preBalances": [5, 1_000_000_000], "postBalances": [5, 1_400_000_000],
+                   "preTokenBalances": [bal("M1", me, 1000), bal(SOL_MINT, me, 0), bal(usdc, me, 0),
+                                        bal("M1", "Pool", 9)],
+                   "postTokenBalances": [bal("M1", me, 0), bal(SOL_MINT, me, 100_000_000),
+                                         bal(usdc, me, 2_500_000), bal("M1", "Pool", 1009)]}}
+    d = _tx_deltas(tx, me)
+    assert d["tokens"] == {"M1": -1000}
+    assert abs(d["sol"] - 0.5) < 1e-9 and abs(d["usd"] - 2.5) < 1e-9

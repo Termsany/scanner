@@ -91,6 +91,7 @@ class Executor(Protocol):
     async def sell(self, mint: str, tokens_raw: int) -> Fill: ...
     async def token_balance(self, mint: str) -> int: ...
     async def close(self) -> None: ...
+    # optional (live only): token decreases in the wallet's own history, see JupiterExecutor.wallet_sales
 
 
 def load_keypair(secret: str):
@@ -181,6 +182,9 @@ class JupiterGate:
 JUPITER = JupiterGate()
 _sol_px: tuple[float, float] = (0.0, 0.0)   # (monotonic time, USD per SOL), shared by all accounts
 SOL_PRICE_TTL = 20.0
+STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,   # USDC
+           "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCeUBenwNYB": 6}   # USDT
+HISTORY_PAGES = 10          # getSignaturesForAddress pages (1000 each) walked back at most
 
 
 class JupiterExecutor:
@@ -256,6 +260,65 @@ class JupiterExecutor:
             info = acc["account"]["data"]["parsed"]["info"]
             total += int(info["tokenAmount"]["amount"])
         return total
+
+    async def _history_rpc(self, method: str, params: list[Any]) -> Any:
+        """Paced RPC call for history reads (many in a row): waits out 429s instead of failing."""
+        for attempt in range(6):
+            await asyncio.sleep(0.12)
+            try:
+                return await self._rpc(method, params)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 429 or attempt == 5:
+                    raise SwapError(f"{method}: HTTP {exc.response.status_code}") from None
+                await asyncio.sleep(1.5 * (attempt + 1))
+        raise SwapError("unreachable")
+
+    async def wallet_sales(self, mints: set[str], since: datetime) -> dict[str, list[dict[str, Any]]]:
+        """Every confirmed transaction of this wallet since `since` that lowered its balance of one of `mints`.
+
+        Returns {mint: [{sig, at, tokens_raw (sold, > 0), sol (received, >= 0), usd (stablecoins received)}]}.
+        Raises SwapError when the history could not be read completely (nothing must be booked then).
+        """
+        out: dict[str, list[dict[str, Any]]] = {m: [] for m in mints}
+        if not self.pubkey or not mints:
+            return out
+        floor = since.timestamp()
+        sigs: list[dict[str, Any]] = []
+        before, complete = None, False
+        for _ in range(HISTORY_PAGES):
+            opts: dict[str, Any] = {"limit": 1000, "commitment": "confirmed"}
+            if before:
+                opts["before"] = before
+            page = await self._history_rpc("getSignaturesForAddress", [self.pubkey, opts]) or []
+            for r in page:
+                if r.get("blockTime") is not None and r["blockTime"] < floor:
+                    complete = True
+                    break
+                if r.get("err") is None:
+                    sigs.append(r)
+            if complete or len(page) < 1000:
+                complete = True
+                break
+            before = page[-1]["signature"]
+        if not complete:
+            raise SwapError("wallet history too long to read")
+        cache = self.__dict__.setdefault("_tx_cache", {})
+        for r in sigs:
+            sig = r["signature"]
+            if sig not in cache:
+                tx = await self._history_rpc("getTransaction", [sig, {
+                    "encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 1}])
+                if tx is None:
+                    raise SwapError(f"transaction {sig[:12]} not available yet")
+                cache[sig] = _tx_deltas(tx, self.pubkey)
+                if len(cache) > 5000:
+                    cache.pop(next(iter(cache)))
+            d = cache[sig]
+            sold = [m for m in mints if d["tokens"].get(m, 0) < 0]
+            for m in sold:              # one tx selling several tokens at once: split what came in evenly
+                out[m].append({"sig": sig, "at": d["at"], "tokens_raw": -d["tokens"][m],
+                               "sol": max(d["sol"], 0.0) / len(sold), "usd": max(d["usd"], 0.0) / len(sold)})
+        return out
 
     async def _send(self, q: dict[str, Any]) -> tuple[str, bool]:
         from solders.transaction import VersionedTransaction
@@ -386,6 +449,26 @@ class JupiterExecutor:
         return Fill(sig, max(sol1 - sol0, 0.0), sold, px)
 
 
+def _tx_deltas(tx: dict[str, Any], owner: str) -> dict[str, Any]:
+    """What one parsed transaction changed for `owner`: SOL (incl. wrapped SOL, net of the fee), stablecoin USD
+    and raw token amounts per mint."""
+    meta = tx.get("meta") or {}
+    keys = [k["pubkey"] if isinstance(k, dict) else k for k in tx["transaction"]["message"]["accountKeys"]]
+    sol = 0.0
+    if owner in keys:
+        i = keys.index(owner)
+        sol = (meta["postBalances"][i] - meta["preBalances"][i]) / LAMPORTS
+    tokens: dict[str, int] = {}
+    for sign, field in ((-1, "preTokenBalances"), (1, "postTokenBalances")):
+        for b in meta.get(field) or []:
+            if b.get("owner") == owner:
+                tokens[b["mint"]] = tokens.get(b["mint"], 0) + sign * int(b["uiTokenAmount"]["amount"])
+    sol += tokens.pop(SOL_MINT, 0) / LAMPORTS
+    usd = sum(tokens.pop(m, 0) / 10 ** dec for m, dec in STABLES.items())
+    at = datetime.fromtimestamp(tx["blockTime"], timezone.utc) if tx.get("blockTime") else _now()
+    return {"sol": sol, "usd": usd, "tokens": tokens, "at": at}
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -459,6 +542,8 @@ class CopyEngine:
         self.wallets = set(self.a.wallets)
         self.notify = notify or (lambda text: asyncio.sleep(0))
         self.cursor = _key(CURSOR, self.a.name)
+        self._reconciled = 0.0              # monotonic time of the last wallet reconcile
+        self._short_seen: dict[str, int] = {}   # mint -> reconciles in a row where the wallet held less
 
     def _tag(self) -> str:
         tag = "🟢 LIVE" if self.x.mode == "live" else "🧪 DRY-RUN"
@@ -629,6 +714,8 @@ class CopyEngine:
                                               "error": str(exc)[:200], "at": _now().isoformat()}]
             pos.error = str(exc)[:300]
             log.warning("live: sell %s failed (%d): %s", sym, attempts, exc)
+            if "no tokens left" in str(exc):
+                self._reconciled = 0.0          # sold by hand? check the wallet on the next step
             if attempts in (1, MAX_SELL_ATTEMPTS):
                 await self.notify(f"{self._tag()} ⚠️ Sell ${sym} failed{' again, giving up retries' if attempts >= MAX_SELL_ATTEMPTS else ', retrying'}: "
                                   f"{str(exc)[:160]}")
@@ -654,8 +741,105 @@ class CopyEngine:
                           f" · {reason.replace('_', ' ')}{tail}\n{self._tx(f.signature)}")
         return True
 
+    async def _reconcile(self, session: AsyncSession) -> None:
+        """Book tokens the owner sold by hand (e.g. in Phantom) so open positions and P&L match the wallet.
+
+        For every token, compare what the open positions say we hold with the wallet's real balance. When the
+        wallet holds less on two checks in a row, read the wallet's own history for the sales that are not the
+        bot's, and book what they really received (SOL + stablecoins) into the positions, oldest first. A position
+        whose tokens are all gone closes as "sold_by_hand". Nothing is booked if the history can't be read fully.
+        """
+        if self.x.mode != "live" or not hasattr(self.x, "wallet_sales"):
+            return
+        if time.monotonic() - self._reconciled < self.s.live_reconcile_seconds:
+            return
+        self._reconciled = time.monotonic()
+        opened = (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine()).order_by(LivePosition.opened_at, LivePosition.id)
+        )).scalars().all()
+        by_mint: dict[str, list[LivePosition]] = {}
+        for p in opened:
+            by_mint.setdefault(p.token_address, []).append(p)
+        short: dict[str, int] = {}
+        for mint, ps in by_mint.items():
+            try:
+                held = await self.x.token_balance(mint)
+            except Exception as exc:
+                log.warning("live: reconcile balance %s failed: %s", mint[:8], exc)
+                continue
+            missing = sum(int(p.tokens_raw) for p in ps) - held
+            if missing > 0:
+                self._short_seen[mint] = self._short_seen.get(mint, 0) + 1
+                if self._short_seen[mint] >= 2:          # one odd RPC answer never books anything
+                    short[mint] = missing
+            else:
+                self._short_seen.pop(mint, None)
+        for mint in list(self._short_seen):
+            if mint not in by_mint:
+                self._short_seen.pop(mint)
+        if not short:
+            return
+        rows = (await session.execute(select(LivePosition).where(
+            LivePosition.token_address.in_(list(short)), *self._mine()))).scalars().all()
+        known = {p.buy_signature for p in rows if p.buy_signature}
+        for p in rows:
+            for f in p.fills or []:
+                known.update(s for s in [f.get("sig"), *(f.get("sigs") or [])] if s)
+        since = min(utc(p.opened_at) for m in short for p in by_mint[m]) - timedelta(minutes=2)
+        try:
+            sales = await self.x.wallet_sales(set(short), since)
+            px = await self.x.sol_price()
+        except Exception as exc:
+            log.warning("live: reconcile history failed: %s", exc)
+            return
+        lines = []
+        for mint, missing in short.items():
+            hs = [h for h in sales.get(mint, []) if h["sig"] not in known]
+            sold = sum(h["tokens_raw"] for h in hs)
+            if sold <= 0:
+                log.warning("live: %s: wallet holds %d fewer tokens than open positions but no sale was found",
+                            mint[:8], missing)
+                continue
+            booked = min(missing, sold)
+            k = booked / sold                   # share of those sales that were the bot's tokens
+            sol_in = sum(h["sol"] for h in hs) * k
+            usd_in = sol_in * px + sum(h["usd"] for h in hs) * k
+            when = max(h["at"] for h in hs)
+            sigs = [h["sig"] for h in hs]
+            left = booked
+            for p in by_mint[mint]:
+                if left <= 0:
+                    break
+                take = min(int(p.tokens_raw), left)
+                if take <= 0:
+                    continue
+                left -= take
+                part = take / booked
+                p.tokens_raw = str(int(p.tokens_raw) - take)
+                p.proceeds_sol += sol_in * part
+                p.proceeds_usd += usd_in * part
+                p.fills = [*(f for f in (p.fills or []) if f.get("side") != "sell_failed"),
+                           {"side": "sell_hand", "sigs": sigs, "sol": sol_in * part, "tokens_raw": str(take),
+                            "usd": round(usd_in * part, 2), "reason": "sold_by_hand", "at": when.isoformat()}]
+                p.error = None
+                sym = p.symbol or mint[:6]
+                if int(p.tokens_raw) == 0:
+                    p.status, p.closed_at, p.exit_reason = "closed", when, "sold_by_hand"
+                    p.pnl_usd = p.proceeds_usd - p.cost_usd
+                    lines.append(f"${sym}: closed, P&L {'+' if p.pnl_usd >= 0 else '−'}${abs(p.pnl_usd):,.2f}")
+                else:
+                    lines.append(f"${sym}: {take / int(p.tokens_bought_raw or take) * 100:.0f}% sold by hand")
+            self._short_seen.pop(mint, None)
+            log.info("live: booked %d raw %s sold by hand for %.4f SOL ($%.2f) %s", booked, mint[:8], sol_in,
+                     usd_in, ",".join(s[:10] for s in sigs))
+        await session.commit()
+        if lines:
+            await self.notify(f"{self._tag()} 🧾 Found sales you made by hand in the wallet, P&L updated:\n"
+                              + "\n".join(lines))
+
     async def _housekeeping(self, session: AsyncSession) -> None:
-        """Retry failed sells; sell everything after LIVE_MAX_HOLD_HOURS."""
+        """Book hand sales; retry failed sells; sell everything after LIVE_MAX_HOLD_HOURS."""
+        await self._reconcile(session)
         opened = (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine()))).scalars().all()
         for pos in opened:
