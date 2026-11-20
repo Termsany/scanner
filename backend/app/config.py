@@ -120,6 +120,14 @@ class Settings(BaseSettings):
     # stays until the leader sells. None = off
     live_take_capital_at_pct: float | None = 100.0
     live_take_capital_check_seconds: float = 5.0
+    # Hold-only tokens (by mint, never by name: fake "SOL"/"ETH" tokens are everywhere). The bot copies their buys
+    # but never sells them by itself: not when the leader sells, not to take the capital, not at max hold.
+    # Selling by hand (page / Telegram) still works.
+    live_hold_mints: list[str] = Field(default_factory=lambda: [
+        "So11111111111111111111111111111111111111112",    # SOL (wrapped)
+        "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",   # ETH on Solana (Wormhole / Portal)
+        "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",    # TTWO
+    ])
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
     live_rpc_url: str | None = None              # defaults to SOLANA_RPC_URL
     jupiter_api_url: str = "https://lite-api.jup.ag"

@@ -661,6 +661,10 @@ class CopyEngine:
         ld = self.a.leaders.get(wallet)
         return ld.size_usd if ld and ld.size_usd else self.a.size_usd
 
+    def _hold(self, mint: str) -> bool:
+        """Hold-only token: the bot never sells it by itself."""
+        return mint in self.s.live_hold_mints
+
     def _take_capital_target(self) -> float | None:
         t = self.a.take_capital_at_pct
         return self.s.live_take_capital_at_pct if t is _FROM_SETTINGS else t
@@ -813,6 +817,15 @@ class CopyEngine:
             LivePosition.token_address == t.token_address, LivePosition.leader_wallet == t.wallet,
             LivePosition.status == "open", *self._mine()))).scalars().first()
         share = _share(t)
+        if self._hold(t.token_address):
+            sym = t.symbol or t.token_address[:6]
+            if pos is not None:
+                pos.leader_trade_id = t.id
+                await session.commit()
+                log.info("live: %s is hold-only: leader sold %.0f%%, keeping it", sym, share * 100)
+                await self.notify(f"{self._tag()} 🔒 {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
+                                  f"${sym}, but ${sym} is hold-only: keeping it (sell by hand if you want)")
+            return
         if pos is not None:
             pos.leader_trade_id = t.id
             await self._sell(session, pos, share, "leader_sold" if share >= 0.99 else "leader_trim")
@@ -999,7 +1012,8 @@ class CopyEngine:
         opened = (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine()))).scalars().all()
         todo = [p for p in opened
-                if not any(f.get("reason") == "take_capital" for f in (p.fills or []))
+                if not self._hold(p.token_address)
+                and not any(f.get("reason") == "take_capital" for f in (p.fills or []))
                 and (p.proceeds_usd or 0) < p.cost_usd and int(p.tokens_raw) > 0 and not p.manual_sell_frac]
         self._up_seen = {k: v for k, v in self._up_seen.items() if k in {p.id for p in todo}}
         if not todo:
@@ -1045,7 +1059,8 @@ class CopyEngine:
                 await self._sell(session, pos, float(last.get("share", 1.0)), last.get("reason", "retry"))
                 await session.commit()
                 continue
-            if _now() - utc(pos.opened_at) >= timedelta(hours=self.a.max_hold_hours or self.s.live_max_hold_hours) and not failed:
+            if (_now() - utc(pos.opened_at) >= timedelta(hours=self.a.max_hold_hours or self.s.live_max_hold_hours)
+                    and not failed and not self._hold(pos.token_address)):
                 await self._sell(session, pos, 1.0, "max_hold")
                 await session.commit()
 

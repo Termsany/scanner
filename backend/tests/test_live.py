@@ -1149,3 +1149,53 @@ def test_user_notes_in_arabic_by_default():
     assert "إشارة خروج" in sold and "+$30.00" in sold
     assert "Sold" in user_note("en", "sold", sym="T", usd=60, share=0.5, done=False, reason="take_capital", pnl=0, tx="x")
     assert Account("u", 1, 1, 1, []).user_lang == "ar"
+
+
+# ---- hold-only tokens -------------------------------------------------------------------
+HOLD = "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo"
+
+
+def test_hold_only_token_is_bought_but_never_sold_by_the_bot():
+    pos, x, notes = _run([
+        [_trade(mint=HOLD)],
+        [_trade(side="sell", mint=HOLD, pct_sold=50, remaining=1)],
+        [_trade(side="sell", mint=HOLD, pct_sold=100, remaining=0)],
+    ])
+    assert x.calls == [("buy", HOLD, 30)]                       # bought, never sold
+    assert pos[0].status == "open" and pos[0].tokens_raw == "1000000"
+    assert any("hold-only" in n for n in notes)
+
+
+def test_hold_only_token_skips_take_capital_and_max_hold_but_manual_sell_works():
+    from datetime import timedelta
+
+    from app.live import Account, Leader
+
+    x = PricedExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_take_capital_check_seconds=0, live_reconcile_seconds=0, live_max_hold_hours=1),
+                         account=Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER)}))
+        await eng.step(sess)
+        sess.add(_trade(mint=HOLD)); await sess.commit(); await eng.step(sess)
+        x.price[HOLD] = 300.0                                      # 10x: no take-capital for hold-only
+        p = (await sess.execute(select(LivePosition))).scalars().first()
+        p.opened_at = p.opened_at - timedelta(hours=5)             # past max hold: still kept
+        await sess.commit()
+        await eng.step(sess); await eng.step(sess)
+        assert [c for c in x.calls if c[0] == "sell"] == []
+        p.manual_sell_frac = 0.5                                   # the owner sells by hand: allowed
+        await sess.commit()
+        await eng.step(sess)
+        return p
+    p = _db(body)
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", HOLD, 500_000)]
+    assert p.status == "open" and p.tokens_raw == "500000"
+
+
+def test_fake_token_with_the_same_name_is_not_held():
+    pos, x, _ = _run([
+        [_trade(mint="FakeSOLmint1111111111111111111111111111111")],
+        [_trade(side="sell", mint="FakeSOLmint1111111111111111111111111111111", pct_sold=100, remaining=0)],
+    ])
+    assert [c[0] for c in x.calls] == ["buy", "sell"]
