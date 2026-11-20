@@ -336,3 +336,63 @@ def test_stats_in_me(env):
         assert st["total_pnl"] == 6 and st["best"]["symbol"] == "A" and st["worst"]["symbol"] == "D"
         assert len(st["daily"]) == 30 and st["daily"][-1]["pnl"] == 15 and st["daily"][-2]["pnl"] == 1
         assert LEADER not in c.get("/api/me").text
+
+
+def test_admin_overview(env, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from app.api import live as live_api
+    from app.db import SessionLocal
+    from app.live import SOL_MINT
+    from app.models import LivePosition
+
+    live_api._cache.clear()
+    mode = env.live_mode if env.live_mode in ("dry", "live") else "off"
+
+    async def prices(http, mints):
+        return {"OV1": {"usd": 0.002, "decimals": 6}, SOL_MINT: {"usd": 100.0, "decimals": 9}}
+
+    async def balances(http, pubkeys):
+        return {pk: 2.0 for pk in pubkeys}
+
+    monkeypatch.setattr(live_api, "jupiter_prices", prices)
+    monkeypatch.setattr(live_api, "sol_balances", balances)
+
+    with TestClient(app) as c:
+        assert c.get("/api/live/overview").status_code == 401                          # admin only
+        uid = _approved(c, "olga@example.com")
+        c.post("/api/me/logout")
+        _register(c, "pete@example.com")                                                # stays pending
+        c.post("/api/me/logout")
+        name = f"u{uid}"
+        now = datetime.now(timezone.utc)
+
+        async def add():
+            async with SessionLocal() as s:
+                for sym, pnl, d in (("OA", 12, 0), ("OB", -2, 3), ("OC", 7, 20)):
+                    s.add(LivePosition(mode=mode, account=name, token_address=sym, symbol=sym, leader_wallet=LEADER,
+                                       leader_trade_id=1, status="closed", cost_usd=10, proceeds_usd=10 + pnl,
+                                       pnl_usd=pnl, closed_at=now - timedelta(days=d)))
+                # 20,000 tokens left at $0.002 = $40; $5 sold already; cost $20 -> +$25
+                s.add(LivePosition(mode=mode, account=name, token_address="OV1", symbol="OV", leader_wallet=LEADER,
+                                   leader_trade_id=1, status="open", cost_usd=20, proceeds_usd=5,
+                                   tokens_raw=str(20_000 * 10**6)))
+                s.add(LivePosition(mode=mode, account=name, token_address="OF", symbol="OF", leader_wallet=LEADER,
+                                   leader_trade_id=1, status="failed", cost_usd=10, error="slippage"))
+                await s.commit()
+        c.portal.call(add)
+
+        r = c.get("/api/live/overview", headers=ADMIN)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        a = next(x for x in d["accounts"] if x["name"] == name)
+        assert a["owner"]["email"] == "olga@example.com" and a["trades"] == 3 and a["wins"] == 2
+        assert a["realized_24h"] == 12 and a["realized_7d"] == 10 and a["realized_all"] == 17
+        assert a["open_count"] == 1 and abs(a["open_value_usd"] - 40) < 1e-6 and abs(a["unrealized_usd"] - 25) < 1e-6
+        assert a["failed_24h"] == 1 and a["sol_balance"] == 2.0 and a["sol_balance_usd"] == 200.0
+        assert "open_tokens" not in a
+        assert d["users"]["pending"] >= 1 and any(u["email"] == "pete@example.com" for u in d["users"]["pending_list"])
+        assert d["totals"]["realized_30d"] >= 17 and d["totals"]["failed_24h"] >= 1
+        assert len(d["daily"]) == 30 and d["daily"][-1]["pnl"] >= 12
+        assert d["recent"] and d["recent"][0]["account"]
+    live_api._cache.clear()

@@ -215,6 +215,48 @@ async def sell(position_id: int, body: SellIn, session: Session, _: Auth) -> dic
     return {"queued": True, "message": note}
 
 
+# ---- admin overview (/admin page) ---------------------------------------------------
+@router.get("/overview")
+async def overview(request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    """All accounts and users at a glance: balances, open value, P&L, failures, pending sign-ups. Read-only."""
+    from app.live import SOL_MINT
+    from app.overview import build_overview
+
+    out = await build_overview(session, get_settings())
+    http: httpx.AsyncClient = request.app.state.http
+    accounts = out["accounts"]
+    mints = sorted({t["token_address"] for a in accounts for t in a["open_tokens"]} | {SOL_MINT})
+    prices = await _cached("px:" + ",".join(mints), PRICE_TTL, lambda: jupiter_prices(http, mints)) or {}
+    pubkeys = sorted({a["pubkey"] for a in accounts if a["pubkey"]})
+    balances = (await _cached("bal:" + ",".join(pubkeys), BALANCE_TTL, lambda: sol_balances(http, pubkeys))
+                if pubkeys else {}) or {}
+    sol_usd = (prices.get(SOL_MINT) or {}).get("usd")
+    for a in accounts:
+        value = unreal = 0.0
+        priced = 0
+        for t in a.pop("open_tokens"):
+            px = prices.get(t["token_address"])
+            if not px:
+                continue
+            v = int(t["tokens_left"] or 0) / 10 ** px["decimals"] * px["usd"]
+            value += v
+            unreal += v + t["proceeds_usd"] - t["cost_usd"]
+            priced += 1
+        a["open_value_usd"] = value if priced else (0.0 if not a["open_count"] else None)
+        a["unrealized_usd"] = unreal if priced else (0.0 if not a["open_count"] else None)
+        a["sol_balance"] = balances.get(a["pubkey"]) if a["pubkey"] else None
+        a["sol_balance_usd"] = a["sol_balance"] * sol_usd if a["sol_balance"] is not None and sol_usd else None
+
+    def total(k: str) -> float | None:
+        vals = [a[k] for a in accounts if a[k] is not None]
+        return sum(vals) if vals else None
+
+    out["sol_usd"] = sol_usd
+    out["totals"].update({k: total(k) for k in ("open_value_usd", "unrealized_usd", "sol_balance",
+                                                 "sol_balance_usd")})
+    return out
+
+
 # ---- accounts (/accounts page) ---------------------------------------------------
 class LeaderIn(BaseModel):
     wallet: str

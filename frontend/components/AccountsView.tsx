@@ -829,6 +829,10 @@ export function AccountsView() {
           className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink">
           <ArrowLeft className="size-3.5" /> Live
         </a>
+        <a href="/admin"
+          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink">
+          Overview
+        </a>
         <Users className="size-5 text-accent" />
         <h1 className="text-lg font-semibold tracking-tight">Trading accounts</h1>
         <span className="text-xs text-faint">

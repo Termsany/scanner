@@ -6,6 +6,7 @@ import type {
   PaginatedTokens,
   LiveStatus,
   AccountsList,
+  AdminOverview,
   Me,
   MySettings,
   SiteUser,
@@ -114,6 +115,9 @@ export const api = {
       headers: { "X-Live-Password": password },
       body: JSON.stringify({ share }),
     }),
+
+  overview: (password: string, signal?: AbortSignal) =>
+    request<AdminOverview>("/api/live/overview", { headers: { "X-Live-Password": password }, signal }),
 
   accounts: (password: string, signal?: AbortSignal) =>
     request<AccountsList>("/api/live/accounts", { headers: { "X-Live-Password": password }, signal }),

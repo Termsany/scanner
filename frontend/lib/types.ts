@@ -586,3 +586,78 @@ export interface SiteUser {
   totp_enabled: boolean;
   withdraw_locked_until: string | null;
 }
+
+export interface OverviewAccount {
+  name: string;
+  enabled: boolean;
+  paused: boolean;
+  pubkey: string | null;
+  owner: { id: number; email: string; status: string } | null;
+  size_usd: number;
+  max_open_usd: number;
+  open_count: number;
+  open_cost_usd: number;
+  open_value_usd: number | null;
+  unrealized_usd: number | null;
+  realized_24h: number;
+  realized_7d: number;
+  realized_all: number;
+  trades: number;
+  wins: number;
+  win_rate: number | null;
+  failed_24h: number;
+  last_trade_at: string | null;
+  heartbeat_at: string | null;
+  sol_balance: number | null;
+  sol_balance_usd: number | null;
+}
+
+export interface AdminOverview {
+  mode: string;
+  paused: boolean;
+  updated_at: string;
+  sol_usd: number | null;
+  users: {
+    total: number;
+    pending: number;
+    active: number;
+    blocked: number;
+    new_7d: number;
+    pending_list: { id: number; email: string; name: string; created_at: string | null }[];
+  };
+  totals: {
+    accounts: number;
+    enabled: number;
+    paused: number;
+    open_count: number;
+    open_cost_usd: number;
+    open_value_usd: number | null;
+    unrealized_usd: number | null;
+    sol_balance: number | null;
+    sol_balance_usd: number | null;
+    realized_24h: number;
+    realized_7d: number;
+    realized_30d: number;
+    realized_all: number;
+    trades_30d: number;
+    wins_30d: number;
+    win_rate_30d: number | null;
+    failed_24h: number;
+  };
+  accounts: OverviewAccount[];
+  daily: { day: string; pnl: number; trades: number }[];
+  recent: {
+    id: number;
+    account: string;
+    symbol: string;
+    token_address: string;
+    status: "closed" | "failed";
+    cost_usd: number;
+    pnl_usd: number | null;
+    pnl_pct: number | null;
+    exit_reason: string | null;
+    error: string | null;
+    at: string | null;
+  }[];
+  signals: { last_24h: number; last_at: string | null };
+}

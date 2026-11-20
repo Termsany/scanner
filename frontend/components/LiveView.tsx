@@ -418,6 +418,12 @@ export function LiveView() {
         >
           Accounts
         </a>
+        <a
+          href="/admin"
+          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink"
+        >
+          Overview
+        </a>
         <Wallet className="size-5 text-accent" />
         <h1 className="text-lg font-semibold tracking-tight">
           Live copy trading
