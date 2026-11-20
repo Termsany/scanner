@@ -945,6 +945,12 @@ class CopyEngine:
         if self.s.live_sell_manual_with_leader and self.x.mode == "live":
             await self._sell_manual(session, t, share)
 
+    def _cap_room(self, pos: LivePosition) -> int:
+        """Tokens that may still be sold before LIVE_TRIM_CAP_PCT of the position is sold in all."""
+        held = int(pos.tokens_raw)
+        bought = int(pos.tokens_bought_raw or 0) or held
+        return max(held - int(bought * (1 - self.s.live_trim_cap_pct / 100)), 0)
+
     async def _capped_trim(self, session: AsyncSession, pos: LivePosition, t: WalletTrade, share: float) -> None:
         """Copy a leader's partial sell only until LIVE_TRIM_CAP_PCT of the position has been sold in all; the rest
         waits for the leader's full exit."""
@@ -1271,10 +1277,14 @@ class CopyEngine:
             return any(f.get("reason") == "take_capital" and float(f.get("cost_at") or p.cost_usd) >= p.cost_usd - 0.01
                        for f in (p.fills or []))
 
+        capped = self.s.live_trim_cap_pct is not None
         todo = [p for p in opened
                 if not self._hold(p.token_address)
                 and not taken(p)
-                and (p.proceeds_usd or 0) < p.cost_usd and int(p.tokens_raw) > 0 and not p.manual_sell_frac]
+                # with the cap: until that share of the coins is sold; without: until the cost is back
+                and (self._cap_room(p) > int(p.tokens_bought_raw or 0) // 100 if capped
+                     else (p.proceeds_usd or 0) < p.cost_usd)
+                and int(p.tokens_raw) > 0 and not p.manual_sell_frac]
         self._up_seen = {k: v for k, v in self._up_seen.items() if k in {p.id for p in todo}}
         if not todo:
             return
@@ -1319,7 +1329,12 @@ class CopyEngine:
             if self._up_seen[p.id] < 2 and not strong:   # two checks in a row, unless far past the target
                 continue
             self._up_seen.pop(p.id, None)
-            share = min((p.cost_usd - (p.proceeds_usd or 0)) / value, 1.0)
+            if capped:
+                # the user's rule: at the target, sell up to LIVE_TRIM_CAP_PCT of the coins (48%), what trims
+                # already sold counts; the rest waits for the leader's full exit
+                share = (self._cap_room(p) + 0.5) / int(p.tokens_raw)
+            else:
+                share = min((p.cost_usd - (p.proceeds_usd or 0)) / value, 1.0)
             share = min(share, 0.98)             # always keep a profit bag (>= 0.99 would sell everything)
             if await self._sell(session, p, share, "take_capital"):
                 fills = [dict(f) for f in (p.fills or [])]
