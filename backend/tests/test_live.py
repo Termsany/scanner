@@ -66,6 +66,7 @@ def _db(body):
 
 def _s(**kw):
     kw.setdefault("live_trim_cap_pct", None)      # most tests check plain copying; the cap has its own test
+    kw.setdefault("live_copy_trims", True)
     return Settings(live_mode="live", live_wallets=[LEADER], live_size_usd=30, live_max_open_usd=100,
                     live_min_liquidity_usd=10_000, **kw)
 
@@ -1504,3 +1505,34 @@ def test_at_2x_sell_48_percent_of_the_coins_counting_earlier_trims():
         [],                                                  # never again
     ], x, live_trim_cap_pct=48.0)
     assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 300_000), ("sell", "M1", 180_000)]
+
+
+
+def test_users_rule_50_percent_at_2x_partial_sells_ignored_rest_on_full_exit():
+    x = PricedExec()
+    pos, x, notes = _run_priced([
+        [_trade()],                                          # 1M tokens for $30
+        [_trade(side="sell", pct_sold=30, remaining=1)],     # partial sell before 2x: ignored
+        lambda: x.price.update(M1=60.0), [],                 # 2x twice: sell 50% = 500k
+        [_trade(side="sell", pct_sold=40, remaining=1)],     # partial: ignored
+        [_trade(side="sell", pct_sold=100, remaining=0)],    # full exit: the other 500k
+    ], x, live_trim_cap_pct=50.0, live_copy_trims=False)
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 500_000), ("sell", "M1", 500_000)]
+    assert pos[0].status == "closed" and pos[0].exit_reason == "leader_sold"
+    assert sum("waits for its full exit" in n for n in notes) == 2
+
+
+def test_users_rule_full_exit_before_2x_sells_everything():
+    x = PricedExec()
+    pos, x, _ = _run_priced([
+        [_trade()],
+        [_trade(side="sell", pct_sold=100, remaining=0)],
+    ], x, live_trim_cap_pct=50.0, live_copy_trims=False)
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 1_000_000)]
+
+
+def test_users_rule_is_the_default():
+    from app.config import Settings
+
+    s = Settings()
+    assert s.live_trim_cap_pct == 50.0 and s.live_copy_trims is False

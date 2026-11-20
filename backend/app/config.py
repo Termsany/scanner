@@ -121,8 +121,10 @@ class Settings(BaseSettings):
     # Once a position is up this much (100 = 2x), sell just enough to get its cost back; the rest (pure profit)
     # stays until the leader sells. None = off
     live_take_capital_at_pct: float | None = 100.0
-    live_trim_cap_pct: float | None = 48.0       # leader's partial sells are copied until this % of the position
-                                                 # is sold in all; the rest waits for its full exit. None = no cap
+    live_trim_cap_pct: float | None = 50.0       # at the take-capital target, sell up to this % of the coins
+                                                 # (the user's rule: 50% at 2x); None = sell what repays the cost
+    live_copy_trims: bool = False                # copy the leader's partial sells (up to live_trim_cap_pct)?
+                                                 # off: only its full exit sells the rest
     live_bag_waits_for_full_exit: bool = True    # once the capital is back, leader trims are ignored: the rest
                                                  # is sold only when the leader sells everything
     live_book_hand_buys: bool = True             # buys made by hand of a token the bot holds join its position

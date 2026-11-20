@@ -937,6 +937,13 @@ class CopyEngine:
                 log.info("live: %s capital already out: ignoring leader trim %.0f%%", sym, share * 100)
                 await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of ${sym}; "
                                   "your capital is already out, so the rest waits for its full exit")
+            elif share < 0.99 and not self.s.live_copy_trims:
+                # the user's rule: partial sells are not copied; the rest leaves on the leader's full exit
+                await session.commit()
+                sym = pos.symbol or pos.token_address[:6]
+                log.info("live: %s ignoring leader trim %.0f%%", sym, share * 100)
+                await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of ${sym}; "
+                                  "partial sells are not copied, the rest waits for its full exit")
             elif share < 0.99 and self.s.live_trim_cap_pct is not None:
                 await self._capped_trim(session, pos, t, share)
             else:
