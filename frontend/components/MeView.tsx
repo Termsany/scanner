@@ -9,14 +9,120 @@ import {
   LogOut,
   Pause,
   Play,
+  BarChart3,
   Save,
+  Send,
   ShieldCheck,
   Wallet,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
-import type { Me, MyAccount, MyPosition } from "@/lib/types";
+import type { Me, MyAccount, MyPosition, MyStats } from "@/lib/types";
+
+function DailyBars({ days }: { days: MyStats["daily"] }) {
+  const max = Math.max(1, ...days.map((d) => Math.abs(d.pnl)));
+  const w = 100 / days.length;
+  return (
+    <svg viewBox="0 0 100 40" preserveAspectRatio="none" className="h-28 w-full" role="img"
+      aria-label="Profit and loss per day, last 30 days">
+      <line x1="0" y1="20" x2="100" y2="20" stroke="currentColor" strokeOpacity="0.2" strokeWidth="0.2" />
+      {days.map((d, i) => {
+        const h = (Math.abs(d.pnl) / max) * 19;
+        return (
+          <rect key={d.day} x={i * w + w * 0.15} width={w * 0.7} y={d.pnl >= 0 ? 20 - h : 20} height={Math.max(h, d.trades ? 0.4 : 0)}
+            className={d.pnl >= 0 ? "fill-bull" : "fill-bear"}>
+            <title>{`${d.day}: ${d.pnl >= 0 ? "+" : "−"}$${Math.abs(d.pnl).toFixed(2)} · ${d.trades} trades`}</title>
+          </rect>
+        );
+      })}
+    </svg>
+  );
+}
+
+function PerformanceCard({ s }: { s: MyStats }) {
+  const tile = (label: string, value: string, cls = "") => (
+    <div className="rounded-md border border-line px-3 py-2">
+      <div className="text-[10px] tracking-[0.12em] text-muted uppercase">{label}</div>
+      <div className={`num mt-1 text-base font-semibold ${cls}`}>{value}</div>
+    </div>
+  );
+  const sign = (v: number | null | undefined) => (v == null ? "—" : `${v >= 0 ? "+" : "−"}$${Math.abs(v).toFixed(2)}`);
+  return (
+    <section className="card p-4 sm:p-5">
+      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold"><BarChart3 className="size-4 text-accent" /> Performance</h2>
+      {s.trades === 0 ? (
+        <p className="text-sm text-faint">No closed trades yet. Results show here after the first one closes.</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+            {tile("Total result", sign(s.total_pnl), s.total_pnl >= 0 ? "text-bull" : "text-bear")}
+            {tile("Return on trades", s.roi_pct == null ? "—" : `${s.roi_pct >= 0 ? "+" : ""}${s.roi_pct.toFixed(1)}%`)}
+            {tile("Win rate", s.win_rate == null ? "—" : `${s.win_rate.toFixed(0)}% of ${s.trades}`)}
+            {tile("Average win", sign(s.avg_win), "text-bull")}
+            {tile("Average loss", sign(s.avg_loss), "text-bear")}
+            {tile("Best / worst", `${s.best ? `$${s.best.symbol}` : "—"} / ${s.worst ? `$${s.worst.symbol}` : "—"}`)}
+          </div>
+          <div className="mt-4">
+            <div className="mb-1 flex justify-between text-[11px] text-muted">
+              <span>Result per day, last 30 days</span>
+              <span>{s.daily[0]?.day} → {s.daily[s.daily.length - 1]?.day}</span>
+            </div>
+            <DailyBars days={s.daily} />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function TelegramCard({ me, onDone }: { me: Me; onDone: () => void }) {
+  const [msg, setMsg] = useState("");
+  const linked = me.telegram.linked;
+  return (
+    <section className="card p-4 sm:p-5">
+      <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+        <Send className="size-4 text-accent" /> Telegram notifications
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold tracking-[0.1em] ${linked ? "border-bull/50 text-bull" : "border-line text-muted"}`}>
+          {linked ? "CONNECTED" : "OFF"}
+        </span>
+      </h2>
+      <p className="mb-3 text-xs text-muted">
+        Get a message when a trade opens or closes, and a summary every day.
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        {!linked ? (
+          <button type="button" className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-carbon"
+            onClick={async () => {
+              setMsg("");
+              try {
+                const r = await api.telegramLink();
+                window.open(r.url, "_blank", "noopener");
+                setMsg("Telegram opened: press Start in the chat with the bot, then come back here.");
+              } catch (e) {
+                setMsg(e instanceof ApiError ? e.message : "Could not make a link");
+              }
+            }}>
+            <Send className="size-3.5" /> Connect Telegram
+          </button>
+        ) : (
+          <>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={me.telegram.daily}
+                onChange={async (e) => { await api.telegramDaily(e.target.checked).catch(() => undefined); onDone(); }} />
+              Daily summary
+            </label>
+            <button type="button" className="rounded-md border border-line px-3 py-1.5 text-xs hover:bg-raised"
+              onClick={async () => { await api.telegramUnlink().catch(() => undefined); onDone(); }}>
+              Disconnect
+            </button>
+          </>
+        )}
+        {msg && <span className="text-xs text-muted">{msg}</span>}
+      </div>
+    </section>
+  );
+}
 
 const codeInput =
   "num w-full rounded-md border border-line bg-carbon px-2.5 py-1.5 text-sm tracking-[0.3em] outline-none focus:border-accent";
@@ -500,6 +606,7 @@ export function MeView() {
             <Stat label="Wallet" value={a.sol_balance != null ? `${a.sol_balance.toFixed(3)} SOL` : "—"}
               sub={a.sol_balance_usd != null ? money(a.sol_balance_usd) : undefined} />
           </section>
+          {a.stats && <PerformanceCard s={a.stats} />}
           <section className="card">
             <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">Open trades</h2>
             <Positions rows={a.open} live onSell={async (p, sh) => {
@@ -515,6 +622,7 @@ export function MeView() {
           </section>
           <SettingsCard a={a} onSaved={() => load()} />
           <WalletCard a={a} onDone={() => load()} totp={data!.security.totp_enabled} />
+          <TelegramCard me={data!} onDone={() => load()} />
           <SecurityCard me={data!} onDone={() => load()} />
           <section className="card">
             <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">Closed trades</h2>

@@ -131,7 +131,11 @@ async def rows(session: AsyncSession, s: Settings) -> list[TradingAccount]:
 
 
 async def load_accounts(session: AsyncSession, s: Settings) -> list[Account]:
-    """Enabled accounts, ready for the engine (with their private keys)."""
+    """Enabled accounts, ready for the engine (with their private keys and the owner's Telegram chat)."""
+    from app.models import User
+
+    chats = {u.id: u.tg_chat_id for u in (await session.execute(
+        select(User).where(User.tg_chat_id.is_not(None), User.status == "active"))).scalars().all()}
     out = []
     for r in await rows(session, s):
         if r.enabled:
@@ -139,7 +143,9 @@ async def load_accounts(session: AsyncSession, s: Settings) -> list[Account]:
                 key = private_key_for(r, s)
             except Exception:
                 key = None                     # wrong encryption key: account stays idle, the worker says why
-            out.append(to_account(r, s, key))
+            a = to_account(r, s, key)
+            a.user_chat_id = chats.get(r.user_id) if r.user_id else None
+            out.append(a)
     return out
 
 

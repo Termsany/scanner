@@ -268,3 +268,65 @@ def test_withdraw_lock_blocks_even_with_code(env, monkeypatch):
         r = c.post("/api/me/account/withdraw", json={"password": "a-long-password", "to": LEADER,
                                                      "code": _code(secret, 1)})
         assert r.status_code == 423 and "locked" in r.json()["detail"]             # turning 2FA off locked it
+
+
+# ---- Telegram link + performance --------------------------------------------------------
+def test_telegram_link_through_bot_and_user_safe_commands(env, monkeypatch):
+    from app.api import me as me_api
+    from app.telegram_alerts import TelegramAlerts
+
+    async def tell(text):
+        pass
+    monkeypatch.setattr(me_api, "tell_admin", tell)
+    monkeypatch.setattr(env, "telegram_bot_token", "123:abc")
+    monkeypatch.setattr(env, "telegram_chat_id", "999")          # the owner's chat
+    me_api._bot_name[:] = ["alpha_test_bot"]
+    with TestClient(app) as c:
+        _approved(c, "ivy@example.com")
+        assert c.get("/api/me").json()["telegram"]["linked"] is False
+        r = c.post("/api/me/telegram/link")
+        assert r.status_code == 200 and r.json()["url"].startswith("https://t.me/alpha_test_bot?start=link_")
+        code = r.json()["url"].split("start=link_")[1]
+        bot = TelegramAlerts(env)
+        assert "invalid" in c.portal.call(bot.handle_command, "/start link_wrongcode", 4242)
+        reply = c.portal.call(bot.handle_command, f"/start link_{code}", 4242)
+        assert "Linked" in reply and "ivy@example.com" in reply
+        assert "invalid" in c.portal.call(bot.handle_command, f"/start link_{code}", 4343)    # one use
+        assert c.get("/api/me").json()["telegram"]["linked"] is True
+        # a linked user's chat only gets user commands: no wallets, no tracking, no help listing owner tools
+        for cmd in ("/wallets", "/tracked", "/help", "/start", "/live", "/track So1aNa"):
+            out = c.portal.call(bot.handle_command, cmd, 4242)
+            assert "/me" in out and "wallet" not in out.lower().replace("trading wallet", "")
+        summary = c.portal.call(bot.handle_command, "/me", 4242)
+        assert "Your last 24 h" in summary and "/me" in summary
+        assert "stop" in c.portal.call(bot.handle_command, "/stop", 4242).lower()
+        assert c.get("/api/me").json()["telegram"]["linked"] is False
+        c.portal.call(bot.close)
+
+
+def test_stats_in_me(env):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    from app.db import SessionLocal
+    from app.models import LivePosition
+
+    with TestClient(app) as c:
+        uid = _approved(c, "jack@example.com")
+        name = f"u{uid}"
+        now = datetime.now(timezone.utc)
+
+        async def add():
+            async with SessionLocal() as s:
+                for sym, cost, pnl, d in (("A", 10, 15, 0), ("B", 10, -4, 1), ("C", 10, 5, 1), ("D", 10, -10, 40)):
+                    s.add(LivePosition(mode=env.live_mode if env.live_mode in ("dry", "live") else "off",
+                                       account=name, token_address=sym, symbol=sym, leader_wallet=LEADER,
+                                       leader_trade_id=1, status="closed", cost_usd=cost, proceeds_usd=cost + pnl,
+                                       pnl_usd=pnl, closed_at=now - timedelta(days=d)))
+                await s.commit()
+        c.portal.call(add)
+        st = c.get("/api/me").json()["account"]["stats"]
+        assert st["trades"] == 4 and st["wins"] == 2 and st["win_rate"] == 50
+        assert st["total_pnl"] == 6 and st["best"]["symbol"] == "A" and st["worst"]["symbol"] == "D"
+        assert len(st["daily"]) == 30 and st["daily"][-1]["pnl"] == 15 and st["daily"][-2]["pnl"] == 1
+        assert LEADER not in c.get("/api/me").text

@@ -487,13 +487,117 @@ class TelegramAlerts:
         lines.append("<i>Simulation only, no real trades. Not financial advice.</i>")
         return "\n".join(lines)
 
+    # ---- registered users' chats -------------------------------------------------
+    async def _chat_user(self, chat_id):
+        from sqlalchemy import select
+
+        from app.models import User
+
+        if chat_id is None:
+            return None
+        async with SessionLocal() as s:
+            return (await s.execute(select(User).where(User.tg_chat_id == str(chat_id)))).scalars().first()
+
+    async def _link_user(self, code: str, chat_id) -> str:
+        from app.users import audit, link_telegram
+
+        async with SessionLocal() as s:
+            user = await link_telegram(s, code, chat_id)
+            if user is None:
+                return "This link is invalid or expired. Open a new one from your trading page."
+            await audit(s, f"user:{user.id}", "telegram_linked")
+            await s.commit()
+            email = user.email
+        return (f"✅ Linked to <b>{e(email)}</b>.\nYou will get your trade notes and a daily summary here.\n"
+                "/me — your results now · /stop — stop notes in this chat")
+
+    async def _user_command(self, cmd: str, chat_id) -> str:
+        if cmd == "/stop":
+            async with SessionLocal() as s:
+                from sqlalchemy import select
+
+                from app.models import User
+
+                u = (await s.execute(select(User).where(User.tg_chat_id == str(chat_id)))).scalars().first()
+                if u:
+                    u.tg_chat_id = None
+                    await s.commit()
+            return "Stopped. Link this chat again from your trading page any time."
+        if cmd == "/me":
+            u = await self._chat_user(chat_id)
+            return await self.user_summary(u, hours=24) if u else "Not linked."
+        return "<b>Your trading bot</b>\n/me — your results in the last 24 h\n/stop — stop notes in this chat"
+
+    async def user_summary(self, user, hours: int = 24) -> str:
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from app.models import LivePosition, TradingAccount
+
+        mode = self.settings.live_mode if self.settings.live_mode in ("dry", "live") else "off"
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        async with SessionLocal() as s:
+            acct = (await s.execute(select(TradingAccount).where(TradingAccount.user_id == user.id))).scalars().first()
+            if acct is None:
+                return "Your account is waiting for approval."
+            rows = (await s.execute(select(LivePosition).where(
+                LivePosition.account == acct.name, LivePosition.mode == mode, LivePosition.status != "failed"))
+            ).scalars().all()
+        closed = [r for r in rows if r.status == "closed" and r.closed_at and
+                  (r.closed_at if r.closed_at.tzinfo else r.closed_at.replace(tzinfo=timezone.utc)) >= since]
+        opened = [r for r in rows if r.status == "open"]
+        pnl = sum(r.pnl_usd or 0 for r in closed)
+        wins = sum(1 for r in closed if (r.pnl_usd or 0) > 0)
+        lines = [f"<b>Your last {hours} h</b>",
+                 f"Result: {'+' if pnl >= 0 else '−'}${abs(pnl):,.2f} from {len(closed)} closed trade"
+                 f"{'' if len(closed) == 1 else 's'}" + (f" ({wins} won)" if closed else "")]
+        for r in sorted(closed, key=lambda r: r.pnl_usd or 0, reverse=True)[:5]:
+            p = r.pnl_usd or 0
+            lines.append(f"  ${e(r.symbol or r.token_address[:6])} {'+' if p >= 0 else '−'}${abs(p):,.2f}")
+        lines.append(f"Open now: {len(opened)} trade{'' if len(opened) == 1 else 's'} · "
+                     f"${sum(r.cost_usd for r in opened):,.2f} in")
+        if acct.paused:
+            lines.append("⏸ Your account is paused (no new trades).")
+        lines.append(f"Details: {self.settings.site_url.rstrip('/')}/me")
+        return "\n".join(lines)
+
+    async def _user_daily_reports(self, today: str) -> None:
+        from sqlalchemy import select
+
+        from app.models import User
+
+        async with SessionLocal() as s:
+            users = (await s.execute(select(User).where(User.tg_chat_id.is_not(None), User.status == "active"))
+                     ).scalars().all()
+        for u in users:
+            if u.tg_daily is False:
+                continue
+            async with SessionLocal() as s:          # once per user per day, even across restarts
+                key = f"daily_user:{u.id}"
+                row = await s.get(TrackerCursor, key)
+                if row is not None and row.value == today:
+                    continue
+                if row is None:
+                    s.add(TrackerCursor(key=key, value=today))
+                else:
+                    row.value = today
+                await s.commit()
+            try:
+                await self.send(u.tg_chat_id, await self.user_summary(u, 24))
+            except Exception:
+                log.warning("daily summary for user %s failed", u.id, exc_info=True)
+
     async def _maybe_daily_report(self) -> None:
         hour = self.settings.telegram_daily_report_hour
         chat = self.settings.telegram_chat_id
         now = datetime.now(timezone.utc)
-        if hour is None or not chat or now.hour != hour:
+        if hour is None or now.hour != hour:
             return
         today = now.strftime("%Y-%m-%d")
+        await self._user_daily_reports(today)
+        if not chat:
+            return
         async with SessionLocal() as s:  # claim today's report once, even across restarts / replicas
             row = await s.get(TrackerCursor, "daily_report")
             if row is not None and row.value == today:
@@ -537,6 +641,11 @@ class TelegramAlerts:
         elif cmd == "/start" and args and args[0].startswith(("untrack_sol_", "untrack_evm_")):
             kind, addr = args[0][8:11], args[0][12:]
             cmd, args = "/untrack", ["solana" if kind == "sol" else "evm", addr]
+
+        if cmd == "/start" and args and args[0].startswith("link_"):
+            return await self._link_user(args[0][5:], chat_id)
+        if not self._is_owner(chat_id) and await self._chat_user(chat_id) is not None:
+            return await self._user_command(cmd, chat_id)
 
         if cmd in ("/start", "/help"):
             return ("<b>Alpha Scanner</b>\n"

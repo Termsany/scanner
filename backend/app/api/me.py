@@ -167,6 +167,7 @@ async def me(user: CurrentUser, request: Request, session: Session) -> dict[str,
     out: dict[str, Any] = {"user": {"email": user.email, "name": user.name, "status": user.status},
                            "security": {"totp_enabled": bool(user.totp_enabled),
                                         "withdraw_lock_hours": round(withdraw_lock_left(user), 1)},
+                           "telegram": {"linked": bool(user.tg_chat_id), "daily": user.tg_daily is not False},
                            "account": None}
     a = await _my_account(session, user)
     if a is None or user.status != "active":
@@ -199,6 +200,9 @@ async def me(user: CurrentUser, request: Request, session: Session) -> dict[str,
         "open_cost_usd": sum(p["cost_usd"] for p in opened),
         "open": [_clean(p) for p in opened], "closed": [_clean(p) for p in closed[:100]],
     }
+    from app.users import account_stats
+
+    out["account"]["stats"] = await account_stats(session, a.name, mode)
     return out
 
 
@@ -513,3 +517,64 @@ async def totp_disable(body: DisableIn, user: CurrentUser, request: Request, ses
     await tell_admin(f"⚠️ {user.email} turned OFF two-step codes (IP {ip_of(request)}). Withdrawals locked "
                      f"for {get_settings().withdraw_lock_hours} h.")
     return {"ok": True}
+
+
+# ---- Telegram ----------------------------------------------------------------------
+_bot_name: list[str] = []
+
+
+async def _bot_username(request: Request) -> str | None:
+    tg = getattr(request.app.state, "telegram", None)
+    if tg is not None and getattr(tg, "username", None):
+        return tg.username
+    if _bot_name:
+        return _bot_name[0]
+    s = get_settings()
+    if not s.telegram_bot_token:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = (await c.get(f"https://api.telegram.org/bot{s.telegram_bot_token}/getMe")).json()
+        name = (r.get("result") or {}).get("username")
+    except Exception:
+        name = None
+    if name:
+        _bot_name.append(name)
+    return name
+
+
+@router.post("/telegram/link")
+async def telegram_link(user: CurrentUser, request: Request, session: Session) -> dict[str, Any]:
+    """A one-time t.me deep link (15 min). Opening it and pressing Start links this chat to the account."""
+    import secrets
+    from datetime import datetime, timedelta, timezone
+
+    from app.users import _token_hash
+
+    name = await _bot_username(request)
+    if not name:
+        raise HTTPException(503, "Telegram is not set up on this site")
+    code = secrets.token_urlsafe(18)
+    user.tg_link_hash = _token_hash(code)
+    user.tg_link_expires = datetime.now(timezone.utc) + timedelta(minutes=15)
+    await session.commit()
+    return {"url": f"https://t.me/{name}?start=link_{code}", "bot": name}
+
+
+@router.post("/telegram/unlink")
+async def telegram_unlink(user: CurrentUser, request: Request, session: Session) -> dict[str, bool]:
+    user.tg_chat_id, user.tg_link_hash, user.tg_link_expires = None, None, None
+    await audit(session, f"user:{user.id}", "telegram_unlinked", ip=ip_of(request))
+    await session.commit()
+    return {"ok": True}
+
+
+class DailyIn(BaseModel):
+    daily: bool
+
+
+@router.post("/telegram/daily")
+async def telegram_daily(body: DailyIn, user: CurrentUser, session: Session) -> dict[str, bool]:
+    user.tg_daily = body.daily
+    await session.commit()
+    return {"daily": body.daily}

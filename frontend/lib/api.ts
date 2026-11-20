@@ -190,6 +190,17 @@ export const api = {
       method: "POST", credentials: "include", body: JSON.stringify({ share }),
     }),
 
+  telegramLink: () =>
+    request<{ url: string; bot: string }>("/api/me/telegram/link", { method: "POST", credentials: "include" }),
+
+  telegramUnlink: () =>
+    request<{ ok: boolean }>("/api/me/telegram/unlink", { method: "POST", credentials: "include" }),
+
+  telegramDaily: (daily: boolean) =>
+    request<{ daily: boolean }>("/api/me/telegram/daily", {
+      method: "POST", credentials: "include", body: JSON.stringify({ daily }),
+    }),
+
   changePassword: (current: string, next: string) =>
     request<{ ok: boolean }>("/api/me/password", {
       method: "POST", credentials: "include", body: JSON.stringify({ current, new: next }),

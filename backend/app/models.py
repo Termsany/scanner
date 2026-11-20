@@ -515,6 +515,11 @@ class User(Base):
     totp_last_step: Mapped[int | None] = mapped_column(Integer, nullable=True)   # a code works only once
     # Withdrawals wait after a password reset or a 2FA reset/removal (time to notice a takeover)
     withdraw_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Telegram: the user's own chat for trade notes and the daily summary (linked with a one-time /start code)
+    tg_chat_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    tg_link_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tg_link_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tg_daily: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
 
 
 class UserSession(Base):

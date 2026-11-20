@@ -542,12 +542,28 @@ export interface MyAccount {
   open_cost_usd: number;
   open: MyPosition[];
   closed: MyPosition[];
+  stats?: MyStats;
 }
 
 export interface Me {
   user: { email: string; name: string; status: "pending" | "active" | "blocked" };
   security: { totp_enabled: boolean; withdraw_lock_hours: number };
+  telegram: { linked: boolean; daily: boolean };
   account: MyAccount | null;
+}
+
+export interface MyStats {
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  total_pnl: number;
+  roi_pct: number | null;
+  avg_win: number | null;
+  avg_loss: number | null;
+  best: { symbol: string; pnl_usd: number | null; pct: number | null } | null;
+  worst: { symbol: string; pnl_usd: number | null; pct: number | null } | null;
+  daily: { day: string; pnl: number; trades: number }[];
 }
 
 export interface AuditEntry {

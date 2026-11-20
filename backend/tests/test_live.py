@@ -1083,3 +1083,47 @@ def test_only_the_wallet_that_gave_the_entry_closes_the_position():
     ])
     assert x.calls == [("buy", "T", 30), ("sell", "T", 1_000_000)]
     assert pos[0].status == "closed" and pos[0].exit_reason == "leader_sold" and pos[0].leader_wallet == LEADER
+
+
+def test_user_notes_never_name_the_leader():
+    """A registered user's own chat gets buy/sell notes with neutral words, never the leader's wallet or label."""
+    from app.live import Account, Leader
+
+    x = FakeExec()
+    sent = []
+
+    async def send_to(chat, text):
+        sent.append((chat, text))
+    acct = Account("u7", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, label="Whale DULX")},
+                   user_chat_id="555")
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), account=acct, send_to=send_to)
+        await eng.step(sess)
+        t = _trade(mint="T")
+        t.wallet_label = "Whale DULX"
+        sess.add(t); await sess.commit(); await eng.step(sess)
+        sess.add(_trade(side="sell", mint="T", pct_sold=100, remaining=0)); await sess.commit(); await eng.step(sess)
+    _db(body)
+    texts = [t for c, t in sent]
+    assert all(c == "555" for c, _ in sent) and len(texts) == 2
+    assert "bought $T" in texts[0] and "exit signal" in texts[1] and "P&L" in texts[1]
+    joined = " ".join(texts)
+    assert LEADER not in joined and LEADER[:6] not in joined and "Whale" not in joined and "leader" not in joined.lower()
+
+
+def test_no_user_chat_no_user_notes():
+    from app.live import Account, Leader
+
+    sent = []
+
+    async def send_to(chat, text):
+        sent.append(text)
+
+    async def body(sess):
+        eng = CopyEngine(FakeExec(), _s(), account=Account("main", 30, 100, 50, [LEADER],
+                                                             leaders={LEADER: Leader(LEADER)}), send_to=send_to)
+        await eng.step(sess)
+        sess.add(_trade(mint="T")); await sess.commit(); await eng.step(sess)
+    _db(body)
+    assert sent == []

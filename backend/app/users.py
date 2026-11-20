@@ -239,3 +239,51 @@ def withdraw_lock_left(user: User) -> float:
     if not user.withdraw_locked_until:
         return 0.0
     return max((_as_utc(user.withdraw_locked_until) - _now()).total_seconds() / 3600, 0.0)
+
+
+# ---- performance of one account ---------------------------------------------------------
+async def account_stats(session: AsyncSession, account: str, mode: str, days: int = 30) -> dict[str, Any]:
+    """Closed-trade statistics and P&L per day (UTC) for the last `days` days."""
+    from app.models import LivePosition
+
+    rows = (await session.execute(select(LivePosition).where(
+        LivePosition.account == account, LivePosition.mode == mode, LivePosition.status == "closed")
+    )).scalars().all()
+    pnls = [r.pnl_usd or 0.0 for r in rows]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    cost = sum(r.cost_usd or 0 for r in rows)
+    best = max(rows, key=lambda r: r.pnl_usd or 0, default=None)
+    worst = min(rows, key=lambda r: r.pnl_usd or 0, default=None)
+    since = (_now() - timedelta(days=days - 1)).date()
+    daily: dict[str, dict[str, float]] = {}
+    for i in range(days):
+        d = since + timedelta(days=i)
+        daily[d.isoformat()] = {"pnl": 0.0, "trades": 0}
+    for r in rows:
+        if r.closed_at:
+            k = _as_utc(r.closed_at).date().isoformat()
+            if k in daily:
+                daily[k]["pnl"] += r.pnl_usd or 0
+                daily[k]["trades"] += 1
+
+    def pick(r):
+        return {"symbol": r.symbol, "pnl_usd": r.pnl_usd, "pct": (r.pnl_usd or 0) / r.cost_usd * 100
+                if r.cost_usd else None} if r else None
+    return {
+        "trades": len(rows), "wins": len(wins), "losses": len(losses),
+        "win_rate": len(wins) / len(rows) * 100 if rows else None,
+        "total_pnl": sum(pnls), "roi_pct": sum(pnls) / cost * 100 if cost else None,
+        "avg_win": sum(wins) / len(wins) if wins else None, "avg_loss": sum(losses) / len(losses) if losses else None,
+        "best": pick(best), "worst": pick(worst),
+        "daily": [{"day": k, "pnl": round(v["pnl"], 2), "trades": int(v["trades"])} for k, v in daily.items()],
+    }
+
+
+async def link_telegram(session: AsyncSession, code: str, chat_id: str | int) -> User | None:
+    """Bot side of the /start link_<code> deep link."""
+    u = (await session.execute(select(User).where(User.tg_link_hash == _token_hash(code)))).scalars().first()
+    if u is None or not u.tg_link_expires or _as_utc(u.tg_link_expires) < _now() or u.status == "blocked":
+        return None
+    u.tg_chat_id, u.tg_link_hash, u.tg_link_expires = str(chat_id), None, None
+    return u

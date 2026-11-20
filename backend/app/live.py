@@ -130,6 +130,12 @@ class Account:
     paused: bool = False                       # no new buys for this account; sells keep working
     take_capital_at_pct: Any = _FROM_SETTINGS  # None = off
     max_hold_hours: int | None = None          # None = LIVE_MAX_HOLD_HOURS
+    user_chat_id: str | None = None            # owner's own Telegram chat (registered users), never told the leader
+
+
+# What a user is told about an exit: never which wallet, only what happened
+USER_REASON = {"leader_sold": "exit signal", "leader_trim": "partial exit", "take_capital": "capital taken back",
+               "sold_by_hand": "sold by hand", "manual": "sold from your page", "max_hold": "max hold time"}
 
 
 def accounts_from_settings(s: Settings) -> list[Account]:
@@ -587,8 +593,9 @@ def _share(t: WalletTrade) -> float:
 
 class CopyEngine:
     def __init__(self, executor: Executor, settings: Settings | None = None, notify=None,
-                 account: Account | None = None, screener=None) -> None:
+                 account: Account | None = None, screener=None, send_to=None) -> None:
         self.x = executor
+        self.send_to = send_to            # async (chat_id, text): the account owner's own chat
         self.screener = screener          # app.screen.TokenScreener, shared by all accounts; None = no check
         self.s = settings or get_settings()
         self.a = account or accounts_from_settings(self.s)[0]
@@ -621,6 +628,14 @@ class CopyEngine:
     def _take_capital_target(self) -> float | None:
         t = self.a.take_capital_at_pct
         return self.s.live_take_capital_at_pct if t is _FROM_SETTINGS else t
+
+    async def tell_user(self, text: str) -> None:
+        """Note for a registered user's own chat. Never name or hint at the leader wallet."""
+        if self.send_to is not None and self.a.user_chat_id:
+            try:
+                await self.send_to(self.a.user_chat_id, text)
+            except Exception:
+                log.warning("live: user note failed", exc_info=True)
 
     def _tag(self) -> str:
         tag = "🟢 LIVE" if self.x.mode == "live" else "🧪 DRY-RUN"
@@ -709,6 +724,12 @@ class CopyEngine:
                     self._said[key] = time.monotonic()
             if not quiet:
                 await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
+                if why.startswith("not enough SOL"):
+                    await self.tell_user("⏸ A trade was skipped: not enough SOL in your trading wallet. "
+                                         "Deposit SOL to keep trading.")
+                elif why.startswith("daily loss limit"):
+                    await self.tell_user("⏸ Your max loss for 24 h is reached: no new trades until it clears. "
+                                         "Open trades still close as usual.")
             return
         free = self._free(t.wallet)
         if self.screener is not None and not free:
@@ -746,6 +767,7 @@ class CopyEngine:
         log.info("live: BUY %s for %.4f SOL ($%.2f) %s", sym, f.sol, f.usd, f.signature)
         await self.notify(f"{self._tag()} ✅ Bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
                           f"Copying {t.wallet_label or t.wallet[:6]}\n{self._tx(f.signature)}")
+        await self.tell_user(f"✅ New trade: bought ${sym} for ${f.usd:,.2f}\n{self._tx(f.signature)}")
 
     # ---- sells -------------------------------------------------------------
     async def _on_sell(self, session: AsyncSession, t: WalletTrade) -> None:
@@ -826,6 +848,8 @@ class CopyEngine:
                 else f"\nStill holding {100 - share * 100:.0f}% of the position")
         await self.notify(f"{self._tag()} 💰 Sold {share * 100:.0f}% of ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})"
                           f" · {reason.replace('_', ' ')}{tail}\n{self._tx(f.signature)}")
+        await self.tell_user(f"{'🏁' if done else '💰'} Sold {share * 100:.0f}% of ${sym} for ${f.usd:,.2f} · "
+                             f"{USER_REASON.get(reason, reason.replace('_', ' '))}{tail}\n{self._tx(f.signature)}")
         return True
 
     async def _reconcile(self, session: AsyncSession) -> None:
@@ -923,6 +947,7 @@ class CopyEngine:
         if lines:
             await self.notify(f"{self._tag()} 🧾 Found sales you made by hand in the wallet, P&L updated:\n"
                               + "\n".join(lines))
+            await self.tell_user("🧾 Sales you made in your wallet are now counted:\n" + "\n".join(lines))
 
     async def _take_capital(self, session: AsyncSession) -> None:
         """Position up LIVE_TAKE_CAPITAL_AT_PCT (value now + already sold vs cost): sell tokens worth what is still
@@ -1022,6 +1047,13 @@ class LiveTrader:
     def __init__(self, settings: Settings | None = None) -> None:
         self.s = settings or get_settings()
 
+    async def _send_to(self, chat_id: str, text: str) -> None:
+        if not self.s.telegram_bot_token:
+            return
+        async with httpx.AsyncClient(timeout=15) as c:
+            await c.post(f"https://api.telegram.org/bot{self.s.telegram_bot_token}/sendMessage",
+                         json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
+
     async def _telegram(self, text: str) -> None:
         if not (self.s.telegram_bot_token and self.s.telegram_chat_id):
             return
@@ -1108,7 +1140,8 @@ class LiveTrader:
                     said.add(name)
                 continue
             said.discard(name)
-            eng = CopyEngine(x, self.s, notify=self._telegram, account=a, screener=self._screener)
+            eng = CopyEngine(x, self.s, notify=self._telegram, account=a, screener=self._screener,
+                             send_to=self._send_to)
             running[name] = (asyncio.create_task(self._run_account(a, x, mode, eng)), a.private_key, eng)
         wallets = frozenset(w for name in running for w in want[name].wallets)
         if self.s.live_fast_detection and self.s.live_rpc_url and (fast is None or fast[1] != wallets
