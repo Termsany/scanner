@@ -201,15 +201,37 @@ export const api = {
     }),
 
   adminStatus: () => request<{ has_admin: boolean }>("/api/live/admin/status"),
-  adminMe: () => request<{ email: string | null; via: string }>("/api/live/admin/me", { credentials: "include" }),
+  adminMe: () => request<{ email: string | null; via: string; totp_enabled?: boolean }>("/api/live/admin/me", { credentials: "include" }),
   adminSetup: (current_password: string, email: string, password: string) =>
     request<{ ok: boolean; email: string }>("/api/live/admin/setup", {
       method: "POST", credentials: "include", body: JSON.stringify({ current_password, email, password }),
     }),
 
-  login: (email: string, password: string) =>
+  login: (email: string, password: string, code?: string) =>
     request<{ ok: boolean; status: string; role?: string | null }>("/api/me/login", {
-      method: "POST", credentials: "include", body: JSON.stringify({ email, password }),
+      method: "POST", credentials: "include", body: JSON.stringify({ email, password, code: code || null }),
+    }),
+
+  passkeyLoginOptions: () =>
+    request<{ options: Record<string, unknown>; state: string }>("/api/me/passkeys/login/options", { method: "POST" }),
+  passkeyLogin: (state: string, credential: Record<string, unknown>) =>
+    request<{ ok: boolean; status: string; role?: string | null }>("/api/me/passkeys/login", {
+      method: "POST", credentials: "include", body: JSON.stringify({ state, credential }),
+    }),
+  passkeyRegisterOptions: (password: string) =>
+    request<{ options: Record<string, unknown>; state: string }>("/api/me/passkeys/register/options", {
+      method: "POST", credentials: "include", body: JSON.stringify({ password }),
+    }),
+  passkeyRegister: (state: string, credential: Record<string, unknown>, name: string) =>
+    request<{ id: number; name: string }>("/api/me/passkeys/register", {
+      method: "POST", credentials: "include", body: JSON.stringify({ state, credential, name }),
+    }),
+  passkeys: () =>
+    request<{ passkeys: { id: number; name: string; created_at: string | null; last_used_at: string | null }[] }>(
+      "/api/me/passkeys", { credentials: "include" }),
+  passkeyDelete: (id: number, password: string) =>
+    request<{ ok: boolean }>(`/api/me/passkeys/${id}/delete`, {
+      method: "POST", credentials: "include", body: JSON.stringify({ password }),
     }),
 
   logout: () => request<{ ok: boolean }>("/api/me/logout", { method: "POST", credentials: "include" }),

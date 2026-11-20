@@ -104,7 +104,8 @@ async def admin_status(session: Session) -> dict[str, Any]:
 @router.get("/admin/me")
 async def admin_me(session: Session, _: Auth, alpha_session: Annotated[str | None, Cookie()] = None) -> dict[str, Any]:
     user = await _admin_from_cookie(session, alpha_session)
-    return {"email": user.email if user else None, "via": "session" if user else "password"}
+    return {"email": user.email if user else None, "via": "session" if user else "password",
+            "totp_enabled": bool(user.totp_enabled) if user else False}
 
 
 class AdminSetupIn(BaseModel):

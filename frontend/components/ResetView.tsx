@@ -30,6 +30,10 @@ function Reset() {
           setBusy(true);
           try {
             const r = await api.resetPassword(token, pw);
+            if ((r as { admin?: boolean }).admin) {
+              window.location.href = "/admin";
+              return;
+            }
             setDone(r.withdraw_lock_hours);
           } catch (e) {
             setErr(e instanceof ApiError ? srv(e.message) : t("c.error"));

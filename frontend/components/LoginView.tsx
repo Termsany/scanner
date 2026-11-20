@@ -50,8 +50,13 @@ function Login() {
         return;
       }
       if (mode === "login") {
-        const r = await api.login(email, pw);
-        window.location.href = r.role === "admin" ? "/admin" : "/me";
+        try {
+          const r = await api.login(email, pw);
+          window.location.href = r.role === "admin" ? "/admin" : "/me";
+        } catch (e) {
+          if (e instanceof ApiError && e.message === "Two-step code required") window.location.href = "/admin";
+          else throw e;
+        }
         return;
       }
       await api.register(email, pw, name, lang, agree, coupon.trim());

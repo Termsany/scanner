@@ -50,6 +50,7 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: str
     password: str
+    code: str | None = None       # two-step code: required for an admin who turned them on
 
 
 @router.post("/register")
@@ -115,6 +116,11 @@ async def login(body: LoginIn, request: Request, response: Response, session: Se
         raise HTTPException(401, "Wrong email or password")
     if user.status == "blocked":
         raise HTTPException(403, "This account is blocked")
+    if user.role == "admin" and user.totp_enabled:
+        # the password was right; the admin also needs the code from their authenticator app
+        if not (body.code or "").strip():
+            raise HTTPException(401, "Two-step code required")
+        _check_code(user, body.code, request)
     cleared("ip:" + ip, "em:" + email)
     from datetime import datetime, timezone
 
@@ -529,6 +535,12 @@ async def reset_password(body: ResetIn, request: Request, response: Response, se
     user.password_hash = hash_password(body.password)
     lock_withdrawals(user)
     await end_all_sessions(session, user.id)
+    if user.role == "admin" and user.totp_enabled:
+        # a reset link must not get past the admin's two-step code: sign in again with password + code
+        await audit(session, f"user:{user.id}", "password_reset", ip=ip)
+        await session.commit()
+        await tell_admin(f"🔁 Admin {user.email} reset the password (IP {ip}). Sign-in still needs the code.")
+        return {"ok": True, "withdraw_lock_hours": 0, "signin": True, "admin": True}
     token = await new_session(session, user)
     await audit(session, f"user:{user.id}", "password_reset", ip=ip)
     await session.commit()
@@ -669,3 +681,137 @@ async def set_lang(body: LangIn, user: CurrentUser, session: Session) -> dict[st
     user.lang = "en" if body.lang == "en" else "ar"
     await session.commit()
     return {"lang": user.lang}
+
+
+
+# ---- passkeys ----------------------------------------------------------------------
+class PasskeyRegisterIn(BaseModel):
+    state: str
+    credential: dict[str, Any]
+    name: str = "Passkey"
+
+
+@router.post("/passkeys/register/options")
+async def passkey_register_options(body: ConfirmIn, user: CurrentUser, request: Request,
+                                   session: Session) -> dict[str, Any]:
+    """Start adding a passkey (needs the account password)."""
+    from webauthn.helpers import base64url_to_bytes
+
+    from app.models import Passkey
+    from app.passkeys import registration_options
+
+    _confirm(user, body.password, request)
+    have = (await session.execute(select(Passkey).where(Passkey.user_id == user.id))).scalars().all()
+    if len(have) >= 10:
+        raise HTTPException(400, "At most 10 passkeys: remove one first")
+    options, state = registration_options(user.id, user.email, [base64url_to_bytes(p.credential_id) for p in have])
+    return {"options": options, "state": state}
+
+
+@router.post("/passkeys/register")
+async def passkey_register(body: PasskeyRegisterIn, user: CurrentUser, request: Request,
+                           session: Session) -> dict[str, Any]:
+    from webauthn.helpers import bytes_to_base64url
+
+    from app.models import Passkey
+    from app.passkeys import take, verify_registration
+
+    got = take(body.state, "register")
+    if got is None or got[1] != user.id:
+        raise HTTPException(400, "This passkey request expired: try again")
+    try:
+        v = verify_registration(body.credential, got[0])
+    except Exception as exc:
+        raise HTTPException(400, f"The passkey could not be verified: {str(exc)[:120]}") from None
+    cred_id = bytes_to_base64url(v.credential_id)
+    if (await session.execute(select(Passkey.id).where(Passkey.credential_id == cred_id))).first():
+        raise HTTPException(409, "This passkey is already added")
+    transports = (body.credential.get("response") or {}).get("transports")
+    pk = Passkey(user_id=user.id, credential_id=cred_id, public_key=bytes_to_base64url(v.credential_public_key),
+                 sign_count=v.sign_count, name=(body.name or "Passkey").strip()[:60] or "Passkey",
+                 transports=transports if isinstance(transports, list) else None)
+    session.add(pk)
+    await audit(session, f"user:{user.id}", "passkey_added", pk.name, ip=ip_of(request))
+    await session.commit()
+    await tell_admin(f"🔑 {user.email} added a passkey \"{pk.name}\" (IP {ip_of(request)}).")
+    return {"id": pk.id, "name": pk.name}
+
+
+@router.get("/passkeys")
+async def passkey_list(user: CurrentUser, session: Session) -> dict[str, Any]:
+    from app.models import Passkey
+
+    rows = (await session.execute(select(Passkey).where(Passkey.user_id == user.id).order_by(Passkey.id))).scalars().all()
+    return {"passkeys": [{"id": p.id, "name": p.name,
+                          "created_at": p.created_at.isoformat() if p.created_at else None,
+                          "last_used_at": p.last_used_at.isoformat() if p.last_used_at else None} for p in rows]}
+
+
+@router.post("/passkeys/{passkey_id}/delete")
+async def passkey_delete(passkey_id: int, body: ConfirmIn, user: CurrentUser, request: Request,
+                         session: Session) -> dict[str, bool]:
+    from app.models import Passkey
+
+    _confirm(user, body.password, request)
+    pk = await session.get(Passkey, passkey_id)
+    if pk is None or pk.user_id != user.id:
+        raise HTTPException(404, "No such passkey")
+    await session.delete(pk)
+    await audit(session, f"user:{user.id}", "passkey_removed", pk.name, ip=ip_of(request))
+    await session.commit()
+    await tell_admin(f"🔑 {user.email} removed the passkey \"{pk.name}\" (IP {ip_of(request)}).")
+    return {"ok": True}
+
+
+@router.post("/passkeys/login/options")
+async def passkey_login_options(request: Request) -> dict[str, Any]:
+    from app.passkeys import authentication_options
+
+    _enabled()
+    if too_many("pk:" + ip_of(request)):
+        raise HTTPException(429, "Too many tries, try again later")
+    options, state = authentication_options()
+    return {"options": options, "state": state}
+
+
+class PasskeyLoginIn(BaseModel):
+    state: str
+    credential: dict[str, Any]
+
+
+@router.post("/passkeys/login")
+async def passkey_login(body: PasskeyLoginIn, request: Request, response: Response, session: Session) -> dict[str, Any]:
+    """Sign in with a passkey. It verifies the person on the device, so it also stands in for the two-step code."""
+    from webauthn.helpers import base64url_to_bytes
+
+    from app.models import Passkey
+    from app.passkeys import take, verify_authentication
+
+    _enabled()
+    ip = ip_of(request)
+    if too_many("pk:" + ip):
+        raise HTTPException(429, "Too many tries, try again later")
+    got = take(body.state, "login")
+    if got is None:
+        raise HTTPException(400, "This sign-in request expired: try again")
+    cred_id = str(body.credential.get("id") or body.credential.get("rawId") or "")
+    pk = (await session.execute(select(Passkey).where(Passkey.credential_id == cred_id))).scalars().first()
+    if pk is None:
+        failed("pk:" + ip)
+        raise HTTPException(401, "This passkey is not registered here")
+    try:
+        v = verify_authentication(body.credential, got[0], base64url_to_bytes(pk.public_key), pk.sign_count)
+    except Exception:
+        failed("pk:" + ip)
+        raise HTTPException(401, "The passkey could not be verified") from None
+    user = await session.get(User, pk.user_id)
+    if user is None or user.status == "blocked":
+        raise HTTPException(403, "This account is blocked")
+    pk.sign_count, pk.last_used_at = v.new_sign_count, datetime.now(timezone.utc)
+    user.last_login_at = datetime.now(timezone.utc)
+    token = await new_session(session, user)
+    await audit(session, f"user:{user.id}", "login_passkey", pk.name, ip=ip)
+    await session.commit()
+    set_cookie(response, token)
+    cleared("pk:" + ip)
+    return {"ok": True, "status": user.status, "role": user.role}
