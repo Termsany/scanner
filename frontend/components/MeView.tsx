@@ -10,12 +10,135 @@ import {
   Pause,
   Play,
   Save,
+  ShieldCheck,
   Wallet,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import type { Me, MyAccount, MyPosition } from "@/lib/types";
+
+const codeInput =
+  "num w-full rounded-md border border-line bg-carbon px-2.5 py-1.5 text-sm tracking-[0.3em] outline-none focus:border-accent";
+
+function SecurityCard({ me, onDone }: { me: Me; onDone: () => void }) {
+  const on = me.security.totp_enabled;
+  const [pw, setPw] = useState("");
+  const [code, setCode] = useState("");
+  const [setup, setSetup] = useState<{ secret: string; qr: string } | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [cur, setCur] = useState("");
+  const [next, setNext] = useState("");
+
+  async function run(fn: () => Promise<unknown>, ok: string) {
+    setMsg(null);
+    try {
+      await fn();
+      setMsg({ ok: true, text: ok });
+      setPw("");
+      setCode("");
+      onDone();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof ApiError ? e.message : "Failed" });
+    }
+  }
+
+  return (
+    <section className="card p-4 sm:p-5">
+      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+        <ShieldCheck className="size-4 text-accent" /> Security
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold tracking-[0.1em] ${on ? "border-bull/50 text-bull" : "border-warn/60 text-warn"}`}>
+          {on ? "2-STEP ON" : "2-STEP OFF"}
+        </span>
+      </h2>
+      {me.security.withdraw_lock_hours > 0 && (
+        <p className="mb-3 rounded-md border border-warn/50 px-3 py-2 text-xs text-warn">
+          Withdrawals are locked for {Math.ceil(me.security.withdraw_lock_hours)} more hours after a password or
+          two-step reset. Trading keeps working.
+        </p>
+      )}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="flex flex-col gap-2">
+          <span className="text-xs font-semibold">Two-step codes (needed to withdraw)</span>
+          {!on && !setup && (
+            <>
+              <p className="text-xs text-muted">
+                Use an authenticator app (Google Authenticator, Authy, 1Password…). Every withdrawal will ask for the
+                6-digit code it shows, so a stolen password alone can&apos;t move your money.
+              </p>
+              <input className={input} type="password" placeholder="Your password" autoComplete="current-password"
+                value={pw} onChange={(e) => setPw(e.target.value)} />
+              <button type="button" disabled={!pw}
+                className="self-start rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-carbon disabled:opacity-40"
+                onClick={async () => {
+                  setMsg(null);
+                  try {
+                    const r = await api.totpSetup(pw);
+                    setSetup({ secret: r.secret, qr: r.qr });
+                    setPw("");
+                  } catch (e) {
+                    setMsg({ ok: false, text: e instanceof ApiError ? e.message : "Failed" });
+                  }
+                }}>
+                Set up two-step codes
+              </button>
+            </>
+          )}
+          {!on && setup && (
+            <>
+              <p className="text-xs text-muted">1. Scan this with your authenticator app (or type the key).</p>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={setup.qr} alt="QR code for your authenticator app" className="size-44 rounded-md bg-white p-1" />
+              <code className="num text-xs break-all text-muted">{setup.secret}</code>
+              <p className="text-xs text-muted">2. Enter the 6-digit code it shows now.</p>
+              <input className={codeInput} inputMode="numeric" maxLength={6} placeholder="123456" value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />
+              <button type="button" disabled={code.length !== 6}
+                className="self-start rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-carbon disabled:opacity-40"
+                onClick={() => run(async () => { await api.totpEnable(code); setSetup(null); }, "Two-step codes are on")}>
+                Turn on
+              </button>
+            </>
+          )}
+          {on && (
+            <>
+              <p className="text-xs text-muted">On. Lost your phone? Ask the admin to reset it (withdrawals then wait 24 h).</p>
+              <details className="text-xs">
+                <summary className="cursor-pointer text-muted hover:text-ink">Turn off</summary>
+                <div className="mt-2 flex flex-col gap-2">
+                  <input className={input} type="password" placeholder="Your password" value={pw}
+                    autoComplete="current-password" onChange={(e) => setPw(e.target.value)} />
+                  <input className={codeInput} inputMode="numeric" maxLength={6} placeholder="Code" value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />
+                  <button type="button" disabled={!pw || code.length !== 6}
+                    className="self-start rounded-md border border-bear/60 px-3 py-1.5 text-xs text-bear disabled:opacity-40"
+                    onClick={() => confirm("Turn off two-step codes? Withdrawals will be locked for 24 hours.") &&
+                      run(() => api.totpDisable(pw, code), "Two-step codes are off")}>
+                    Turn off two-step codes
+                  </button>
+                </div>
+              </details>
+            </>
+          )}
+        </div>
+        <div className="flex flex-col gap-2">
+          <span className="text-xs font-semibold">Change password</span>
+          <input className={input} type="password" placeholder="Current password" autoComplete="current-password"
+            value={cur} onChange={(e) => setCur(e.target.value)} />
+          <input className={input} type="password" placeholder="New password (10+ characters)" autoComplete="new-password"
+            value={next} onChange={(e) => setNext(e.target.value)} />
+          <button type="button" disabled={!cur || next.length < 10}
+            className="self-start rounded-md border border-line px-3 py-1.5 text-xs hover:bg-raised disabled:opacity-40"
+            onClick={() => run(async () => { await api.changePassword(cur, next); setCur(""); setNext(""); },
+              "Password changed; other devices are signed out")}>
+            Change password
+          </button>
+        </div>
+      </div>
+      {msg && <p className={`mt-3 text-xs ${msg.ok ? "text-bull" : "text-bear"}`}>{msg.text}</p>}
+    </section>
+  );
+}
 
 const REFRESH_MS = 5_000;
 const input =
@@ -180,8 +303,9 @@ function SettingsCard({ a, onSaved }: { a: MyAccount; onSaved: () => void }) {
   );
 }
 
-function WalletCard({ a, onDone }: { a: MyAccount; onDone: () => void }) {
+function WalletCard({ a, onDone, totp }: { a: MyAccount; onDone: () => void; totp: boolean }) {
   const [pw, setPw] = useState("");
+  const [code, setCode] = useState("");
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
@@ -244,11 +368,17 @@ function WalletCard({ a, onDone }: { a: MyAccount; onDone: () => void }) {
           <p className="text-[11px] text-faint">Tokens of open trades stay in the wallet; 0.01 SOL stays for their fees.</p>
         </div>
         <div className="flex flex-col gap-2 rounded-md border border-line p-3">
-          <span className="text-xs font-semibold">Confirm with your password</span>
+          <span className="text-xs font-semibold">Confirm with your password{totp ? " and code" : ""}</span>
           <input className={input} type="password" placeholder="Your account password" autoComplete="current-password"
             value={pw} onChange={(e) => setPw(e.target.value)} />
+          {totp ? (
+            <input className={codeInput} inputMode="numeric" maxLength={6} placeholder="2-step code" value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />
+          ) : (
+            <p className="text-[11px] text-warn">Withdrawals need two-step codes: turn them on in Security below.</p>
+          )}
           <div className="flex flex-wrap gap-2">
-            <button type="button" disabled={busy || !pw || !to}
+            <button type="button" disabled={busy || !pw || !to || !totp || code.length !== 6}
               className="inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-carbon disabled:opacity-40"
               onClick={async () => {
                 const sol = amount ? Number(amount) : null;
@@ -256,9 +386,10 @@ function WalletCard({ a, onDone }: { a: MyAccount; onDone: () => void }) {
                 setBusy(true);
                 setMsg(null);
                 try {
-                  const r = await api.withdraw(pw, to.trim(), sol);
+                  const r = await api.withdraw(pw, to.trim(), sol, code);
                   setMsg({ ok: true, text: `Sent ${r.sol.toFixed(4)} SOL · ${r.signature.slice(0, 12)}…` });
                   setPw("");
+                  setCode("");
                   onDone();
                 } catch (e) {
                   setMsg({ ok: false, text: e instanceof ApiError ? e.message : "Withdrawal failed" });
@@ -269,12 +400,13 @@ function WalletCard({ a, onDone }: { a: MyAccount; onDone: () => void }) {
               <ArrowUpRight className="size-3.5" /> Withdraw
             </button>
             {!a.key_revealed && (
-              <button type="button" disabled={busy || !pw}
+              <button type="button" disabled={busy || !pw || (totp && code.length !== 6)}
                 className="inline-flex items-center gap-1 rounded-md border border-line px-3 py-1.5 text-xs hover:bg-raised disabled:opacity-40"
                 onClick={async () => {
                   setMsg(null);
                   try {
-                    const r = await api.revealKey(pw);
+                    const r = await api.revealKey(pw, totp ? code : null);
+                    setCode("");
                     setSecret(r.secret);
                     setPw("");
                     onDone();
@@ -382,7 +514,8 @@ export function MeView() {
             }} />
           </section>
           <SettingsCard a={a} onSaved={() => load()} />
-          <WalletCard a={a} onDone={() => load()} />
+          <WalletCard a={a} onDone={() => load()} totp={data!.security.totp_enabled} />
+          <SecurityCard me={data!} onDone={() => load()} />
           <section className="card">
             <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">Closed trades</h2>
             <Positions rows={a.closed} live={false} />

@@ -114,9 +114,9 @@ def test_approval_gives_account_and_smart_wallets_never_leak(env):
         assert str(load_keypair(r.json()["secret"]).pubkey()) == acct["pubkey"]
         assert c.post("/api/me/account/reveal-key", json={"password": "a-long-password"}).status_code == 409
 
-        # withdrawals need live mode and a valid address
+        # withdrawals need two-step codes first
         assert c.post("/api/me/account/withdraw", json={"password": "a-long-password", "to": "nope"}
-                      ).status_code == 400
+                      ).status_code == 403
 
         # the admin's audit log saw it all
         actions = [e["action"] for e in c.get("/api/live/audit", headers=ADMIN).json()["entries"]]
@@ -160,3 +160,111 @@ def test_user_cannot_sell_someone_elses_position(env):
                 return p.id
         pid = c.portal.call(add) if hasattr(c, "portal") and c.portal else asyncio.run(add())
         assert c.post(f"/api/me/positions/{pid}/sell", json={"share": 1.0}).status_code == 404
+
+
+# ---- forgot password, two-step codes, withdrawal lock ------------------------------------
+def _approved(c, email):
+    _register(c, email)
+    uid = [u for u in c.get("/api/live/users", headers=ADMIN).json()["users"] if u["email"] == email][0]["id"]
+    c.post(f"/api/live/users/{uid}/approve", headers=ADMIN, json={})
+    return uid
+
+
+def _code(secret, offset=0):
+    import time
+
+    from app.users import _totp
+    return _totp(secret, int(time.time() // 30) + offset)
+
+
+def test_forgot_and_reset_password_locks_withdrawals(env, monkeypatch):
+    from app.api import me as me_api
+
+    notes = []
+
+    async def tell(text):
+        notes.append(text)
+    monkeypatch.setattr(me_api, "tell_admin", tell)
+    with TestClient(app) as c:
+        uid = _approved(c, "frank@example.com")
+        c.post("/api/me/logout")
+        r = c.post("/api/me/forgot", json={"email": "nobody@example.com"})
+        assert r.status_code == 200 and not any("nobody@" in n for n in notes)   # same answer, nothing sent
+        r = c.post("/api/me/forgot", json={"email": "FRANK@example.com"})
+        assert r.status_code == 200 and r.json() == c.post("/api/me/forgot", json={"email": "x@y.io"}).json()
+        link = [n for n in notes if "asked to reset" in n][0].split("\n")[-1]
+        token = link.split("token=")[1]
+        assert link.startswith("https://") and "/reset?token=" in link
+        assert c.post("/api/me/reset", json={"token": "bad", "password": "new-long-password"}).status_code == 400
+        assert c.post("/api/me/reset", json={"token": token, "password": "short"}).status_code == 400
+        r = c.post("/api/me/reset", json={"token": token, "password": "new-long-password"})
+        assert r.status_code == 200 and r.json()["withdraw_lock_hours"] == 24
+        assert c.post("/api/me/reset", json={"token": token, "password": "another-password"}).status_code == 400
+        assert c.get("/api/me").json()["security"]["withdraw_lock_hours"] > 23            # signed in, locked
+        c.post("/api/me/logout")
+        assert c.post("/api/me/login", json={"email": "frank@example.com", "password": "a-long-password"}
+                      ).status_code == 401
+        assert c.post("/api/me/login", json={"email": "frank@example.com", "password": "new-long-password"}
+                      ).status_code == 200
+        # admin link works too
+        link = c.post(f"/api/live/users/{uid}/reset-link", headers=ADMIN).json()["link"]
+        assert c.post("/api/me/reset", json={"token": link.split("token=")[1], "password": "third-long-password"}
+                      ).status_code == 200
+
+
+def test_two_step_codes_setup_use_once_and_disable(env, monkeypatch):
+    from app.api import me as me_api
+
+    async def tell(text):
+        pass
+    monkeypatch.setattr(me_api, "tell_admin", tell)
+    with TestClient(app) as c:
+        uid = _approved(c, "gina@example.com")
+        assert c.post("/api/me/2fa/setup", json={"password": "wrong-password"}).status_code == 401
+        r = c.post("/api/me/2fa/setup", json={"password": "a-long-password"})
+        assert r.status_code == 200 and r.json()["qr"].startswith("data:image/svg+xml") and "otpauth://" in r.json()["uri"]
+        secret = r.json()["secret"]
+        assert c.get("/api/me").json()["security"]["totp_enabled"] is False                # not before a code
+        assert c.post("/api/me/2fa/enable", json={"code": "123456" if _code(secret) != "123456" else "654321"}
+                      ).status_code == 401
+        assert c.post("/api/me/2fa/enable", json={"code": _code(secret)}).status_code == 200
+        assert c.get("/api/me").json()["security"]["totp_enabled"] is True
+        assert secret not in c.get("/api/live/users", headers=ADMIN).text
+
+        # key reveal now needs a code; the code used to enable can't be reused
+        assert c.post("/api/me/account/reveal-key", json={"password": "a-long-password"}).status_code == 401
+        assert c.post("/api/me/account/reveal-key", json={"password": "a-long-password", "code": _code(secret)}
+                      ).status_code == 401                                                    # same step: spent
+        r = c.post("/api/me/account/reveal-key", json={"password": "a-long-password", "code": _code(secret, 1)})
+        assert r.status_code == 200 and r.json()["secret"]
+
+        # withdrawal: code checked, then live mode required (tests run dry)
+        r = c.post("/api/me/account/withdraw", json={"password": "a-long-password", "to": LEADER, "code": "000000"})
+        assert r.status_code == 401
+        # admin resets 2FA (lost phone): off + withdrawals locked
+        assert c.post(f"/api/live/users/{uid}/reset-2fa", headers=ADMIN).status_code == 200
+        sec = c.get("/api/me").json()["security"]
+        assert sec["totp_enabled"] is False and sec["withdraw_lock_hours"] > 23
+        entries = c.get("/api/live/audit?q=gina", headers=ADMIN).json()["entries"]
+        assert {"2fa_reset", "user_approved"} <= {e["action"] for e in entries}
+        assert all("gina" in (e["target"] + e["actor"]) or e["actor"].startswith("user:") for e in entries)
+
+
+def test_withdraw_lock_blocks_even_with_code(env, monkeypatch):
+    from app.api import me as me_api
+    from app.users import lock_withdrawals  # noqa: F401
+
+    async def tell(text):
+        pass
+    monkeypatch.setattr(me_api, "tell_admin", tell)
+    monkeypatch.setattr(env, "live_mode", "live")
+    with TestClient(app) as c:
+        _approved(c, "hank@example.com")
+        secret = c.post("/api/me/2fa/setup", json={"password": "a-long-password"}).json()["secret"]
+        c.post("/api/me/2fa/enable", json={"code": _code(secret)})
+        c.post("/api/me/2fa/disable", json={"password": "a-long-password", "code": _code(secret, 1)})
+        secret = c.post("/api/me/2fa/setup", json={"password": "a-long-password"}).json()["secret"]
+        c.post("/api/me/2fa/enable", json={"code": _code(secret)})
+        r = c.post("/api/me/account/withdraw", json={"password": "a-long-password", "to": LEADER,
+                                                     "code": _code(secret, 1)})
+        assert r.status_code == 423 and "locked" in r.json()["detail"]             # turning 2FA off locked it

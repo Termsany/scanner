@@ -9,6 +9,7 @@ import type {
   Me,
   MySettings,
   SiteUser,
+  AuditEntry,
   TradingAccountCfg,
   PaperSummary,
   Performance,
@@ -151,14 +152,37 @@ export const api = {
       method: "PATCH", credentials: "include", body: JSON.stringify(body),
     }),
 
-  revealKey: (password: string) =>
+  revealKey: (password: string, code: string | null) =>
     request<{ secret: string; pubkey: string }>("/api/me/account/reveal-key", {
+      method: "POST", credentials: "include", body: JSON.stringify({ password, code }),
+    }),
+
+  withdraw: (password: string, to: string, sol: number | null, code: string) =>
+    request<{ ok: boolean; sol: number; signature: string }>("/api/me/account/withdraw", {
+      method: "POST", credentials: "include", body: JSON.stringify({ password, to, sol, all: sol == null, code }),
+    }),
+
+  forgot: (email: string) =>
+    request<{ ok: boolean; message: string }>("/api/me/forgot", { method: "POST", body: JSON.stringify({ email }) }),
+
+  resetPassword: (token: string, password: string) =>
+    request<{ ok: boolean; withdraw_lock_hours: number }>("/api/me/reset", {
+      method: "POST", credentials: "include", body: JSON.stringify({ token, password }),
+    }),
+
+  totpSetup: (password: string) =>
+    request<{ secret: string; uri: string; qr: string }>("/api/me/2fa/setup", {
       method: "POST", credentials: "include", body: JSON.stringify({ password }),
     }),
 
-  withdraw: (password: string, to: string, sol: number | null) =>
-    request<{ ok: boolean; sol: number; signature: string }>("/api/me/account/withdraw", {
-      method: "POST", credentials: "include", body: JSON.stringify({ password, to, sol, all: sol == null }),
+  totpEnable: (code: string) =>
+    request<{ ok: boolean }>("/api/me/2fa/enable", {
+      method: "POST", credentials: "include", body: JSON.stringify({ code }),
+    }),
+
+  totpDisable: (password: string, code: string) =>
+    request<{ ok: boolean }>("/api/me/2fa/disable", {
+      method: "POST", credentials: "include", body: JSON.stringify({ password, code }),
     }),
 
   mySell: (id: number, share: number) =>
@@ -178,6 +202,21 @@ export const api = {
   approveUser: (password: string, id: number, body: Record<string, unknown>) =>
     request<{ status: string }>(`/api/live/users/${id}/approve`, {
       method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify(body),
+    }),
+
+  resetLink: (password: string, id: number) =>
+    request<{ link: string; minutes: number }>(`/api/live/users/${id}/reset-link`, {
+      method: "POST", headers: { "X-Live-Password": password },
+    }),
+
+  reset2fa: (password: string, id: number) =>
+    request<{ ok: boolean; withdraw_lock_hours: number }>(`/api/live/users/${id}/reset-2fa`, {
+      method: "POST", headers: { "X-Live-Password": password },
+    }),
+
+  audit: (password: string, q: string, limit = 200) =>
+    request<{ entries: AuditEntry[] }>(`/api/live/audit?limit=${limit}&q=${encodeURIComponent(q)}`, {
+      headers: { "X-Live-Password": password },
     }),
 
   blockUser: (password: string, id: number, blocked: boolean) =>

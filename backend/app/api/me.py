@@ -162,7 +162,11 @@ async def me(user: CurrentUser, request: Request, session: Session) -> dict[str,
     from app.live import SOL_MINT, realized_24h
 
     s = get_settings()
+    from app.users import withdraw_lock_left
+
     out: dict[str, Any] = {"user": {"email": user.email, "name": user.name, "status": user.status},
+                           "security": {"totp_enabled": bool(user.totp_enabled),
+                                        "withdraw_lock_hours": round(withdraw_lock_left(user), 1)},
                            "account": None}
     a = await _my_account(session, user)
     if a is None or user.status != "active":
@@ -247,6 +251,7 @@ async def _need_account(session: AsyncSession, user: User) -> TradingAccount:
 
 class ConfirmIn(BaseModel):
     password: str
+    code: str | None = None       # two-step code, when 2FA is on
 
 
 @router.post("/account/reveal-key")
@@ -256,6 +261,8 @@ async def reveal_key(body: ConfirmIn, user: CurrentUser, request: Request, sessi
 
     a = await _need_account(session, user)
     _confirm(user, body.password, request)
+    if user.totp_enabled:
+        _check_code(user, body.code, request)
     if a.key_revealed:
         raise HTTPException(409, "The key was already shown once")
     if a.key_source != "db" or not a.key_enc:
@@ -276,6 +283,21 @@ def _confirm(user: User, password: str, request: Request) -> None:
         failed("cf:" + str(user.id), "ip:" + ip)
         raise HTTPException(401, "Wrong password")
     cleared("cf:" + str(user.id))
+
+
+def _check_code(user: User, code: str | None, request: Request) -> None:
+    from app.accounts import decrypt_key
+    from app.users import totp_check
+
+    if too_many("cf:" + str(user.id)):
+        raise HTTPException(429, "Too many wrong codes, try again in 15 minutes")
+    if not user.totp_enabled or not user.totp_secret_enc:
+        raise HTTPException(403, "Turn on two-step codes first (Security, on this page)")
+    step = totp_check(decrypt_key(get_settings(), user.totp_secret_enc), code or "", user.totp_last_step)
+    if step is None:
+        failed("cf:" + str(user.id), "ip:" + ip_of(request))
+        raise HTTPException(401, "Wrong or already used code: wait for the next one in your authenticator app")
+    user.totp_last_step = step
 
 
 class SellIn(BaseModel):
@@ -302,6 +324,7 @@ async def sell_mine(position_id: int, body: SellIn, user: CurrentUser, request: 
 
 class WithdrawIn(BaseModel):
     password: str
+    code: str | None = None       # two-step code (required)
     to: str
     sol: float | None = None      # None = everything that can go
     all: bool = False
@@ -316,8 +339,15 @@ async def withdraw(body: WithdrawIn, user: CurrentUser, request: Request, sessio
     from app.accounts import WALLET_RE, private_key_for
     from app.live import LAMPORTS, JupiterExecutor
 
+    from app.users import withdraw_lock_left
+
     a = await _need_account(session, user)
     _confirm(user, body.password, request)
+    _check_code(user, body.code, request)
+    await session.commit()                       # the code is spent even if the withdrawal stops below
+    if (left := withdraw_lock_left(user)) > 0:
+        raise HTTPException(423, f"Withdrawals are locked for {left:.0f} more hours after a password or "
+                                 "two-step reset (a safety wait)")
     to = body.to.strip()
     if not WALLET_RE.fullmatch(to):
         raise HTTPException(400, "Enter a valid Solana address to send to")
@@ -358,3 +388,128 @@ async def withdraw(body: WithdrawIn, user: CurrentUser, request: Request, sessio
             return {"ok": True, "sol": amount / LAMPORTS, "signature": sig}
         finally:
             await x.close()
+
+
+# ---- forgot password ---------------------------------------------------------------
+class ForgotIn(BaseModel):
+    email: str
+
+
+@router.post("/forgot")
+async def forgot(body: ForgotIn, request: Request, session: Session) -> dict[str, Any]:
+    """Always answers the same, so it never tells whether an email is registered."""
+    from app.users import new_reset_link, send_email
+
+    _enabled()
+    ip = ip_of(request)
+    if too_many("fg:" + ip):
+        raise HTTPException(429, "Too many requests, try again later")
+    failed("fg:" + ip)
+    email = body.email.strip().lower()
+    user = await user_by_email(session, email) if EMAIL_RE.fullmatch(email) else None
+    if user is not None and user.status != "blocked":
+        link = await new_reset_link(session, user)
+        await audit(session, f"user:{user.id}", "reset_requested", ip=ip)
+        await session.commit()
+        mins = get_settings().password_reset_minutes
+        sent = await send_email(email, "Reset your Alpha Scanner password",
+                                f"<p>Someone asked to reset the password of {email}.</p>"
+                                f'<p><a href="{link}">Choose a new password</a> (works once, for {mins} minutes).</p>'
+                                "<p>If it wasn't you, ignore this email.</p>")
+        await tell_admin(f"🔁 {email} asked to reset their password (IP {ip}). "
+                         + ("A link was emailed to them." if sent else
+                            f"No email service is set up: if this is really them, send them this link "
+                            f"(one use, {mins} min):\n{link}"))
+    return {"ok": True, "message": "If this email is registered, a reset link is on its way."}
+
+
+class ResetIn(BaseModel):
+    token: str
+    password: str
+
+
+@router.post("/reset")
+async def reset_password(body: ResetIn, request: Request, response: Response, session: Session) -> dict[str, Any]:
+    from app.users import lock_withdrawals, use_reset_token
+
+    _enabled()
+    ip = ip_of(request)
+    if too_many("rs:" + ip):
+        raise HTTPException(429, "Too many tries, try again later")
+    if problem := password_problem(body.password):
+        raise HTTPException(400, problem)
+    user = await use_reset_token(session, body.token)
+    if user is None or user.status == "blocked":
+        failed("rs:" + ip)
+        raise HTTPException(400, "This link is invalid, used or expired: ask for a new one")
+    user.password_hash = hash_password(body.password)
+    lock_withdrawals(user)
+    await end_all_sessions(session, user.id)
+    token = await new_session(session, user)
+    await audit(session, f"user:{user.id}", "password_reset", ip=ip)
+    await session.commit()
+    set_cookie(response, token)
+    h = get_settings().withdraw_lock_hours
+    await tell_admin(f"🔁 {user.email} reset their password (IP {ip}). Withdrawals locked for {h} h.")
+    return {"ok": True, "withdraw_lock_hours": h}
+
+
+# ---- two-step codes ----------------------------------------------------------------
+@router.post("/2fa/setup")
+async def totp_setup(body: ConfirmIn, user: CurrentUser, request: Request, session: Session) -> dict[str, Any]:
+    """New secret + QR code; it takes effect only after /2fa/enable with a valid code."""
+    from app.accounts import encrypt_key
+    from app.users import qr_data_uri, totp_new_secret, totp_uri
+
+    _confirm(user, body.password, request)
+    if user.totp_enabled:
+        raise HTTPException(409, "Two-step codes are already on")
+    secret = totp_new_secret()
+    user.totp_secret_enc = encrypt_key(get_settings(), secret)
+    user.totp_last_step = None
+    await session.commit()
+    uri = totp_uri(secret, user.email)
+    return {"secret": secret, "uri": uri, "qr": qr_data_uri(uri)}
+
+
+class CodeIn(BaseModel):
+    code: str
+
+
+@router.post("/2fa/enable")
+async def totp_enable(body: CodeIn, user: CurrentUser, request: Request, session: Session) -> dict[str, Any]:
+    from app.accounts import decrypt_key
+    from app.users import totp_check
+
+    if user.totp_enabled:
+        raise HTTPException(409, "Two-step codes are already on")
+    if not user.totp_secret_enc:
+        raise HTTPException(400, "Start the setup first")
+    step = totp_check(decrypt_key(get_settings(), user.totp_secret_enc), body.code, None)
+    if step is None:
+        raise HTTPException(401, "That code doesn't match: check the time on your phone and try the next code")
+    user.totp_enabled, user.totp_last_step = True, step
+    await audit(session, f"user:{user.id}", "2fa_enabled", ip=ip_of(request))
+    await session.commit()
+    await tell_admin(f"🛡 {user.email} turned on two-step codes.")
+    return {"ok": True}
+
+
+class DisableIn(BaseModel):
+    password: str
+    code: str
+
+
+@router.post("/2fa/disable")
+async def totp_disable(body: DisableIn, user: CurrentUser, request: Request, session: Session) -> dict[str, Any]:
+    from app.users import lock_withdrawals
+
+    _confirm(user, body.password, request)
+    _check_code(user, body.code, request)
+    user.totp_enabled, user.totp_secret_enc, user.totp_last_step = False, None, None
+    lock_withdrawals(user)
+    await audit(session, f"user:{user.id}", "2fa_disabled", ip=ip_of(request))
+    await session.commit()
+    await tell_admin(f"⚠️ {user.email} turned OFF two-step codes (IP {ip_of(request)}). Withdrawals locked "
+                     f"for {get_settings().withdraw_lock_hours} h.")
+    return {"ok": True}

@@ -137,6 +137,12 @@ class Settings(BaseSettings):
     users_enabled: bool = True
     users_registration_open: bool = True          # new sign-ups (they still wait for the operator's approval)
     user_session_days: int = 14
+    site_url: str = "https://scanner.da3m.io"     # for links in reset messages
+    # Password-reset email through Resend (https://resend.com). Unset = the link goes to the operator on Telegram
+    resend_api_key: str | None = None
+    email_from: str = "Alpha Scanner <no-reply@da3m.io>"
+    password_reset_minutes: int = 60
+    withdraw_lock_hours: int = 24                 # after a password reset or a 2FA reset/removal
     auth_cookie_secure: bool = True               # HTTPS only; set false for local http development
     # Defaults for a newly approved user's account
     user_default_size_usd: float = 10.0

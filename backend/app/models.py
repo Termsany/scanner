@@ -509,6 +509,12 @@ class User(Base):
     status: Mapped[str] = mapped_column(String(12), default="pending")    # pending | active | blocked
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Two-step codes (authenticator app). Secret encrypted with LIVE_KEY_ENCRYPTION_KEY; set up = enabled False
+    totp_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totp_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    totp_last_step: Mapped[int | None] = mapped_column(Integer, nullable=True)   # a code works only once
+    # Withdrawals wait after a password reset or a 2FA reset/removal (time to notice a takeover)
+    withdraw_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserSession(Base):
@@ -535,3 +541,16 @@ class AuditLog(Base):
     target: Mapped[str] = mapped_column(String(80), default="")
     details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     ip: Mapped[str] = mapped_column(String(64), default="")
+
+
+class PasswordReset(Base):
+    """One-time password reset link; only the SHA-256 of the token is stored."""
+
+    __tablename__ = "password_resets"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    created_by: Mapped[str] = mapped_column(String(20), default="user")   # user | admin
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

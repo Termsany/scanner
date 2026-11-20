@@ -11,13 +11,14 @@ import {
   Plus,
   Power,
   Save,
+  ScrollText,
   Trash2,
   Users,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
-import type { AccountsList, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
+import type { AccountsList, AuditEntry, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live page
 
@@ -522,6 +523,7 @@ function SecretOnce({ name, pubkey, secret, onClose }: {
 function UsersPanel({ password, onChange }: { password: string; onChange: () => void }) {
   const [users, setUsers] = useState<SiteUser[] | null>(null);
   const [err, setErr] = useState("");
+  const [link, setLink] = useState<{ email: string; link: string; minutes: number } | null>(null);
   const load = useCallback(async () => {
     try {
       setUsers((await api.users(password)).users);
@@ -556,6 +558,22 @@ function UsersPanel({ password, onChange }: { password: string; onChange: () => 
         )}
         {err && <span className="ml-auto text-xs text-bear">{err}</span>}
       </header>
+      {link && (
+        <div className="border-b border-line px-4 py-3 text-xs">
+          <p className="mb-1 text-muted">
+            Reset link for <b className="text-ink">{link.email}</b> (one use, {link.minutes} min). Send it to them
+            privately, only after you are sure it is really them:
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="num break-all text-ink">{link.link}</code>
+            <button type="button" className="inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 hover:bg-raised"
+              onClick={() => navigator.clipboard.writeText(link.link).catch(() => undefined)}>
+              <Copy className="size-3" /> copy
+            </button>
+            <button type="button" className="text-muted hover:text-ink" onClick={() => setLink(null)}>close</button>
+          </div>
+        </div>
+      )}
       {users.length === 0 ? (
         <p className="px-4 py-4 text-xs text-faint">Nobody has signed up yet. The sign-up page is /login.</p>
       ) : (
@@ -567,6 +585,7 @@ function UsersPanel({ password, onChange }: { password: string; onChange: () => 
                 <th className="px-4 py-2 text-left">Name</th>
                 <th className="px-4 py-2 text-left">Status</th>
                 <th className="px-4 py-2 text-left">Account</th>
+                <th className="px-4 py-2 text-left">2-step</th>
                 <th className="px-4 py-2 text-left">Signed up</th>
                 <th />
               </tr>
@@ -580,9 +599,31 @@ function UsersPanel({ password, onChange }: { password: string; onChange: () => 
                     {u.status}
                   </td>
                   <td className="num px-4 py-2 text-xs">{u.account ?? "—"}</td>
+                  <td className="px-4 py-2 text-xs">
+                    <span className={u.totp_enabled ? "text-bull" : "text-faint"}>{u.totp_enabled ? "on" : "off"}</span>
+                    {u.withdraw_locked_until && new Date(u.withdraw_locked_until) > new Date() && (
+                      <span className="ml-1 text-warn" title={`Withdrawals locked until ${new Date(u.withdraw_locked_until).toLocaleString()}`}>· locked</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2 text-xs text-muted">{u.created_at ? new Date(u.created_at).toLocaleDateString() : ""}</td>
                   <td className="px-4 py-2 text-right">
-                    <span className="inline-flex gap-1.5">
+                    <span className="inline-flex flex-wrap justify-end gap-1.5">
+                      <button type="button" className="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-raised"
+                        title="A one-time link to choose a new password; send it to the user yourself"
+                        onClick={() => act(async () => {
+                          const r = await api.resetLink(password, u.id);
+                          setLink({ email: u.email, link: r.link, minutes: r.minutes });
+                        })}>
+                        Reset link
+                      </button>
+                      {u.totp_enabled && (
+                        <button type="button" className="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-raised"
+                          title="User lost their phone: turn two-step codes off; withdrawals wait 24 h"
+                          onClick={() => confirm(`Turn off two-step codes for ${u.email}? Only if you are sure it is them. Withdrawals will wait 24 h.`) &&
+                            act(() => api.reset2fa(password, u.id))}>
+                          Reset 2-step
+                        </button>
+                      )}
                       {u.status === "pending" && (
                         <button type="button" className="rounded-md bg-accent px-2.5 py-1 text-xs font-semibold text-carbon"
                           title="Gives a new wallet copying the same smart wallets as main; edit it below afterwards"
@@ -610,6 +651,102 @@ function UsersPanel({ password, onChange }: { password: string; onChange: () => 
             </tbody>
           </table>
         </div>
+      )}
+    </section>
+  );
+}
+
+const ACTION_WORDS: Record<string, string> = {
+  register: "signed up", login: "signed in", login_failed: "wrong password", user_approved: "approved",
+  user_blocked: "blocked", user_unblocked: "unblocked", settings: "changed settings", key_revealed: "viewed key",
+  withdraw: "withdrew", withdraw_start: "withdrawal started", withdraw_failed: "withdrawal failed",
+  sell: "sold from page", password_changed: "changed password", password_reset: "reset password",
+  reset_requested: "asked for reset", reset_link: "reset link made", "2fa_enabled": "2-step on",
+  "2fa_disabled": "2-step off", "2fa_reset": "2-step reset", account_edit: "edited account",
+};
+const LOUD = new Set(["withdraw", "withdraw_failed", "key_revealed", "2fa_disabled", "2fa_reset", "password_reset",
+  "user_blocked", "login_failed"]);
+
+function details(e: AuditEntry): string {
+  const d = e.details ?? {};
+  if (e.action === "withdraw" || e.action === "withdraw_start" || e.action === "withdraw_failed")
+    return `${String(d.sol ?? "")} SOL → ${String(d.to ?? "").slice(0, 6)}…${d.error ? ` · ${String(d.error).slice(0, 80)}` : ""}`;
+  if (e.action === "settings" && d.after) {
+    const a = d.after as Record<string, unknown>;
+    return `entry $${a.size_usd} · budget $${a.max_open_usd} · loss $${a.max_daily_loss_usd}${a.paused ? " · paused" : ""}`;
+  }
+  if (e.action === "sell") return `${Number(d.share ?? 0) * 100}% of position #${d.position}`;
+  if (e.action === "account_edit") return Object.keys(d).join(", ");
+  if (e.action === "user_approved") return `account ${String(d.account ?? "")}`;
+  return "";
+}
+
+function ActivityPanel({ password }: { password: string }) {
+  const [q, setQ] = useState("");
+  const [rows, setRows] = useState<AuditEntry[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const load = useCallback(async (query: string) => {
+    try {
+      setRows((await api.audit(password, query)).entries);
+    } catch {
+      setRows([]);
+    }
+  }, [password]);
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => load(q), 300);
+    return () => clearTimeout(t);
+  }, [q, open, load]);
+
+  return (
+    <section className="card">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+        <ScrollText className="size-4 text-accent" />
+        <h2 className="text-sm font-semibold">Activity log</h2>
+        <span className="text-xs text-faint">sign-ins, approvals, settings, keys, withdrawals</span>
+        <button type="button" className="ml-auto rounded-md border border-line px-2.5 py-1 text-xs hover:bg-raised"
+          onClick={() => setOpen(!open)}>
+          {open ? "Hide" : "Show"}
+        </button>
+      </header>
+      {open && (
+        <>
+          <div className="border-b border-line px-4 py-2">
+            <input className={input} placeholder="Search: email, user:12, withdraw, an IP…" value={q}
+              onChange={(e) => setQ(e.target.value)} />
+          </div>
+          <div className="max-h-[480px] overflow-auto">
+            <table className="w-full min-w-[720px] text-xs">
+              <thead className="sticky top-0 bg-[var(--color-surface,#11131a)] text-[11px] text-muted uppercase">
+                <tr className="border-b border-line">
+                  <th className="px-4 py-2 text-left">When</th>
+                  <th className="px-4 py-2 text-left">Who</th>
+                  <th className="px-4 py-2 text-left">What</th>
+                  <th className="px-4 py-2 text-left">On</th>
+                  <th className="px-4 py-2 text-left">Details</th>
+                  <th className="px-4 py-2 text-left">IP</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(rows ?? []).map((e, i) => (
+                  <tr key={i} className="border-b border-line/50 last:border-0">
+                    <td className="num px-4 py-1.5 whitespace-nowrap text-muted">{e.at ? new Date(e.at).toLocaleString() : ""}</td>
+                    <td className="num px-4 py-1.5">{e.actor}</td>
+                    <td className={`px-4 py-1.5 font-medium ${LOUD.has(e.action) ? "text-warn" : ""}`}>
+                      {ACTION_WORDS[e.action] ?? e.action}
+                    </td>
+                    <td className="px-4 py-1.5">{e.target}</td>
+                    <td className="num px-4 py-1.5 text-muted">{details(e)}</td>
+                    <td className="num px-4 py-1.5 text-faint">{e.ip}</td>
+                  </tr>
+                ))}
+                {rows && rows.length === 0 && (
+                  <tr><td colSpan={6} className="px-4 py-4 text-faint">Nothing yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </section>
   );
@@ -703,6 +840,7 @@ export function AccountsView() {
       <div className="flex flex-col gap-4">
         {secret && <SecretOnce {...secret} onClose={() => setSecret(null)} />}
         {data && <UsersPanel password={password} onChange={() => load(password)} />}
+        {data && <ActivityPanel password={password} />}
         {data?.accounts.map((a) => (
           <AccountCard key={a.name} a={a} password={password} defaultHold={hold} onSaved={replace}
             owner={a.user_id != null ? (owners[a.user_id] ?? `#${a.user_id}`) : undefined} />

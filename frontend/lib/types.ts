@@ -546,7 +546,17 @@ export interface MyAccount {
 
 export interface Me {
   user: { email: string; name: string; status: "pending" | "active" | "blocked" };
+  security: { totp_enabled: boolean; withdraw_lock_hours: number };
   account: MyAccount | null;
+}
+
+export interface AuditEntry {
+  at: string | null;
+  actor: string;
+  action: string;
+  target: string;
+  details: Record<string, unknown> | null;
+  ip: string;
 }
 
 export interface SiteUser {
@@ -557,4 +567,6 @@ export interface SiteUser {
   account: string | null;
   created_at: string | null;
   last_login_at: string | null;
+  totp_enabled: boolean;
+  withdraw_locked_until: string | null;
 }

@@ -394,6 +394,8 @@ async def list_users(session: Session, _: Auth) -> dict[str, Any]:
         select(TradingAccount).where(TradingAccount.user_id.is_not(None)))).scalars().all()}
     return {"users": [{
         "id": u.id, "email": u.email, "name": u.name, "status": u.status, "account": accts.get(u.id),
+        "totp_enabled": bool(u.totp_enabled),
+        "withdraw_locked_until": u.withdraw_locked_until.isoformat() if u.withdraw_locked_until else None,
         "created_at": u.created_at.isoformat() if u.created_at else None,
         "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
     } for u in users]}
@@ -486,13 +488,48 @@ async def block_user(user_id: int, body: BlockIn, request: Request, session: Ses
     return {"user_id": user.id, "status": user.status}
 
 
+@router.post("/users/{user_id}/reset-link")
+async def admin_reset_link(user_id: int, request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    """A one-time password reset link for a user who lost their password (send it to them yourself)."""
+    from app.models import User
+    from app.users import audit, new_reset_link
+
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "No such user")
+    link = await new_reset_link(session, user, by="admin")
+    await audit(session, "admin", "reset_link", user.email, ip=_ip(request))
+    await session.commit()
+    return {"link": link, "minutes": get_settings().password_reset_minutes}
+
+
+@router.post("/users/{user_id}/reset-2fa")
+async def admin_reset_2fa(user_id: int, request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    """User lost their phone: turn their two-step codes off. Withdrawals wait LIVE withdraw_lock_hours."""
+    from app.models import User
+    from app.users import audit, lock_withdrawals
+
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "No such user")
+    user.totp_enabled, user.totp_secret_enc, user.totp_last_step = False, None, None
+    lock_withdrawals(user)
+    await audit(session, "admin", "2fa_reset", user.email, ip=_ip(request))
+    await session.commit()
+    return {"ok": True, "withdraw_lock_hours": get_settings().withdraw_lock_hours}
+
+
 @router.get("/audit")
-async def audit_log(session: Session, _: Auth, limit: int = 100) -> dict[str, Any]:
-    from sqlalchemy import select
+async def audit_log(session: Session, _: Auth, limit: int = 100, q: str = "") -> dict[str, Any]:
+    from sqlalchemy import or_, select
 
     from app.models import AuditLog
 
-    rows = (await session.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(min(limit, 500))
-                                  )).scalars().all()
+    stmt = select(AuditLog).order_by(AuditLog.id.desc()).limit(min(max(limit, 1), 500))
+    if q.strip():
+        like = f"%{q.strip()[:60]}%"
+        stmt = stmt.where(or_(AuditLog.actor.ilike(like), AuditLog.action.ilike(like),
+                              AuditLog.target.ilike(like), AuditLog.ip.ilike(like)))
+    rows = (await session.execute(stmt)).scalars().all()
     return {"entries": [{"at": r.at.isoformat() if r.at else None, "actor": r.actor, "action": r.action,
                          "target": r.target, "details": r.details, "ip": r.ip} for r in rows]}

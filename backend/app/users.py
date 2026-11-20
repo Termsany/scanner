@@ -155,3 +155,87 @@ async def audit(session: AsyncSession, actor: str, action: str, target: str = ""
 
 async def user_by_email(session: AsyncSession, email: str) -> User | None:
     return (await session.execute(select(User).where(User.email == email))).scalars().first()
+
+
+# ---- two-step codes (RFC 6238 TOTP, 30 s, 6 digits) -----------------------------------
+def totp_new_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def _totp(secret: str, step: int) -> str:
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    digest = hmac.new(key, step.to_bytes(8, "big"), hashlib.sha1).digest()
+    o = digest[-1] & 0x0F
+    return f"{(int.from_bytes(digest[o:o + 4], 'big') & 0x7FFFFFFF) % 1_000_000:06d}"
+
+
+def totp_check(secret: str, code: str, last_step: int | None, now: float | None = None) -> int | None:
+    """The time step the code belongs to (one step of clock drift either way), or None. A step at or before
+    `last_step` is refused, so each code works once."""
+    code = re.sub(r"\s", "", code or "")
+    if not re.fullmatch(r"\d{6}", code):
+        return None
+    t = int((now if now is not None else time.time()) // 30)
+    for step in (t - 1, t, t + 1):
+        if (last_step is None or step > last_step) and hmac.compare_digest(_totp(secret, step), code):
+            return step
+    return None
+
+
+def totp_uri(secret: str, email: str) -> str:
+    from urllib.parse import quote
+
+    return f"otpauth://totp/Alpha%20Scanner:{quote(email)}?secret={secret}&issuer=Alpha%20Scanner&digits=6&period=30"
+
+
+def qr_data_uri(text: str) -> str:
+    import segno
+
+    return segno.make(text, error="m").svg_data_uri(scale=5, border=2, dark="#000000", light="#ffffff")
+
+
+# ---- password reset ---------------------------------------------------------------------
+async def new_reset_link(session: AsyncSession, user: User, by: str = "user") -> str:
+    from app.models import PasswordReset
+
+    s = get_settings()
+    token = secrets.token_urlsafe(32)
+    session.add(PasswordReset(token_hash=_token_hash(token), user_id=user.id, created_by=by,
+                              expires_at=_now() + timedelta(minutes=s.password_reset_minutes)))
+    return f"{s.site_url.rstrip('/')}/reset?token={token}"
+
+
+async def use_reset_token(session: AsyncSession, token: str) -> User | None:
+    from app.models import PasswordReset
+
+    row = await session.get(PasswordReset, _token_hash(token or ""))
+    if row is None or row.used_at is not None or _as_utc(row.expires_at) < _now():
+        return None
+    row.used_at = _now()
+    return await session.get(User, row.user_id)
+
+
+async def send_email(to: str, subject: str, html: str) -> bool:
+    import httpx
+
+    s = get_settings()
+    if not s.resend_api_key:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {s.resend_api_key}"},
+                             json={"from": s.email_from, "to": [to], "subject": subject, "html": html})
+        return r.status_code < 300
+    except Exception:
+        return False
+
+
+def lock_withdrawals(user: User) -> None:
+    user.withdraw_locked_until = _now() + timedelta(hours=get_settings().withdraw_lock_hours)
+
+
+def withdraw_lock_left(user: User) -> float:
+    """Hours until withdrawals open again (0 = open)."""
+    if not user.withdraw_locked_until:
+        return 0.0
+    return max((_as_utc(user.withdraw_locked_until) - _now()).total_seconds() / 3600, 0.0)
