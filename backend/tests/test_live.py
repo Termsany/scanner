@@ -1127,3 +1127,15 @@ def test_no_user_chat_no_user_notes():
         sess.add(_trade(mint="T")); await sess.commit(); await eng.step(sess)
     _db(body)
     assert sent == []
+
+
+def test_engine_writes_a_heartbeat_for_the_watchdog():
+    from app.live import HEARTBEAT, _get, _key
+
+    async def body(sess):
+        eng = CopyEngine(FakeExec(), _s())
+        await eng.step(sess)
+        await eng.step(sess)
+        return await _get(sess, _key(HEARTBEAT, "main"))
+    beat = _db(body)
+    assert beat and beat.startswith("20")

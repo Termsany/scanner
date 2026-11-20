@@ -41,6 +41,7 @@ MAX_SELL_ATTEMPTS = 8
 CURSOR = "live:wallet_trades"
 PAUSED = "live:paused"
 PUBKEY = "live:pubkey"
+HEARTBEAT = "live:heartbeat"     # + ":<account>": ISO time of the last engine step (see deploy/monitor)
 
 
 class SwapError(Exception):
@@ -606,6 +607,7 @@ class CopyEngine:
         self._short_seen: dict[str, int] = {}   # mint -> reconciles in a row where the wallet held less
         self._priced = 0.0                  # monotonic time of the last take-capital price check
         self._said: dict[str, float] = {}    # repeating skip notices -> last time sent
+        self._beat = 0.0                     # monotonic time of the last heartbeat written
         self._up_seen: dict[int, int] = {}  # position id -> checks in a row at or above the target
 
     def update(self, account: Account) -> None:
@@ -667,6 +669,10 @@ class CopyEngine:
             await _put(session, self.cursor, str(max_id))
             await session.commit()
         await self._housekeeping(session)
+        if time.monotonic() - self._beat > 60:          # the host watchdog alerts when this goes stale
+            self._beat = time.monotonic()
+            await _put(session, _key(HEARTBEAT, self.a.name), _now().isoformat())
+            await session.commit()
 
     # ---- buys --------------------------------------------------------------
     async def _skip_reason(self, session: AsyncSession, t: WalletTrade) -> str | None:
