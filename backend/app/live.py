@@ -273,6 +273,12 @@ class JupiterExecutor:
                 await asyncio.sleep(1.5 * (attempt + 1))
         raise SwapError("unreachable")
 
+    async def token_prices(self, mints: list[str]) -> dict[str, dict[str, float]]:
+        """{mint: {"usd", "decimals"}} from DexScreener (Jupiter only once per mint, for decimals)."""
+        from app.api.live import jupiter_prices
+
+        return await jupiter_prices(self.http, mints)
+
     async def wallet_sales(self, mints: set[str], since: datetime) -> dict[str, list[dict[str, Any]]]:
         """Every confirmed transaction of this wallet since `since` that lowered its balance of one of `mints`.
 
@@ -544,6 +550,8 @@ class CopyEngine:
         self.cursor = _key(CURSOR, self.a.name)
         self._reconciled = 0.0              # monotonic time of the last wallet reconcile
         self._short_seen: dict[str, int] = {}   # mint -> reconciles in a row where the wallet held less
+        self._priced = 0.0                  # monotonic time of the last take-capital price check
+        self._up_seen: dict[int, int] = {}  # position id -> checks in a row at or above the target
 
     def _tag(self) -> str:
         tag = "🟢 LIVE" if self.x.mode == "live" else "🧪 DRY-RUN"
@@ -837,9 +845,49 @@ class CopyEngine:
             await self.notify(f"{self._tag()} 🧾 Found sales you made by hand in the wallet, P&L updated:\n"
                               + "\n".join(lines))
 
+    async def _take_capital(self, session: AsyncSession) -> None:
+        """Position up LIVE_TAKE_CAPITAL_AT_PCT (value now + already sold vs cost): sell tokens worth what is still
+        missing to get the cost back, once per position. The rest keeps following the leader's sells."""
+        target = self.s.live_take_capital_at_pct
+        if target is None or not hasattr(self.x, "token_prices"):
+            return
+        if time.monotonic() - self._priced < self.s.live_take_capital_check_seconds:
+            return
+        self._priced = time.monotonic()
+        opened = (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine()))).scalars().all()
+        todo = [p for p in opened
+                if not any(f.get("reason") == "take_capital" for f in (p.fills or []))
+                and (p.proceeds_usd or 0) < p.cost_usd and int(p.tokens_raw) > 0 and not p.manual_sell_frac]
+        self._up_seen = {k: v for k, v in self._up_seen.items() if k in {p.id for p in todo}}
+        if not todo:
+            return
+        try:
+            prices = await self.x.token_prices(sorted({p.token_address for p in todo}))
+        except Exception as exc:
+            log.warning("live: take-capital prices failed: %s", exc)
+            return
+        for p in todo:
+            px = (prices or {}).get(p.token_address)
+            if not px or not px.get("usd"):
+                continue
+            value = int(p.tokens_raw) / 10 ** int(px["decimals"]) * float(px["usd"])
+            if value <= 0 or (value + (p.proceeds_usd or 0)) < p.cost_usd * (1 + target / 100):
+                self._up_seen.pop(p.id, None)
+                continue
+            self._up_seen[p.id] = self._up_seen.get(p.id, 0) + 1
+            if self._up_seen[p.id] < 2:          # two checks in a row: one odd price never sells
+                continue
+            self._up_seen.pop(p.id, None)
+            share = min((p.cost_usd - (p.proceeds_usd or 0)) / value, 1.0)
+            share = min(share, 0.98)             # always keep a profit bag (>= 0.99 would sell everything)
+            await self._sell(session, p, share, "take_capital")
+            await session.commit()
+
     async def _housekeeping(self, session: AsyncSession) -> None:
-        """Book hand sales; retry failed sells; sell everything after LIVE_MAX_HOLD_HOURS."""
+        """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         await self._reconcile(session)
+        await self._take_capital(session)
         opened = (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine()))).scalars().all()
         for pos in opened:

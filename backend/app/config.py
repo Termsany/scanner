@@ -116,6 +116,10 @@ class Settings(BaseSettings):
     # Compare open positions with the wallet's real token balance this often; tokens sold by hand (Phantom)
     # are found in the wallet's on-chain history and booked with what they really sold for
     live_reconcile_seconds: float = 120.0
+    # Once a position is up this much (100 = 2x), sell just enough to get its cost back; the rest (pure profit)
+    # stays until the leader sells. None = off
+    live_take_capital_at_pct: float | None = 100.0
+    live_take_capital_check_seconds: float = 5.0
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
     live_rpc_url: str | None = None              # defaults to SOLANA_RPC_URL
     jupiter_api_url: str = "https://lite-api.jup.ag"

@@ -835,3 +835,93 @@ def test_tx_deltas_reads_sol_wsol_stables_and_tokens():
     d = _tx_deltas(tx, me)
     assert d["tokens"] == {"M1": -1000}
     assert abs(d["sol"] - 0.5) < 1e-9 and abs(d["usd"] - 2.5) < 1e-9
+
+
+# ---- take the capital out at +100% ------------------------------------------------
+
+
+class PricedExec(WalletExec):
+    """WalletExec with a live token price (USD per whole token, 6 decimals: 1_000_000 raw = 1 token)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.price = {}
+
+    async def token_prices(self, mints):
+        return {m: {"usd": self.price[m], "decimals": 6} for m in mints if m in self.price}
+
+
+def _run_priced(steps, x):
+    notes = []
+
+    async def note(text):
+        notes.append(text)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0), notify=note)
+        await eng.step(sess)
+        for batch in steps:
+            if callable(batch):
+                batch()
+            else:
+                sess.add_all(batch)
+                await sess.commit()
+            await eng.step(sess)
+        return (await sess.execute(select(LivePosition).order_by(LivePosition.id))).scalars().all()
+
+    return _db(body), x, notes
+
+
+def test_takes_capital_at_2x_then_rest_follows_leader():
+    x = PricedExec()
+    pos, x, notes = _run_priced([
+        [_trade()],                                    # $30 for 1_000_000 raw (1 token)
+        lambda: x.price.update(M1=40.0),               # +33%: nothing
+        lambda: x.price.update(M1=60.0),               # 2x, first check
+        [],                                            # 2x again: sell $30 worth = half
+        [], [],                                        # never twice
+        [_trade(side="sell", pct_sold=100, remaining=0)],   # leader exits: the profit bag goes too
+    ], x)
+    sells = [c for c in x.calls if c[0] == "sell"]
+    assert sells == [("sell", "M1", 500_000), ("sell", "M1", 500_000)]
+    p = pos[0]
+    assert p.status == "closed" and p.exit_reason == "leader_sold"
+    assert any(f.get("reason") == "take_capital" for f in p.fills)
+    assert abs(p.pnl_usd - 30.0) < 1e-6
+    assert any("take capital" in n for n in notes)
+
+
+def test_take_capital_needs_two_checks_in_a_row():
+    x = PricedExec()
+    pos, x, _ = _run_priced([
+        [_trade()],
+        lambda: x.price.update(M1=60.0),               # one spike...
+        lambda: x.price.update(M1=50.0),               # ...gone
+        [],
+    ], x)
+    assert [c for c in x.calls if c[0] == "sell"] == [] and pos[0].status == "open"
+
+
+def test_take_capital_sells_only_what_is_missing_after_a_leader_trim():
+    x = PricedExec()
+    pos, x, _ = _run_priced([
+        [_trade()],
+        [_trade(side="sell", pct_sold=50, remaining=1)],    # leader trims half: we get $30*... at 2x = $30
+        lambda: x.price.update(M1=200.0),
+        [],
+    ], x)
+    # the trim already returned $30 (500k at 2x in FakeExec): capital is back, nothing more to take
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 500_000)]
+
+
+def test_take_capital_off_when_disabled():
+    x = PricedExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_take_capital_at_pct=None, live_take_capital_check_seconds=0))
+        await eng.step(sess)
+        sess.add_all([_trade()]); await sess.commit(); await eng.step(sess)
+        x.price["M1"] = 100.0
+        await eng.step(sess); await eng.step(sess)
+    _db(body)
+    assert [c for c in x.calls if c[0] == "sell"] == []
