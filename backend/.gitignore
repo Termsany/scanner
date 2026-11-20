@@ -6,3 +6,6 @@ __pycache__/
 .env
 data/smart_wallets.json
 .pytest_cache/
+# backups of .env hold private keys
+.env.*
+!.env.example

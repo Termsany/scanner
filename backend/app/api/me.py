@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.models import LivePosition, TradingAccount, User
+from app.notify import tell_admin
 from app.users import (EMAIL_RE, COOKIE, CurrentUser, _DUMMY, audit, check_password, clear_cookie, cleared,
                        end_all_sessions, end_session, failed, hash_password, ip_of, new_session, password_problem,
                        set_cookie, too_many, user_by_email)
@@ -71,6 +72,7 @@ async def register(body: RegisterIn, request: Request, response: Response, sessi
     token = await new_session(session, user)
     await session.commit()
     set_cookie(response, token)
+    await tell_admin(f"👤 New sign-up waiting for approval: {email} (IP {ip}). Approve or block it on /accounts.")
     return {"ok": True, "status": user.status}
 
 
@@ -129,6 +131,7 @@ async def change_password(body: PasswordIn, user: CurrentUser, request: Request,
     token = await new_session(session, user)
     await audit(session, f"user:{user.id}", "password_changed", ip=ip_of(request))
     await session.commit()
+    await tell_admin(f"🔐 {user.email} changed their password (IP {ip_of(request)}).")
     set_cookie(response, token)
     return {"ok": True}
 
@@ -261,6 +264,7 @@ async def reveal_key(body: ConfirmIn, user: CurrentUser, request: Request, sessi
     a.key_revealed = True
     await audit(session, f"user:{user.id}", "key_revealed", a.name, ip=ip_of(request))
     await session.commit()
+    await tell_admin(f"🔑 {user.email} [{a.name}] viewed their wallet private key (IP {ip_of(request)}).")
     return {"secret": secret, "pubkey": a.pubkey}
 
 
@@ -343,10 +347,14 @@ async def withdraw(body: WithdrawIn, user: CurrentUser, request: Request, sessio
                 await audit(session, f"user:{user.id}", "withdraw_failed", a.name,
                             {"to": to, "sol": amount / LAMPORTS, "error": str(exc)[:200]}, ip_of(request))
                 await session.commit()
+                await tell_admin(f"⚠️ Withdrawal by {user.email} [{a.name}] failed: {amount / LAMPORTS:.4f} SOL "
+                                 f"to {to}\n{str(exc)[:160]}")
                 raise HTTPException(502, f"Withdrawal failed: {str(exc)[:160]}") from None
             await audit(session, f"user:{user.id}", "withdraw", a.name,
                         {"to": to, "sol": amount / LAMPORTS, "sig": sig}, ip_of(request))
             await session.commit()
+            await tell_admin(f"💸 {user.email} [{a.name}] withdrew {amount / LAMPORTS:.4f} SOL to {to} "
+                             f"(IP {ip_of(request)})\nhttps://solscan.io/tx/{sig}")
             return {"ok": True, "sol": amount / LAMPORTS, "signature": sig}
         finally:
             await x.close()
