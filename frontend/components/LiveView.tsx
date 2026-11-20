@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { AppNav } from "@/components/AppNav";
 import { api, ApiError } from "@/lib/api";
 import { ago, pct, price } from "@/lib/format";
 import type {
@@ -404,26 +405,10 @@ export function LiveView() {
     data?.mode === "live" ? "LIVE" : data?.mode === "dry" ? "DRY-RUN" : "OFF";
 
   return (
+    <>
+    <AppNav />
     <main className="mx-auto max-w-[1400px] px-4 pt-5 pb-12 sm:px-6">
       <header className="flex flex-wrap items-center gap-3">
-        <a
-          href="/"
-          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink"
-        >
-          <ArrowLeft className="size-3.5" /> Scanner
-        </a>
-        <a
-          href="/accounts"
-          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink"
-        >
-          Accounts
-        </a>
-        <a
-          href="/admin"
-          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink"
-        >
-          Overview
-        </a>
         <Wallet className="size-5 text-accent" />
         <h1 className="text-lg font-semibold tracking-tight">
           Live copy trading
@@ -530,6 +515,7 @@ export function LiveView() {
         </>
       )}
     </main>
+    </>
   );
 }
 

@@ -3,6 +3,7 @@
 import { ArrowLeft, BarChart3, Info } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { AppNav } from "@/components/AppNav";
 import { api } from "@/lib/api";
 import { ago, pct, pctClass, price } from "@/lib/format";
 import type { Performance, PerfStats } from "@/lib/types";
@@ -92,11 +93,10 @@ export function PerformanceView() {
   const o = data?.overall;
 
   return (
+    <>
+    <AppNav kind="public" />
     <main className="mx-auto max-w-[1400px] px-4 pt-5 pb-12 sm:px-6">
       <header className="flex flex-wrap items-center gap-3">
-        <a href="/" className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink">
-          <ArrowLeft className="size-3.5" /> Scanner
-        </a>
         <BarChart3 className="size-5 text-accent" />
         <h1 className="text-lg font-semibold tracking-tight">Signal performance</h1>
         <div role="radiogroup" aria-label="Window" className="ml-auto flex rounded-lg border border-line bg-carbon/60 p-0.5">
@@ -212,5 +212,6 @@ export function PerformanceView() {
         </>
       )}
     </main>
+    </>
   );
 }

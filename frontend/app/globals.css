@@ -1,28 +1,35 @@
 @import "tailwindcss";
 
 @theme {
-  --color-carbon: #0a0e17;
-  --color-surface: #111827;
-  --color-surface-2: #161f30;
-  --color-raised: #1b2538;
-  --color-line: rgb(255 255 255 / 0.08);
-  --color-line-strong: rgb(255 255 255 / 0.14);
-  --color-ink: #e6e9ef;
-  --color-muted: #8b93a7;
-  --color-faint: #5b6478;
-  --color-bull: #10b981;
-  --color-bull-soft: rgb(16 185 129 / 0.12);
-  --color-warn: #f59e0b;
-  --color-warn-soft: rgb(245 158 11 / 0.12);
-  --color-bear: #ef4444;
-  --color-bear-soft: rgb(239 68 68 / 0.12);
-  --color-accent: #6366f1;
-  --color-accent-soft: rgb(99 102 241 / 0.14);
-  --color-cyan: #38bdf8;
-  --color-glass: rgb(17 24 39 / 0.85);
+  /* Sirb (سرب) identity: night sky, mint flock, gold leader. Figma: "Sirb سرب — Brand & Product UI" */
+  --color-carbon: #070a12;          /* night */
+  --color-surface: #0e1420;
+  --color-surface-2: #131b2a;
+  --color-raised: #1a2436;
+  --color-line: rgb(255 255 255 / 0.07);
+  --color-line-strong: rgb(255 255 255 / 0.13);
+  --color-ink: #eaf0f7;
+  --color-muted: #8a96ab;
+  --color-faint: #586377;
+  --color-mint: #2be4a7;            /* the flock, gains, primary actions */
+  --color-mint-soft: rgb(43 228 167 / 0.13);
+  --color-gold: #f6b73c;            /* the leader only */
+  --color-gold-soft: rgb(246 183 60 / 0.14);
+  --color-sky: #4fb3ff;
+  --color-bull: #2be4a7;
+  --color-bull-soft: rgb(43 228 167 / 0.13);
+  --color-warn: #f6b73c;
+  --color-warn-soft: rgb(246 183 60 / 0.14);
+  --color-bear: #ff5c6c;
+  --color-bear-soft: rgb(255 92 108 / 0.13);
+  --color-accent: #2be4a7;
+  --color-accent-soft: rgb(43 228 167 / 0.13);
+  --color-cyan: #4fb3ff;
+  --color-glass: rgb(7 10 18 / 0.78);
 
-  --font-sans: var(--font-inter), var(--font-plex-arabic), ui-sans-serif, system-ui, sans-serif;
-  --font-arabic: var(--font-plex-arabic), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter), var(--font-readex), ui-sans-serif, system-ui, sans-serif;
+  --font-arabic: var(--font-readex), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-readex), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-jetbrains), ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   --animate-pulse-ring: pulse-ring 1.8s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
@@ -30,13 +37,19 @@
   --animate-slide-in: slide-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
   --animate-fade-in: fade-in 0.2s ease-out both;
   --animate-toast-in: toast-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  --animate-rise: rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+
+  @keyframes rise {
+    from { transform: translateY(14px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
 
   @keyframes pulse-ring {
     0% { transform: scale(0.6); opacity: 0.9; }
     100% { transform: scale(2.4); opacity: 0; }
   }
   @keyframes flash {
-    0% { background-color: rgb(16 185 129 / 0.22); }
+    0% { background-color: rgb(43 228 167 / 0.22); }
     100% { background-color: transparent; }
   }
   @keyframes slide-in {
@@ -66,12 +79,17 @@
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     background-image:
-      radial-gradient(1200px 600px at 85% -10%, rgb(16 185 129 / 0.06), transparent 60%),
-      radial-gradient(900px 500px at -10% 10%, rgb(99 102 241 / 0.06), transparent 60%);
+      radial-gradient(1100px 560px at 85% -12%, rgb(43 228 167 / 0.07), transparent 60%),
+      radial-gradient(900px 520px at -10% 8%, rgb(79 179 255 / 0.05), transparent 60%);
     background-attachment: fixed;
   }
   ::selection {
-    background: rgb(16 185 129 / 0.3);
+    background: rgb(43 228 167 / 0.3);
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
   }
   * {
     scrollbar-width: thin;
@@ -92,7 +110,35 @@
 @utility card {
   background: var(--color-surface);
   border: 1px solid var(--color-line);
-  border-radius: 0.875rem;
+  border-radius: 1rem;
+}
+
+@utility font-display {
+  font-family: var(--font-display);
+}
+
+/* the flock in the logo and hero: each bird bobs a little, out of step with the others */
+@keyframes sirb-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.6px); }
+}
+.sirb-bird {
+  animation: sirb-bob 2.8s ease-in-out infinite;
+  transform-box: fill-box;
+}
+@keyframes sirb-drift {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(6px, -8px); }
+}
+.sirb-drift {
+  animation: sirb-drift 7s ease-in-out infinite;
+  transform-box: fill-box;
+}
+@keyframes sirb-dash {
+  to { stroke-dashoffset: -140; }
+}
+.sirb-trail {
+  animation: sirb-dash 6s linear infinite;
 }
 
 @utility skeleton {
@@ -125,11 +171,11 @@
 }
 
 @keyframes flash-up {
-  0% { background-color: rgb(16 185 129 / 0.22); }
+  0% { background-color: rgb(43 228 167 / 0.22); }
   100% { background-color: transparent; }
 }
 @keyframes flash-down {
-  0% { background-color: rgb(239 68 68 / 0.2); }
+  0% { background-color: rgb(255 92 108 / 0.2); }
   100% { background-color: transparent; }
 }
 @utility flash-up {

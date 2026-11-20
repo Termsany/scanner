@@ -18,8 +18,8 @@ import { price } from "@/lib/format";
 import type { Chain, ChartData, ChartInterval } from "@/lib/types";
 
 const INTERVALS: ChartInterval[] = ["1m", "5m", "15m", "1h", "4h", "1d"];
-const BULL = "#10b981";
-const BEAR = "#ef4444";
+const BULL = "#2be4a7";
+const BEAR = "#ff5c6c";
 
 export function PriceChart({ chain, address }: { chain: Chain; address: string }) {
   const el = useRef<HTMLDivElement>(null);

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { AppNav } from "@/components/AppNav";
 import { api, ApiError } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
 import type { AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount } from "@/lib/types";
@@ -685,10 +686,10 @@ export function AdminView() {
   }) ?? [];
 
   return (
+    <>
+    <AppNav />
     <main className="mx-auto max-w-[1400px] px-4 pt-5 pb-12 sm:px-6">
       <header className="mb-5 flex flex-wrap items-center gap-3">
-        <a href="/live" className={navBtn}><ArrowLeft className="size-3.5" /> Live</a>
-        <a href="/accounts" className={navBtn}>Accounts</a>
         <LayoutDashboard className="size-5 text-accent" />
         <h1 className="text-lg font-semibold tracking-tight">Admin overview</h1>
         {data && (
@@ -783,5 +784,6 @@ export function AdminView() {
         </div>
       )}
     </main>
+    </>
   );
 }

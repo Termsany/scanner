@@ -1,7 +1,7 @@
 import { scoreTone } from "@/lib/format";
 
 const TONE = {
-  bull: { stroke: "var(--color-bull)", text: "text-bull", glow: "drop-shadow(0 0 6px rgb(16 185 129 / 0.45))" },
+  bull: { stroke: "var(--color-bull)", text: "text-bull", glow: "drop-shadow(0 0 6px rgb(43 228 167 / 0.45))" },
   warn: { stroke: "var(--color-warn)", text: "text-warn", glow: "drop-shadow(0 0 6px rgb(245 158 11 / 0.35))" },
   bear: { stroke: "var(--color-bear)", text: "text-bear", glow: "none" },
 };

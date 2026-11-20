@@ -1,4 +1,4 @@
-import { Activity, BarChart3, FlaskConical, HeartPulse, Radar, ScanSearch, ShieldCheck, Timer, Trophy, Wifi, WifiOff, Zap } from "lucide-react";
+import { Activity, BarChart3, FlaskConical, HeartPulse, Radar, ShieldCheck, Timer, Trophy, Wifi, WifiOff, Zap } from "lucide-react";
 
 import { ago, pct } from "@/lib/format";
 import type { SocketState } from "@/lib/useLiveSignals";
@@ -10,17 +10,9 @@ export function TelemetryBar({ status, socket, now }: { status: ScannerStatus | 
   const state = status === null ? "Connecting" : live ? "Running" : "Stalled";
   const cov = status?.security_coverage_pct;
   return (
-    <header className="glass sticky top-0 z-30">
+    <header className="border-b border-line bg-surface/40">
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5 sm:px-6">
-        <div className="flex items-center gap-2.5">
-          <div className="grid size-8 place-items-center rounded-lg border border-bull/30 bg-bull-soft">
-            <ScanSearch className="size-4 text-bull" />
-          </div>
-          <div className="leading-tight">
-            <h1 className="text-[14px] font-semibold tracking-tight">سرب <span className="text-muted">Sirb</span></h1>
-            <p className="text-[10.5px] text-faint">SOL · ETH · BASE · BSC</p>
-          </div>
-        </div>
+        <span className="text-[11px] font-medium tracking-[0.12em] text-faint uppercase">SOL · ETH · BASE · BSC</span>
 
         <div className="flex items-center gap-2 text-xs" title="Scanner state">
           <span className="relative inline-flex size-2.5">

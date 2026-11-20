@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { SirbLockup } from "@/components/brand/Logo";
 import { api, ApiError } from "@/lib/api";
 import { I18nProvider, LangSwitch, useT } from "@/lib/i18n";
 import type { Me, MyAccount, MyBilling, MyPosition, MyStats } from "@/lib/types";
@@ -692,8 +693,9 @@ function Page() {
 
   return (
     <main className="mx-auto max-w-[1100px] px-4 pt-5 pb-12 sm:px-6">
-      <header className="mb-5 flex flex-wrap items-center gap-3">
-        <Wallet className="size-5 text-accent" />
+      <header className="mb-6 flex flex-wrap items-center gap-3 border-b border-line pb-4">
+        <SirbLockup size={26} href="/" sub={false} />
+        <span className="h-5 w-px bg-line" />
         <h1 className="text-lg font-semibold tracking-tight">{t("m.title")}</h1>
         {data && <span className="text-xs text-muted" dir="ltr">{data.user.email}</span>}
         <span className="ms-auto flex gap-2">

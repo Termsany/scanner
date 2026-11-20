@@ -8,6 +8,7 @@ import { useLiveSignals } from "@/lib/useLiveSignals";
 import type { FeedSignal, LiveSignal, PaginatedTokens, ScannerStatus, TokenQuery, TokenRef } from "@/lib/types";
 
 import { ChainPill } from "./Badges";
+import { AppNav } from "./AppNav";
 import { KpiBar, TelemetryBar } from "./KpiBar";
 import { LiveFeed } from "./LiveFeed";
 import { type RowFlash, ScannerTable } from "./ScannerTable";
@@ -187,13 +188,14 @@ export function Dashboard({ initialToken = null }: { initialToken?: TokenRef | n
   }, []);
   const closeToken = useCallback(() => {
     setSelected(null);
-    window.history.replaceState(null, "", "/");
+    window.history.replaceState(null, "", "/scanner");
   }, []);
 
   const updateQuery = useCallback((q: Partial<TokenQuery>) => setQuery((prev) => ({ ...prev, ...q })), []);
 
   return (
     <>
+      <AppNav kind="public" />
       <TelemetryBar status={status} socket={socket} now={now} />
 
       <main className="mx-auto max-w-[1600px] px-4 pt-4 pb-10 sm:px-6">

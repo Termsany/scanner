@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { AppNav } from "@/components/AppNav";
 import { api, ApiError } from "@/lib/api";
 import type { AccountsList, AuditEntry, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
 
@@ -823,16 +824,10 @@ export function AccountsView() {
     setData((d) => d && { ...d, accounts: d.accounts.map((x) => (x.name === a.name ? a : x)) });
 
   return (
+    <>
+    <AppNav />
     <main className="mx-auto max-w-[1200px] px-4 pt-5 pb-12 sm:px-6">
       <header className="mb-5 flex flex-wrap items-center gap-3">
-        <a href="/live"
-          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink">
-          <ArrowLeft className="size-3.5" /> Live
-        </a>
-        <a href="/admin"
-          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink">
-          Overview
-        </a>
         <Users className="size-5 text-accent" />
         <h1 className="text-lg font-semibold tracking-tight">Trading accounts</h1>
         <span className="text-xs text-faint">
@@ -859,5 +854,6 @@ export function AccountsView() {
         {!data && !error && <p className="text-sm text-muted">Loading…</p>}
       </div>
     </main>
+    </>
   );
 }
