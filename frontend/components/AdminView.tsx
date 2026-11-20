@@ -10,6 +10,7 @@ import {
   Lock,
   Receipt,
   RefreshCw,
+  Ticket,
   UserPlus,
   Users,
   Wallet,
@@ -18,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
-import type { AdminOverview, Bill, BillingAdmin, BillingConfig, OverviewAccount } from "@/lib/types";
+import type { AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount } from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live and Accounts pages
 const REFRESH_MS = 15_000;
@@ -433,7 +434,12 @@ function BillingPanel({ password, now }: { password: string; now: number }) {
                   <td className="px-3 py-2 text-xs text-muted">
                     {b.period_start.slice(0, 10)} → {b.period_end.slice(0, 10)}
                   </td>
-                  <td className="num px-3 py-2 text-right">{money(b.fee_usd)}</td>
+                  <td className="num px-3 py-2 text-right">
+                    {money(b.fee_usd)}
+                    {b.discount_usd > 0 && (
+                      <div className="text-xs text-bull">−{money(b.discount_usd)} {b.coupon_code}</div>
+                    )}
+                  </td>
                   <td className="num px-3 py-2 text-right">
                     {money(b.profit_usd)} → {money(b.share_usd)}
                     <div className="text-xs text-faint">{b.profit_pct}%</div>
@@ -474,6 +480,131 @@ function BillingPanel({ password, now }: { password: string; now: number }) {
                   </td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function CouponsPanel({ password, now }: { password: string; now: number }) {
+  const [list, setList] = useState<Coupon[] | null>(null);
+  const [f, setF] = useState({ code: "", percent: "20", months: "", max_uses: "", expires: "", note: "" });
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setList((await api.coupons(password)).coupons);
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "Could not load coupons.");
+    }
+  }, [password]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setMsg("");
+    try {
+      const r = await api.createCoupon(password, {
+        code: f.code.trim(), percent: Number(f.percent),
+        months: f.months ? Number(f.months) : null, max_uses: f.max_uses ? Number(f.max_uses) : null,
+        expires_at: f.expires ? new Date(`${f.expires}T23:59:59Z`).toISOString() : null, note: f.note,
+      });
+      setMsg(`Created ${r.coupon.code}.`);
+      setF({ code: "", percent: f.percent, months: "", max_uses: "", expires: "", note: "" });
+      await load();
+    } catch (err) {
+      setMsg(err instanceof ApiError ? err.message : "Failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const box = (k: keyof typeof f, label: string, ph = "", cls = "", type = "text") => (
+    <label className={`flex flex-col gap-1 text-xs text-muted ${cls}`}>
+      {label}
+      <input className={`${input} ${k === "code" ? "uppercase" : "num"}`} type={type} placeholder={ph}
+        value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} />
+    </label>
+  );
+
+  return (
+    <section className="card overflow-hidden">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+        <Ticket className="size-4 text-accent" />
+        <h2 className="text-sm font-semibold">Discount codes</h2>
+        <span className="text-xs text-faint">% off the monthly fee only, never the profit share</span>
+      </header>
+      <form className="grid gap-3 border-b border-line p-4 sm:grid-cols-7" onSubmit={create}>
+        {box("code", "Code", "RAMADAN25")}
+        {box("percent", "Discount %")}
+        {box("months", "Months", "empty = always")}
+        {box("max_uses", "Max uses", "empty = no limit")}
+        {box("expires", "Apply by", "", "", "date")}
+        {box("note", "Note", "who it is for")}
+        <div className="flex items-end">
+          <button type="submit" disabled={busy || !f.code.trim()}
+            className="w-full rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-carbon disabled:opacity-50">
+            Create
+          </button>
+        </div>
+        {msg && <p className="text-xs text-muted sm:col-span-7">{msg}</p>}
+      </form>
+      {list && (list.length === 0 ? (
+        <p className="px-4 py-3 text-sm text-muted">No codes yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead className="text-[11px] tracking-wide text-muted uppercase">
+              <tr className="border-b border-line">
+                <th className="px-3 py-2 text-left font-medium">Code</th>
+                <th className="px-3 py-2 text-right font-medium">Discount</th>
+                <th className="px-3 py-2 text-right font-medium">Months</th>
+                <th className="px-3 py-2 text-right font-medium">Used</th>
+                <th className="px-3 py-2 text-left font-medium">Apply by</th>
+                <th className="px-3 py-2 text-left font-medium">Users</th>
+                <th className="px-3 py-2 text-right font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((c) => {
+                const expired = c.expires_at != null && new Date(c.expires_at).getTime() < now;
+                const full = c.max_uses != null && c.uses >= c.max_uses;
+                return (
+                  <tr key={c.id} className={`border-b border-line align-top last:border-0 ${c.active ? "" : "opacity-50"}`}>
+                    <td className="px-3 py-2">
+                      <div className="num font-medium">{c.code}</div>
+                      {c.note && <div className="text-xs text-faint">{c.note}</div>}
+                    </td>
+                    <td className="num px-3 py-2 text-right">{c.percent}%</td>
+                    <td className="num px-3 py-2 text-right">{c.months ?? "always"}</td>
+                    <td className="num px-3 py-2 text-right">
+                      {c.uses}{c.max_uses != null ? ` / ${c.max_uses}` : ""}
+                      {full && <div className="text-xs text-warn">used up</div>}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-muted">
+                      {c.expires_at ? c.expires_at.slice(0, 10) : "—"}
+                      {expired && <span className="ms-1 text-warn">expired</span>}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-muted">{c.users.join(", ") || "—"}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button type="button" className={navBtn}
+                        onClick={async () => {
+                          await api.editCoupon(password, c.id, !c.active).catch(() => undefined);
+                          await load();
+                        }}>
+                        {c.active ? "Turn off" : "Turn on"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -647,6 +778,7 @@ export function AdminView() {
 
           <AccountsTable accounts={data.accounts} now={now} />
           <BillingPanel password={password} now={now} />
+          <CouponsPanel password={password} now={now} />
           <Recent items={data.recent} now={now} />
         </div>
       )}

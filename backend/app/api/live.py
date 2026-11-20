@@ -657,3 +657,79 @@ async def bill_action(bill_id: int, body: BillActionIn, request: Request, sessio
     await update_holds(session, await get_config(session), now)
     await session.commit()
     return {"bill": bill_out(b)}
+
+
+# ---- coupons (admin) --------------------------------------------------------------------
+class CouponCreate(BaseModel):
+    code: str
+    percent: float
+    months: int | None = None         # billed months discounted; None = every month
+    max_uses: int | None = None
+    expires_at: datetime | None = None
+    note: str = ""
+
+
+class CouponPatch(BaseModel):
+    active: bool | None = None
+
+
+def _coupon(c, users: list[Any]) -> dict[str, Any]:
+    return {"id": c.id, "code": c.code, "percent": c.percent, "months": c.months, "max_uses": c.max_uses,
+            "uses": c.uses or 0, "expires_at": utc(c.expires_at).isoformat() if c.expires_at else None,
+            "active": c.active, "note": c.note, "created_at": utc(c.created_at).isoformat() if c.created_at else None,
+            "users": [u.email for u in users if u.coupon_code == c.code]}
+
+
+@router.get("/coupons")
+async def list_coupons(session: Session, _: Auth) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.models import Coupon, User
+
+    cs = (await session.execute(select(Coupon).order_by(Coupon.id.desc()))).scalars().all()
+    users = (await session.execute(select(User).where(User.coupon_code.is_not(None)))).scalars().all()
+    return {"coupons": [_coupon(c, users) for c in cs]}
+
+
+@router.post("/coupons")
+async def create_coupon(body: CouponCreate, request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.billing import CODE_OK, norm_code
+    from app.models import Coupon
+    from app.users import audit
+
+    code = norm_code(body.code)
+    if not 3 <= len(code) <= 32 or not set(code) <= CODE_OK:
+        raise HTTPException(400, "code: 3-32 characters, letters, digits, - and _")
+    if not 1 <= body.percent <= 100:
+        raise HTTPException(400, "discount must be between 1% and 100%")
+    if body.months is not None and not 1 <= body.months <= 120:
+        raise HTTPException(400, "months: 1-120, or empty for every month")
+    if body.max_uses is not None and body.max_uses < 1:
+        raise HTTPException(400, "max uses must be at least 1, or empty for no limit")
+    if (await session.execute(select(Coupon).where(Coupon.code == code))).scalars().first():
+        raise HTTPException(400, "a coupon with this code already exists")
+    c = Coupon(code=code, percent=round(body.percent, 2), months=body.months, max_uses=body.max_uses,
+               expires_at=body.expires_at, note=body.note.strip()[:120])
+    session.add(c)
+    await audit(session, "admin", "coupon_create", code, body.model_dump(mode="json"), _ip(request))
+    await session.commit()
+    return {"coupon": _coupon(c, [])}
+
+
+@router.patch("/coupons/{coupon_id}")
+async def edit_coupon(coupon_id: int, body: CouponPatch, request: Request, session: Session,
+                      _: Auth) -> dict[str, Any]:
+    """Turn a code off (or on again). Users who already applied it keep their discount."""
+    from app.models import Coupon
+    from app.users import audit
+
+    c = await session.get(Coupon, coupon_id)
+    if c is None:
+        raise HTTPException(404, "No such coupon")
+    if body.active is not None:
+        c.active = body.active
+    await audit(session, "admin", "coupon_edit", c.code, body.model_dump(exclude_none=True), _ip(request))
+    await session.commit()
+    return {"coupon": _coupon(c, [])}

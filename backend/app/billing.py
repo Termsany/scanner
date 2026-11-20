@@ -31,7 +31,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.models import Bill, LivePosition, TrackerCursor, TradingAccount, User
+from app.models import Bill, Coupon, LivePosition, TrackerCursor, TradingAccount, User
 
 log = logging.getLogger("billing")
 
@@ -133,10 +133,48 @@ def anchor_of(row: TradingAccount, cfg: dict[str, Any], now: datetime | None = N
     return max((_utc(row.created_at) or _now()) + timedelta(days=int(cfg["trial_days"])), now or _now())
 
 
-def charge(fee: float, pct: float, cum: float, hwm: float) -> tuple[float, float, float]:
-    """(share, total, new high-water mark) for a period ending at cumulative P&L `cum`."""
+def charge(fee: float, pct: float, cum: float, hwm: float, discount_pct: float = 0.0) -> tuple[float, float, float]:
+    """(share, total, new high-water mark) for a period ending at cumulative P&L `cum`.
+    A coupon's discount_pct comes off the fee only, never the profit share."""
     share = round(max(0.0, cum - hwm) * pct / 100, 2)
-    return share, round(fee + share, 2), max(hwm, cum)
+    return share, round(fee - discount(fee, discount_pct) + share, 2), max(hwm, cum)
+
+
+def discount(fee: float, pct: float) -> float:
+    return round(fee * min(max(pct, 0.0), 100.0) / 100, 2)
+
+
+def coupon_pct(user: User | None) -> float:
+    """The user's coupon % for the next billed month (0 = none or used up)."""
+    if not user or not user.coupon_pct or (user.coupon_months_left is not None and user.coupon_months_left <= 0):
+        return 0.0
+    return float(user.coupon_pct)
+
+
+# ---- coupons -----------------------------------------------------------------------
+CODE_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+
+
+def norm_code(code: str) -> str:
+    return (code or "").strip().upper()
+
+
+async def apply_coupon(session: AsyncSession, user: User, code: str, now: datetime | None = None) -> Coupon:
+    """Give a user a coupon. One per user: a second code is refused while the first still discounts."""
+    now = now or _now()
+    c = (await session.execute(select(Coupon).where(Coupon.code == norm_code(code)))).scalars().first()
+    if c is None or not c.active:
+        raise BillingError("This code is not valid")
+    if c.expires_at and _utc(c.expires_at) <= now:
+        raise BillingError("This code has expired")
+    if c.max_uses is not None and (c.uses or 0) >= c.max_uses:
+        raise BillingError("This code has been used up")
+    if coupon_pct(user) > 0:
+        raise BillingError("You already have a discount code")
+    user.coupon_code, user.coupon_pct, user.coupon_months_left = c.code, c.percent, c.months
+    user.coupon_applied_at = now
+    c.uses = (c.uses or 0) + 1
+    return c
 
 
 async def _user_accounts(session: AsyncSession) -> list[TradingAccount]:
@@ -151,6 +189,7 @@ async def create_bills(session: AsyncSession, cfg: dict[str, Any], mode: str, no
         if not row.enabled:
             continue
         start = anchor_of(row, cfg, now)
+        user = await session.get(User, row.user_id) if row.user_id else None
         hwm = row.billing_hwm_usd
         if hwm is None:
             hwm = await cum_pnl(session, row.name, mode, start)      # profit before billing: the starting level
@@ -158,9 +197,13 @@ async def create_bills(session: AsyncSession, cfg: dict[str, Any], mode: str, no
         while add_months(start, 1) <= now and n < 120:
             end = add_months(start, 1)
             cum = await cum_pnl(session, row.name, mode, end)
-            share, total, new_hwm = charge(float(cfg["fee_usd"]), float(cfg["profit_pct"]), cum, hwm)
+            fee, dpct = float(cfg["fee_usd"]), coupon_pct(user)
+            share, total, new_hwm = charge(fee, float(cfg["profit_pct"]), cum, hwm, dpct)
+            if dpct and user.coupon_months_left is not None:
+                user.coupon_months_left -= 1
             b = Bill(account=row.name, user_id=row.user_id, period_start=start, period_end=end,
-                     fee_usd=float(cfg["fee_usd"]), profit_pct=float(cfg["profit_pct"]), cum_pnl_usd=cum,
+                     fee_usd=fee, discount_usd=discount(fee, dpct), coupon_code=user.coupon_code if dpct else None,
+                     profit_pct=float(cfg["profit_pct"]), cum_pnl_usd=cum,
                      hwm_before_usd=hwm, hwm_after_usd=new_hwm, share_usd=share, total_usd=total,
                      status="due" if total > 0 else "paid", paid_at=None if total > 0 else now)
             session.add(b)
@@ -171,17 +214,19 @@ async def create_bills(session: AsyncSession, cfg: dict[str, Any], mode: str, no
 
 
 def estimate(row: TradingAccount, cfg: dict[str, Any], cum_now: float, cum_at_anchor: float,
-             now: datetime) -> dict[str, Any]:
+             now: datetime, discount_pct: float = 0.0) -> dict[str, Any]:
     """What the user's current period will cost if it ended now (shown on /me)."""
     anchor = anchor_of(row, cfg, now)
+    fee = float(cfg["fee_usd"])
+    disc = discount(fee, discount_pct)
     if now < anchor:
         return {"trial": True, "trial_ends": anchor.isoformat(), "period_start": None, "period_end": anchor.isoformat(),
-                "fee_usd": float(cfg["fee_usd"]), "profit_pct": float(cfg["profit_pct"]), "profit_usd": 0.0,
+                "fee_usd": fee, "discount_usd": disc, "profit_pct": float(cfg["profit_pct"]), "profit_usd": 0.0,
                 "share_usd": 0.0, "total_usd": 0.0, "hwm_usd": cum_at_anchor}
     hwm = row.billing_hwm_usd if row.billing_hwm_usd is not None else cum_at_anchor
-    share, total, _ = charge(float(cfg["fee_usd"]), float(cfg["profit_pct"]), cum_now, hwm)
+    share, total, _ = charge(fee, float(cfg["profit_pct"]), cum_now, hwm, discount_pct)
     return {"trial": False, "trial_ends": None, "period_start": anchor.isoformat(),
-            "period_end": add_months(anchor, 1).isoformat(), "fee_usd": float(cfg["fee_usd"]),
+            "period_end": add_months(anchor, 1).isoformat(), "fee_usd": fee, "discount_usd": disc,
             "profit_pct": float(cfg["profit_pct"]), "profit_usd": round(cum_now - hwm, 2),
             "share_usd": share, "total_usd": total, "hwm_usd": round(hwm, 2)}
 
@@ -189,7 +234,8 @@ def estimate(row: TradingAccount, cfg: dict[str, Any], cum_now: float, cum_at_an
 def bill_out(b: Bill) -> dict[str, Any]:
     iso = lambda d: _utc(d).isoformat() if d else None  # noqa: E731
     return {"id": b.id, "account": b.account, "user_id": b.user_id, "period_start": iso(b.period_start),
-            "period_end": iso(b.period_end), "fee_usd": b.fee_usd, "profit_pct": b.profit_pct,
+            "period_end": iso(b.period_end), "fee_usd": b.fee_usd, "discount_usd": b.discount_usd or 0.0,
+            "coupon_code": b.coupon_code, "profit_pct": b.profit_pct,
             "profit_usd": round(max(0.0, b.cum_pnl_usd - b.hwm_before_usd), 2), "share_usd": b.share_usd,
             "total_usd": b.total_usd, "status": b.status, "sol_amount": b.sol_amount, "signature": b.signature,
             "attempts": b.attempts, "error": b.error, "paid_at": iso(b.paid_at), "created_at": iso(b.created_at)}
@@ -226,10 +272,13 @@ async def collect(session: AsyncSession, s: Settings, cfg: dict[str, Any], now: 
         user = await session.get(User, b.user_id) if b.user_id else None
         chat = user.tg_chat_id if user else None
         lang = "en" if user and user.lang == "en" else "ar"
-        key = private_key_for(row, s) if row else None
         b.attempts, b.last_try_at = (b.attempts or 0) + 1, now
+        try:
+            key = private_key_for(row, s) if row else None
+        except Exception as exc:            # e.g. key encrypted with another LIVE_KEY_ENCRYPTION_KEY
+            key, b.error = None, f"wallet key unreadable: {type(exc).__name__}"
         if not key:
-            b.error = "no wallet key for this account"
+            b.error = b.error or "no wallet key for this account"
             await session.commit()
             continue
         x = make_executor(key)
@@ -270,7 +319,7 @@ async def collect(session: AsyncSession, s: Settings, cfg: dict[str, Any], now: 
                 await notify(chat, TEXT["paid"][lang].format(period=_period(b), total=b.total_usd,
                                                              sol=b.sol_amount))
             await notify(None, f"💰 Bill #{b.id} [{b.account}] paid: ${b.total_usd:.2f} "
-                               f"(fee ${b.fee_usd:.2f} + share ${b.share_usd:.2f}) = {b.sol_amount:.4f} SOL\n"
+                               f"(fee ${b.fee_usd - (b.discount_usd or 0):.2f} + share ${b.share_usd:.2f}) = {b.sol_amount:.4f} SOL\n"
                                f"https://solscan.io/tx/{sig}")
         except Exception as exc:          # price or balance lookup failed: try again next hour
             b.error = f"lookup failed: {str(exc)[:200]}"
@@ -303,7 +352,9 @@ async def run_once(session: AsyncSession, s: Settings, make_executor: Callable[[
     await session.commit()
     for b in made:
         await notify(None, f"🧾 New bill #{b.id} [{b.account}] {_period(b)}: ${b.total_usd:.2f} "
-                           f"(fee ${b.fee_usd:.2f} + {b.profit_pct:g}% of ${max(0, b.cum_pnl_usd - b.hwm_before_usd):.2f}"
+                           f"(fee ${b.fee_usd:.2f}"
+                           + (f" - {b.coupon_code} ${b.discount_usd:.2f}" if b.discount_usd else "")
+                           + f" + {b.profit_pct:g}% of ${max(0, b.cum_pnl_usd - b.hwm_before_usd):.2f}"
                            f" profit)")
     res = await collect(session, s, cfg, now, make_executor, notify)
     await update_holds(session, cfg, now)

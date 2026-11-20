@@ -22,6 +22,7 @@ function Login() {
   const [busy, setBusy] = useState(false);
   const [terms, setTerms] = useState<PublicTerms | null>(null);
   const [agree, setAgree] = useState(false);
+  const [coupon, setCoupon] = useState("");
   useEffect(() => {
     api.terms().then(setTerms).catch(() => undefined);
   }, []);
@@ -45,7 +46,7 @@ function Login() {
         return;
       }
       if (mode === "login") await api.login(email, pw);
-      else await api.register(email, pw, name, lang, agree);
+      else await api.register(email, pw, name, lang, agree, coupon.trim());
       window.location.href = "/me";
     } catch (e) {
       setErr(e instanceof ApiError ? srv(e.message) : t("c.error"));
@@ -78,6 +79,10 @@ function Login() {
         {mode === "register" && (
           <input className={input} type="password" placeholder={t("l.repeat")} value={pw2}
             required autoComplete="new-password" onChange={(e) => setPw2(e.target.value)} />
+        )}
+        {mode === "register" && terms?.billing && (
+          <input className={input} dir="ltr" placeholder={t("b.coupon")} value={coupon} maxLength={32}
+            autoComplete="off" onChange={(e) => setCoupon(e.target.value)} />
         )}
         {mode === "register" && terms?.billing && (
           <label className="flex items-start gap-2 rounded-md border border-line p-2.5 text-xs leading-relaxed text-muted">

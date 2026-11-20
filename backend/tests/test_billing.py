@@ -220,3 +220,75 @@ def test_enabling_never_bills_past_months(env):
                 return (await s.execute(select(Bill).where(Bill.account == name))).scalars().all()
         assert c.portal.call(run) == []
         c.put("/api/live/billing/config", headers=ADMIN, json={"enabled": False})
+
+
+def test_coupon_discounts_the_fee_only():
+    # 50% off $59 = $29.50 off; the 15% share of $200 profit stays $30
+    share, total, hwm = charge(59.0, 15.0, 200, 0, 50)
+    assert (share, total) == (30.0, 59.5)
+    assert charge(59.0, 15.0, 0, 0, 100)[1] == 0.0
+
+
+def test_coupons_admin_apply_and_months(env):
+    from sqlalchemy import select
+
+    from app import billing
+    from app.db import SessionLocal
+    from app.models import Bill, TradingAccount, User
+
+    async def notify(chat, text):
+        pass
+
+    with TestClient(app) as c:
+        assert c.post("/api/live/coupons", json={"code": "x", "percent": 10}).status_code == 401
+        assert c.post("/api/live/coupons", headers=ADMIN, json={"code": "a b", "percent": 10}).status_code == 400
+        assert c.post("/api/live/coupons", headers=ADMIN, json={"code": "half", "percent": 150}).status_code == 400
+        r = c.post("/api/live/coupons", headers=ADMIN, json={"code": "half2", "percent": 50, "months": 2,
+                                                            "max_uses": 2})
+        assert r.status_code == 200 and r.json()["coupon"]["code"] == "HALF2"
+        off = c.post("/api/live/coupons", headers=ADMIN, json={"code": "OLD", "percent": 20}).json()["coupon"]
+        assert c.patch(f"/api/live/coupons/{off['id']}", headers=ADMIN, json={"active": False}).status_code == 200
+
+        # bad code at sign-up: refused and nobody is created
+        assert c.post("/api/me/register", json={"email": "cp0@example.com", "password": "a-long-password",
+                                                "accept_terms": True, "coupon": "nope"}).status_code == 400
+        # good code at sign-up (lower case works)
+        r = c.post("/api/me/register", json={"email": "cp1@example.com", "password": "a-long-password",
+                                             "accept_terms": True, "coupon": "half2"})
+        assert r.status_code == 200, r.text
+        assert c.post("/api/me/coupon", json={"code": "HALF2"}).status_code == 400       # one per user
+        c.post("/api/me/logout")
+        # from /me after sign-up; inactive code refused
+        c.post("/api/me/register", json={"email": "cp2@example.com", "password": "a-long-password",
+                                         "accept_terms": True})
+        assert c.post("/api/me/coupon", json={"code": "OLD"}).status_code == 400
+        assert c.post("/api/me/coupon", json={"code": "half2"}).status_code == 200
+        c.post("/api/me/logout")
+        c.post("/api/me/register", json={"email": "cp3@example.com", "password": "a-long-password",
+                                         "accept_terms": True})
+        assert c.post("/api/me/coupon", json={"code": "half2"}).json()["detail"] == "This code has been used up"
+        c.post("/api/me/logout")
+        lst = c.get("/api/live/coupons", headers=ADMIN).json()["coupons"]
+        h = next(x for x in lst if x["code"] == "HALF2")
+        assert h["uses"] == 2 and set(h["users"]) == {"cp1@example.com", "cp2@example.com"}
+
+        uid = [u for u in c.get("/api/live/users", headers=ADMIN).json()["users"]
+               if u["email"] == "cp1@example.com"][0]["id"]
+        assert c.post(f"/api/live/users/{uid}/approve", headers=ADMIN, json={}).status_code == 200
+        c.put("/api/live/billing/config", headers=ADMIN, json={"enabled": True, "wallet": PAY_TO})
+        name = f"u{uid}"
+
+        async def months():
+            async with SessionLocal() as s:
+                row = (await s.execute(select(TradingAccount).where(TradingAccount.name == name))).scalars().first()
+                a = row.billing_anchor if row.billing_anchor.tzinfo else row.billing_anchor.replace(tzinfo=timezone.utc)
+                await billing.run_once(s, get_settings(), lambda k: FakeX(10), notify,
+                                       now=add_months(a, 3) + timedelta(hours=1))
+                bills = (await s.execute(select(Bill).where(Bill.account == name).order_by(Bill.id))).scalars().all()
+                u = await s.get(User, uid)
+                return [(b.fee_usd, b.discount_usd, b.total_usd, b.coupon_code) for b in bills], u.coupon_months_left
+        bills, left = c.portal.call(months)
+        # 2 discounted months, then full price; no profit -> fee only
+        assert bills == [(59.0, 29.5, 29.5, "HALF2"), (59.0, 29.5, 29.5, "HALF2"), (59.0, 0.0, 59.0, None)]
+        assert left == 0
+        c.put("/api/live/billing/config", headers=ADMIN, json={"enabled": False})

@@ -10,6 +10,7 @@ import type {
   Bill,
   BillingAdmin,
   BillingConfig,
+  Coupon,
   PublicTerms,
   Me,
   MySettings,
@@ -141,9 +142,28 @@ export const api = {
     }),
 
   // ---- registered users (session cookie) ----
-  register: (email: string, password: string, name: string, lang = "ar", accept_terms = false) =>
+  register: (email: string, password: string, name: string, lang = "ar", accept_terms = false, coupon = "") =>
     request<{ ok: boolean; status: string }>("/api/me/register", {
-      method: "POST", credentials: "include", body: JSON.stringify({ email, password, name, lang, accept_terms }),
+      method: "POST", credentials: "include",
+      body: JSON.stringify({ email, password, name, lang, accept_terms, coupon: coupon || null }),
+    }),
+
+  applyCoupon: (code: string) =>
+    request<{ code: string; percent: number; months: number | null }>("/api/me/coupon", {
+      method: "POST", credentials: "include", body: JSON.stringify({ code }),
+    }),
+
+  coupons: (password: string) =>
+    request<{ coupons: Coupon[] }>("/api/live/coupons", { headers: { "X-Live-Password": password } }),
+
+  createCoupon: (password: string, body: Record<string, unknown>) =>
+    request<{ coupon: Coupon }>("/api/live/coupons", {
+      method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify(body),
+    }),
+
+  editCoupon: (password: string, id: number, active: boolean) =>
+    request<{ coupon: Coupon }>(`/api/live/coupons/${id}`, {
+      method: "PATCH", headers: { "X-Live-Password": password }, body: JSON.stringify({ active }),
     }),
 
   terms: () => request<PublicTerms>("/api/me/terms"),

@@ -44,6 +44,7 @@ class RegisterIn(BaseModel):
     name: str = ""
     lang: str = "ar"
     accept_terms: bool = False
+    coupon: str | None = None
 
 
 class LoginIn(BaseModel):
@@ -71,12 +72,23 @@ async def register(body: RegisterIn, request: Request, response: Response, sessi
 
     if (await get_config(session, s))["enabled"] and not body.accept_terms:
         raise HTTPException(400, "Accept the fees and terms to sign up")
+    if body.coupon and body.coupon.strip() and too_many("coupon:" + ip):
+        raise HTTPException(429, "Too many wrong codes, try again later")
     failed("reg:" + ip)                       # counts sign-ups per IP (limits mass registration)
     user = User(email=email, name=body.name.strip()[:80], password_hash=hash_password(body.password),
                 lang="en" if body.lang == "en" else "ar",
                 terms_accepted_at=datetime.now(timezone.utc) if body.accept_terms else None)
     session.add(user)
     await session.flush()
+    if body.coupon and body.coupon.strip():
+        from app.billing import BillingError, apply_coupon
+
+        try:
+            await apply_coupon(session, user, body.coupon)
+        except BillingError as exc:
+            await session.rollback()
+            failed("coupon:" + ip)
+            raise HTTPException(400, str(exc)) from None
     await audit(session, f"user:{user.id}", "register", email, ip=ip)
     token = await new_session(session, user)
     await session.commit()
@@ -226,14 +238,42 @@ async def _my_billing(session: AsyncSession, a: TradingAccount, mode: str) -> di
     now = datetime.now(timezone.utc)
     bills = (await session.execute(select(Bill).where(Bill.account == a.name).order_by(Bill.id.desc()).limit(12))
              ).scalars().all()
+    from app.billing import coupon_pct
+
+    user = await session.get(User, a.user_id) if a.user_id else None
     est = estimate(a, cfg, await cum_pnl(session, a.name, mode, now),
-                   await cum_pnl(session, a.name, mode, a.billing_anchor or now), now)
+                   await cum_pnl(session, a.name, mode, a.billing_anchor or now), now, coupon_pct(user))
     if bills:
         est["trial"] = False          # the next period has not started yet, but the trial is long over
+    has = coupon_pct(user) > 0
     return {"fee_usd": cfg["fee_usd"], "profit_pct": cfg["profit_pct"], "grace_days": cfg["grace_days"],
             "hold": bool(a.billing_hold), "current": est,
+            "coupon": {"code": user.coupon_code, "percent": user.coupon_pct,
+                       "months_left": user.coupon_months_left} if has else None,
             "bills": [{k: v for k, v in bill_out(b).items() if k not in ("user_id", "account", "attempts")}
                       for b in bills]}
+
+
+class CouponIn(BaseModel):
+    code: str
+
+
+@router.post("/coupon")
+async def use_coupon(body: CouponIn, user: CurrentUser, request: Request, session: Session) -> dict[str, Any]:
+    """Apply a discount code: % off the monthly fee (not the profit share). One active code per user."""
+    from app.billing import BillingError, apply_coupon
+
+    ip = ip_of(request)
+    if too_many("coupon:" + ip, f"coupon:u{user.id}"):
+        raise HTTPException(429, "Too many wrong codes, try again later")
+    try:
+        c = await apply_coupon(session, user, body.code)
+    except BillingError as exc:
+        failed("coupon:" + ip, f"coupon:u{user.id}")
+        raise HTTPException(400, str(exc)) from None
+    await audit(session, f"user:{user.id}", "coupon", c.code, {"percent": c.percent, "months": c.months}, ip)
+    await session.commit()
+    return {"code": c.code, "percent": c.percent, "months": c.months}
 
 
 @router.get("/terms")

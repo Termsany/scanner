@@ -527,6 +527,12 @@ class User(Base):
     tg_daily: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
     lang: Mapped[str | None] = mapped_column(String(2), nullable=True, default="ar")   # ar | en (pages + notes)
     terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Coupon: % off the monthly fee only (never the profit share). Copied from the coupon when applied;
+    # coupon_months_left NULL = every month, else the number of billed months still discounted.
+    coupon_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    coupon_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coupon_months_left: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    coupon_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserSession(Base):
@@ -583,7 +589,9 @@ class Bill(Base):
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    fee_usd: Mapped[float] = mapped_column(Float)
+    fee_usd: Mapped[float] = mapped_column(Float)                       # full monthly fee
+    discount_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)   # coupon, fee only
+    coupon_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     profit_pct: Mapped[float] = mapped_column(Float)
     cum_pnl_usd: Mapped[float] = mapped_column(Float)          # cumulative realized P&L at period end
     hwm_before_usd: Mapped[float] = mapped_column(Float)
@@ -598,4 +606,21 @@ class Bill(Base):
     error: Mapped[str | None] = mapped_column(String(300), nullable=True)
     last_try_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Coupon(Base):
+    """A discount code made by the admin: `percent` off the monthly fee (never the profit share)."""
+
+    __tablename__ = "coupons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True)          # stored upper case
+    percent: Mapped[float] = mapped_column(Float)                       # 1-100
+    months: Mapped[int | None] = mapped_column(Integer, nullable=True)  # billed months discounted; NULL = all
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    uses: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(String(120), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

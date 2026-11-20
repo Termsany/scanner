@@ -71,7 +71,42 @@ function day(iso: string | null | undefined) {
   return iso ? iso.slice(0, 10) : "—";
 }
 
-function BillingCard({ b }: { b: MyBilling }) {
+function CouponBox({ onDone }: { onDone: () => void }) {
+  const { t, srv } = useT();
+  const [code, setCode] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <form className="mt-3 flex flex-wrap items-center gap-2"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (!code.trim()) return;
+        setBusy(true);
+        setMsg("");
+        try {
+          await api.applyCoupon(code.trim());
+          setMsg(t("b.coupon_ok"));
+          setCode("");
+          onDone();
+        } catch (err) {
+          setMsg(err instanceof ApiError ? srv(err.message) : t("c.error"));
+        } finally {
+          setBusy(false);
+        }
+      }}>
+      <input className={`${input} max-w-[200px]`} dir="ltr" placeholder={t("b.coupon_ph")} value={code}
+        maxLength={32} onChange={(e) => setCode(e.target.value)} />
+      <button type="submit" disabled={busy}
+        className="rounded-md border border-line px-3 py-1.5 text-sm hover:bg-raised disabled:opacity-50">
+        {t("b.coupon_apply")}
+      </button>
+      {msg && <span className="text-xs text-muted">{msg}</span>}
+      <span className="w-full text-xs text-faint">{t("b.coupon_hint")}</span>
+    </form>
+  );
+}
+
+function BillingCard({ b, onChange }: { b: MyBilling; onChange: () => void }) {
   const { t } = useT();
   const c = b.current;
   const row = (label: string, value: string, cls = "") => (
@@ -90,6 +125,12 @@ function BillingCard({ b }: { b: MyBilling }) {
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" /> {t("b.hold")}
         </p>
       )}
+      {b.coupon && (
+        <p className="mb-2 rounded-md bg-bull-soft px-2.5 py-1.5 text-xs text-bull">
+          {t("b.coupon_on", { c: b.coupon.code, p: b.coupon.percent })}
+          {b.coupon.months_left != null && t("b.coupon_left", { n: b.coupon.months_left })}
+        </p>
+      )}
       {c.trial ? (
         <p className="text-sm text-bull">{t("b.trial", { d: day(c.trial_ends) })}</p>
       ) : (
@@ -97,6 +138,7 @@ function BillingCard({ b }: { b: MyBilling }) {
           <p className="mb-1 text-xs text-faint">{t("b.period", { a: day(c.period_start), b: day(c.period_end) })}</p>
           <div className="divide-y divide-line">
             {row(t("b.fee"), money(c.fee_usd))}
+            {c.discount_usd > 0 && b.coupon && row(t("b.discount", { c: b.coupon.code }), `−${money(c.discount_usd)}`, "text-bull")}
             {row(t("b.profit"), money(Math.max(c.profit_usd, 0)), c.profit_usd > 0 ? "text-bull" : "")}
             {row(t("b.share", { pct: c.profit_pct }), money(c.share_usd))}
             {row(t("b.est"), money(c.total_usd), "font-semibold")}
@@ -104,6 +146,7 @@ function BillingCard({ b }: { b: MyBilling }) {
         </>
       )}
       <p className="mt-2 text-xs text-faint">{t("b.how")}</p>
+      {!b.coupon && <CouponBox onDone={onChange} />}
       {b.bills.length > 0 && (
         <div className="mt-3">
           <div className="mb-1 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">{t("b.history")}</div>
@@ -696,7 +739,7 @@ function Page() {
             </p>
           )}
           {a.stats && <PerformanceCard s={a.stats} />}
-          {a.billing && <BillingCard b={a.billing} />}
+          {a.billing && <BillingCard b={a.billing} onChange={() => load()} />}
           <section className="card">
             <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">{t("m.open_trades")}</h2>
             <Positions rows={a.open} live onSell={async (p, sh) => {

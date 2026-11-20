@@ -553,6 +553,8 @@ export interface Bill {
   period_start: string;
   period_end: string;
   fee_usd: number;
+  discount_usd: number;
+  coupon_code: string | null;
   profit_pct: number;
   profit_usd: number;
   share_usd: number;
@@ -571,12 +573,14 @@ export interface MyBilling {
   profit_pct: number;
   grace_days: number;
   hold: boolean;
+  coupon: { code: string; percent: number; months_left: number | null } | null;
   current: {
     trial: boolean;
     trial_ends: string | null;
     period_start: string | null;
     period_end: string;
     fee_usd: number;
+    discount_usd: number;
     profit_pct: number;
     profit_usd: number;
     share_usd: number;
@@ -601,6 +605,20 @@ export interface BillingAdmin {
   held: string[];
   totals: { paid_30d_usd: number; paid_30d_sol: number; due_usd: number; check: number };
   bills: Bill[];
+}
+
+export interface Coupon {
+  id: number;
+  code: string;
+  percent: number;
+  months: number | null;
+  max_uses: number | null;
+  uses: number;
+  expires_at: string | null;
+  active: boolean;
+  note: string;
+  created_at: string | null;
+  users: string[];
 }
 
 export interface PublicTerms {
