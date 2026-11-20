@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { SirbLockup } from "@/components/brand/Logo";
 import { api } from "@/lib/api";
 import { I18nProvider, LangSwitch, useT } from "@/lib/i18n";
-import type { Performance, PublicTerms, ScannerStatus } from "@/lib/types";
+import type { PublicTerms, ScannerStatus } from "@/lib/types";
 
 // key: [English, Arabic]
 const L = {
@@ -23,7 +23,7 @@ const L = {
     "سرب بيلاقي المحافظ اللي بتكسب على سولانا، وبينسخ صفقاتها في ثواني بمحفظتك انت — بميزانيتك، وحد خسارتك، وسحب رأس المال عند الضعف.",
   ],
   cta_trial: ["Start {d} days free", "ابدأ {d} أيام مجاناً"],
-  cta_perf: ["See the results", "شوف النتايج"],
+  cta_how: ["How it works", "إزاي بيشتغل"],
   fine: ["Your wallet is yours · withdraw any time · crypto is high risk", "محفظتك ملكك · تسحب في أي وقت · الكريبتو مخاطرة عالية"],
   chip_t: ["The leader just bought", "القائد اشترى دلوقتي"],
   chip_s: ["The flock follows in seconds", "السرب بيتبعه في ثواني"],
@@ -50,14 +50,6 @@ const L = {
   f2_t: ["Safety screen", "فلتر أمان"], f2_p: ["Honeypots, mintable tokens and thin liquidity are skipped before any buy.", "العملات المفخخة والقابلة للطباعة والسيولة الضعيفة بتتعدّى قبل أي شراء."],
   f3_t: ["Telegram notes", "إشعارات تليجرام"], f3_p: ["Every buy and sell, a daily summary — in Arabic or English.", "كل شراء وبيع، وملخص يومي — بالعربي أو الإنجليزي."],
   f4_t: ["Two-step security", "حماية بخطوتين"], f4_p: ["Withdrawals and key reveals need your authenticator code.", "السحب وعرض المفتاح محتاجين كود التطبيق."],
-  perf_t: ["Signals, measured honestly", "الإشارات، متقاسة بأمانة"],
-  perf_p: ["Every signal is tracked 1h, 6h and 24h after it fires. These are the last 7 days, wins and losses.",
-    "كل إشارة بنتابعها بعد ساعة و٦ و٢٤ ساعة من ظهورها. دي أرقام آخر ٧ أيام، بالكسبان والخسران."],
-  p_med: ["Median peak after a signal", "متوسط أعلى صعود بعد الإشارة"],
-  p_hit: ["Reached +50% at some point", "وصلت ‎+50%‎ في وقت ما"],
-  p_pos: ["Up after 24h", "طالعة بعد ٢٤ ساعة"],
-  p_n: ["Signals measured", "إشارة اتقاست"],
-  p_more: ["Open the full report", "افتح التقرير كامل"],
   price_t: ["You pay when you win.", "بتدفع لما بتكسب."],
   price_p: ["A small fixed fee, and a share only of real profit above your best level so far (high-water mark). A losing month carries no share until it is won back.",
     "اشتراك صغير ثابت، ونسبة بس من الربح الحقيقي فوق أعلى مستوى وصلتله. الشهر الخسران مفيهوش نسبة لحد ما الخسارة تتعوض."],
@@ -170,11 +162,9 @@ function Stat({ label, value, sub, delay }: { label: string; value: string; sub:
 function Landing() {
   const { t, ar } = useL();
   const [status, setStatus] = useState<ScannerStatus | null>(null);
-  const [perf, setPerf] = useState<Performance | null>(null);
   const [terms, setTerms] = useState<PublicTerms | null>(null);
   useEffect(() => {
     api.status().then(setStatus).catch(() => undefined);
-    api.performance(168).then(setPerf).catch(() => undefined);
     api.terms().then(setTerms).catch(() => undefined);
     const id = setInterval(() => api.status().then(setStatus).catch(() => undefined), 30_000);
     return () => clearInterval(id);
@@ -184,8 +174,6 @@ function Landing() {
   const trial = terms?.trial_days ?? 7;
   const Arrow = ar ? ArrowLeft : ArrowRight;
   const n = (v: number | null | undefined, d = 0) => (v == null ? "—" : v.toLocaleString("en-US", { maximumFractionDigits: d }));
-  const pc = (v: number | null | undefined) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(0)}%`);
-  const o = perf?.overall;
   const signup = "/login?signup=1";
 
   return (
@@ -227,8 +215,8 @@ function Landing() {
               {t("cta_trial", { d: trial })}
               <Arrow className="size-4 transition group-hover:translate-x-0.5 rtl:group-hover:-translate-x-0.5" />
             </a>
-            <a href="#results" className="rounded-xl border border-line bg-raised px-5 py-3 font-medium text-ink transition hover:border-line-strong">
-              {t("cta_perf")}
+            <a href="#how" className="rounded-xl border border-line bg-raised px-5 py-3 font-medium text-ink transition hover:border-line-strong">
+              {t("cta_how")}
             </a>
           </div>
           <p className="mt-4 text-xs text-faint">{t("fine")}</p>
@@ -276,25 +264,6 @@ function Landing() {
               <p className="mt-1.5 text-sm leading-relaxed text-muted">{t(p)}</p>
             </Reveal>
           ))}
-        </div>
-      </section>
-
-      {/* results */}
-      <section id="results" className="scroll-mt-20 border-y border-line bg-surface/60 py-20">
-        <div className="mx-auto grid max-w-[1240px] gap-10 px-4 sm:px-6 lg:grid-cols-[1fr_1.4fr] lg:items-center">
-          <Reveal>
-            <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">{t("perf_t")}</h2>
-            <p className="mt-4 leading-relaxed text-muted">{t("perf_p")}</p>
-            <a href="/performance" className="mt-6 inline-flex items-center gap-2 text-sm font-medium text-mint hover:underline">
-              {t("p_more")} <Arrow className="size-4" />
-            </a>
-          </Reveal>
-          <div className="grid grid-cols-2 gap-4">
-            <Stat delay={0} label={t("p_med")} value={pc(o?.median_peak)} sub="7d" />
-            <Stat delay={80} label={t("p_hit")} value={o?.hit_50_pct == null ? "—" : `${o.hit_50_pct.toFixed(0)}%`} sub="7d" />
-            <Stat delay={160} label={t("p_pos")} value={o?.positive_24h_pct == null ? "—" : `${o.positive_24h_pct.toFixed(0)}%`} sub="7d" />
-            <Stat delay={240} label={t("p_n")} value={n(perf?.measured)} sub="7d" />
-          </div>
         </div>
       </section>
 
