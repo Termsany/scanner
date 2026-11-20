@@ -133,9 +133,14 @@ export const api = {
     }),
 
   // ---- registered users (session cookie) ----
-  register: (email: string, password: string, name: string) =>
+  register: (email: string, password: string, name: string, lang = "ar") =>
     request<{ ok: boolean; status: string }>("/api/me/register", {
-      method: "POST", credentials: "include", body: JSON.stringify({ email, password, name }),
+      method: "POST", credentials: "include", body: JSON.stringify({ email, password, name, lang }),
+    }),
+
+  setLang: (lang: string) =>
+    request<{ lang: string }>("/api/me/lang", {
+      method: "POST", credentials: "include", body: JSON.stringify({ lang }),
     }),
 
   login: (email: string, password: string) =>

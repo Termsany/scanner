@@ -134,8 +134,10 @@ async def load_accounts(session: AsyncSession, s: Settings) -> list[Account]:
     """Enabled accounts, ready for the engine (with their private keys and the owner's Telegram chat)."""
     from app.models import User
 
-    chats = {u.id: u.tg_chat_id for u in (await session.execute(
-        select(User).where(User.tg_chat_id.is_not(None), User.status == "active"))).scalars().all()}
+    linked = (await session.execute(
+        select(User).where(User.tg_chat_id.is_not(None), User.status == "active"))).scalars().all()
+    chats = {u.id: u.tg_chat_id for u in linked}
+    langs = {u.id: ("en" if u.lang == "en" else "ar") for u in linked}
     out = []
     for r in await rows(session, s):
         if r.enabled:
@@ -145,6 +147,7 @@ async def load_accounts(session: AsyncSession, s: Settings) -> list[Account]:
                 key = None                     # wrong encryption key: account stays idle, the worker says why
             a = to_account(r, s, key)
             a.user_chat_id = chats.get(r.user_id) if r.user_id else None
+            a.user_lang = langs.get(r.user_id, "ar") if r.user_id else "ar"
             out.append(a)
     return out
 

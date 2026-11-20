@@ -132,11 +132,45 @@ class Account:
     take_capital_at_pct: Any = _FROM_SETTINGS  # None = off
     max_hold_hours: int | None = None          # None = LIVE_MAX_HOLD_HOURS
     user_chat_id: str | None = None            # owner's own Telegram chat (registered users), never told the leader
+    user_lang: str = "ar"                      # language of those notes
 
 
 # What a user is told about an exit: never which wallet, only what happened
 USER_REASON = {"leader_sold": "exit signal", "leader_trim": "partial exit", "take_capital": "capital taken back",
                "sold_by_hand": "sold by hand", "manual": "sold from your page", "max_hold": "max hold time"}
+USER_REASON_AR = {"leader_sold": "إشارة خروج", "leader_trim": "خروج جزئي", "take_capital": "سحب رأس المال",
+                  "sold_by_hand": "اتباعت يدوي", "manual": "اتباعت من صفحتك", "max_hold": "انتهت مدة الاحتفاظ"}
+
+
+def user_note(lang: str, key: str, **v) -> str:
+    """Texts sent to a registered user's own chat, in their language. Never mention the leader."""
+    ar = lang != "en"
+    if key == "bought":
+        return (f"✅ صفقة جديدة: اشترينا ${v['sym']} بـ ${v['usd']:,.2f}\n{v['tx']}" if ar else
+                f"✅ New trade: bought ${v['sym']} for ${v['usd']:,.2f}\n{v['tx']}")
+    if key == "sold":
+        reason = (USER_REASON_AR if ar else USER_REASON).get(v["reason"], v["reason"].replace("_", " "))
+        if v["done"]:
+            p = v["pnl"]
+            tail = (f"\nالصفقة اتقفلت: {'+' if p >= 0 else '−'}${abs(p):,.2f}" if ar else
+                    f"\nClosed: P&L {'+' if p >= 0 else '−'}${abs(p):,.2f}")
+        else:
+            left = 100 - v["share"] * 100
+            tail = f"\nلسه معاك {left:.0f}% من الصفقة" if ar else f"\nStill holding {left:.0f}% of the position"
+        icon = "🏁" if v["done"] else "💰"
+        return (f"{icon} بعنا {v['share'] * 100:.0f}% من ${v['sym']} بـ ${v['usd']:,.2f} · {reason}{tail}\n{v['tx']}" if ar
+                else f"{icon} Sold {v['share'] * 100:.0f}% of ${v['sym']} for ${v['usd']:,.2f} · {reason}{tail}\n{v['tx']}")
+    if key == "low_sol":
+        return ("⏸ صفقة اتعدت: مفيش SOL كفاية في محفظة التداول. حوّل SOL عشان التداول يكمل." if ar else
+                "⏸ A trade was skipped: not enough SOL in your trading wallet. Deposit SOL to keep trading.")
+    if key == "loss_limit":
+        return ("⏸ وصلت لأقصى خسارة في 24 ساعة: مفيش صفقات جديدة لحد ما الحد يفضى. الصفقات المفتوحة بتتقفل عادي."
+                if ar else "⏸ Your max loss for 24 h is reached: no new trades until it clears. "
+                           "Open trades still close as usual.")
+    if key == "hand":
+        return ("🧾 البيع اللي عملته من محفظتك اتحسب:\n" if ar else
+                "🧾 Sales you made in your wallet are now counted:\n") + v["lines"]
+    raise KeyError(key)
 
 
 def accounts_from_settings(s: Settings) -> list[Account]:
@@ -731,11 +765,9 @@ class CopyEngine:
             if not quiet:
                 await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
                 if why.startswith("not enough SOL"):
-                    await self.tell_user("⏸ A trade was skipped: not enough SOL in your trading wallet. "
-                                         "Deposit SOL to keep trading.")
+                    await self.tell_user(user_note(self.a.user_lang, "low_sol"))
                 elif why.startswith("daily loss limit"):
-                    await self.tell_user("⏸ Your max loss for 24 h is reached: no new trades until it clears. "
-                                         "Open trades still close as usual.")
+                    await self.tell_user(user_note(self.a.user_lang, "loss_limit"))
             return
         free = self._free(t.wallet)
         if self.screener is not None and not free:
@@ -773,7 +805,7 @@ class CopyEngine:
         log.info("live: BUY %s for %.4f SOL ($%.2f) %s", sym, f.sol, f.usd, f.signature)
         await self.notify(f"{self._tag()} ✅ Bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
                           f"Copying {t.wallet_label or t.wallet[:6]}\n{self._tx(f.signature)}")
-        await self.tell_user(f"✅ New trade: bought ${sym} for ${f.usd:,.2f}\n{self._tx(f.signature)}")
+        await self.tell_user(user_note(self.a.user_lang, "bought", sym=sym, usd=f.usd, tx=self._tx(f.signature)))
 
     # ---- sells -------------------------------------------------------------
     async def _on_sell(self, session: AsyncSession, t: WalletTrade) -> None:
@@ -854,8 +886,8 @@ class CopyEngine:
                 else f"\nStill holding {100 - share * 100:.0f}% of the position")
         await self.notify(f"{self._tag()} 💰 Sold {share * 100:.0f}% of ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})"
                           f" · {reason.replace('_', ' ')}{tail}\n{self._tx(f.signature)}")
-        await self.tell_user(f"{'🏁' if done else '💰'} Sold {share * 100:.0f}% of ${sym} for ${f.usd:,.2f} · "
-                             f"{USER_REASON.get(reason, reason.replace('_', ' '))}{tail}\n{self._tx(f.signature)}")
+        await self.tell_user(user_note(self.a.user_lang, "sold", sym=sym, usd=f.usd, share=share, done=done,
+                                       reason=reason, pnl=pos.pnl_usd or 0, tx=self._tx(f.signature)))
         return True
 
     async def _reconcile(self, session: AsyncSession) -> None:
@@ -953,7 +985,7 @@ class CopyEngine:
         if lines:
             await self.notify(f"{self._tag()} 🧾 Found sales you made by hand in the wallet, P&L updated:\n"
                               + "\n".join(lines))
-            await self.tell_user("🧾 Sales you made in your wallet are now counted:\n" + "\n".join(lines))
+            await self.tell_user(user_note(self.a.user_lang, "hand", lines="\n".join(lines)))
 
     async def _take_capital(self, session: AsyncSession) -> None:
         """Position up LIVE_TAKE_CAPITAL_AT_PCT (value now + already sold vs cost): sell tokens worth what is still

@@ -21,7 +21,8 @@
   --color-cyan: #38bdf8;
   --color-glass: rgb(17 24 39 / 0.85);
 
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter), var(--font-plex-arabic), ui-sans-serif, system-ui, sans-serif;
+  --font-arabic: var(--font-plex-arabic), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-jetbrains), ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   --animate-pulse-ring: pulse-ring 1.8s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
@@ -136,4 +137,15 @@
 }
 @utility flash-down {
   animation: flash-down 2.4s ease-out 1;
+}
+
+/* Arabic pages: numbers, amounts and addresses keep left-to-right order inside right-to-left text */
+[dir="rtl"] .num {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: right;
+}
+[dir="rtl"] .font-arabic,
+.font-arabic {
+  font-family: var(--font-arabic);
 }

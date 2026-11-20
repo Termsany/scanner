@@ -283,6 +283,8 @@ def test_telegram_link_through_bot_and_user_safe_commands(env, monkeypatch):
     me_api._bot_name[:] = ["alpha_test_bot"]
     with TestClient(app) as c:
         _approved(c, "ivy@example.com")
+        assert c.get("/api/me").json()["user"]["lang"] == "ar"                       # Arabic by default
+        assert c.post("/api/me/lang", json={"lang": "en"}).json()["lang"] == "en"
         assert c.get("/api/me").json()["telegram"]["linked"] is False
         r = c.post("/api/me/telegram/link")
         assert r.status_code == 200 and r.json()["url"].startswith("https://t.me/alpha_test_bot?start=link_")
@@ -299,6 +301,10 @@ def test_telegram_link_through_bot_and_user_safe_commands(env, monkeypatch):
             assert "/me" in out and "wallet" not in out.lower().replace("trading wallet", "")
         summary = c.portal.call(bot.handle_command, "/me", 4242)
         assert "Your last 24 h" in summary and "/me" in summary
+        c.post("/api/me/lang", json={"lang": "ar"})
+        assert "آخر 24 ساعة" in c.portal.call(bot.handle_command, "/me", 4242)
+        assert "/stop" in c.portal.call(bot.handle_command, "/help", 4242)
+        c.post("/api/me/lang", json={"lang": "en"})
         assert "stop" in c.portal.call(bot.handle_command, "/stop", 4242).lower()
         assert c.get("/api/me").json()["telegram"]["linked"] is False
         c.portal.call(bot.close)

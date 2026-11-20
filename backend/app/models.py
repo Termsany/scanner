@@ -520,6 +520,7 @@ class User(Base):
     tg_link_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tg_link_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tg_daily: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
+    lang: Mapped[str | None] = mapped_column(String(2), nullable=True, default="ar")   # ar | en (pages + notes)
 
 
 class UserSession(Base):

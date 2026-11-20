@@ -41,6 +41,7 @@ class RegisterIn(BaseModel):
     email: str
     password: str
     name: str = ""
+    lang: str = "ar"
 
 
 class LoginIn(BaseModel):
@@ -65,7 +66,8 @@ async def register(body: RegisterIn, request: Request, response: Response, sessi
     if await user_by_email(session, email):
         raise HTTPException(400, "This email is already registered: sign in instead")
     failed("reg:" + ip)                       # counts sign-ups per IP (limits mass registration)
-    user = User(email=email, name=body.name.strip()[:80], password_hash=hash_password(body.password))
+    user = User(email=email, name=body.name.strip()[:80], password_hash=hash_password(body.password),
+                lang="en" if body.lang == "en" else "ar")
     session.add(user)
     await session.flush()
     await audit(session, f"user:{user.id}", "register", email, ip=ip)
@@ -164,7 +166,8 @@ async def me(user: CurrentUser, request: Request, session: Session) -> dict[str,
     s = get_settings()
     from app.users import withdraw_lock_left
 
-    out: dict[str, Any] = {"user": {"email": user.email, "name": user.name, "status": user.status},
+    out: dict[str, Any] = {"user": {"email": user.email, "name": user.name, "status": user.status,
+                                    "lang": "en" if user.lang == "en" else "ar"},
                            "security": {"totp_enabled": bool(user.totp_enabled),
                                         "withdraw_lock_hours": round(withdraw_lock_left(user), 1)},
                            "telegram": {"linked": bool(user.tg_chat_id), "daily": user.tg_daily is not False},
@@ -578,3 +581,14 @@ async def telegram_daily(body: DailyIn, user: CurrentUser, session: Session) -> 
     user.tg_daily = body.daily
     await session.commit()
     return {"daily": body.daily}
+
+
+class LangIn(BaseModel):
+    lang: str
+
+
+@router.post("/lang")
+async def set_lang(body: LangIn, user: CurrentUser, session: Session) -> dict[str, str]:
+    user.lang = "en" if body.lang == "en" else "ar"
+    await session.commit()
+    return {"lang": user.lang}

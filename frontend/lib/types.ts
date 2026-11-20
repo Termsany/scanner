@@ -546,7 +546,7 @@ export interface MyAccount {
 }
 
 export interface Me {
-  user: { email: string; name: string; status: "pending" | "active" | "blocked" };
+  user: { email: string; name: string; status: "pending" | "active" | "blocked"; lang?: "ar" | "en" };
   security: { totp_enabled: boolean; withdraw_lock_hours: number };
   telegram: { linked: boolean; daily: boolean };
   account: MyAccount | null;

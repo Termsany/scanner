@@ -1095,7 +1095,7 @@ def test_user_notes_never_name_the_leader():
     async def send_to(chat, text):
         sent.append((chat, text))
     acct = Account("u7", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, label="Whale DULX")},
-                   user_chat_id="555")
+                   user_chat_id="555", user_lang="en")
 
     async def body(sess):
         eng = CopyEngine(x, _s(), account=acct, send_to=send_to)
@@ -1139,3 +1139,13 @@ def test_engine_writes_a_heartbeat_for_the_watchdog():
         return await _get(sess, _key(HEARTBEAT, "main"))
     beat = _db(body)
     assert beat and beat.startswith("20")
+
+
+def test_user_notes_in_arabic_by_default():
+    from app.live import Account, Leader, user_note
+
+    assert "اشترينا $T" in user_note("ar", "bought", sym="T", usd=30, tx="x")
+    sold = user_note("ar", "sold", sym="T", usd=60, share=1.0, done=True, reason="leader_sold", pnl=30, tx="x")
+    assert "إشارة خروج" in sold and "+$30.00" in sold
+    assert "Sold" in user_note("en", "sold", sym="T", usd=60, share=0.5, done=False, reason="take_capital", pnl=0, tx="x")
+    assert Account("u", 1, 1, 1, []).user_lang == "ar"

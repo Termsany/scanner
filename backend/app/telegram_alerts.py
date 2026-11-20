@@ -504,14 +504,20 @@ class TelegramAlerts:
         async with SessionLocal() as s:
             user = await link_telegram(s, code, chat_id)
             if user is None:
-                return "This link is invalid or expired. Open a new one from your trading page."
+                return ("اللينك ده مش صالح أو انتهى. افتح لينك جديد من صفحة التداول بتاعتك.\n"
+                        "This link is invalid or expired. Open a new one from your trading page.")
             await audit(s, f"user:{user.id}", "telegram_linked")
             await s.commit()
-            email = user.email
+            email, ar = user.email, user.lang != "en"
+        if ar:
+            return (f"✅ اتوصلت بحساب <b>{e(email)}</b>.\nهتوصلك هنا إشعارات صفقاتك وملخص كل يوم.\n"
+                    "/me — نتيجتك دلوقتي · /stop — وقف الإشعارات في الشات ده")
         return (f"✅ Linked to <b>{e(email)}</b>.\nYou will get your trade notes and a daily summary here.\n"
                 "/me — your results now · /stop — stop notes in this chat")
 
     async def _user_command(self, cmd: str, chat_id) -> str:
+        u0 = await self._chat_user(chat_id)
+        ar = u0 is None or u0.lang != "en"
         if cmd == "/stop":
             async with SessionLocal() as s:
                 from sqlalchemy import select
@@ -522,10 +528,12 @@ class TelegramAlerts:
                 if u:
                     u.tg_chat_id = None
                     await s.commit()
-            return "Stopped. Link this chat again from your trading page any time."
+            return ("اتوقف. تقدر توصل الشات ده تاني من صفحة التداول في أي وقت." if ar else
+                    "Stopped. Link this chat again from your trading page any time.")
         if cmd == "/me":
-            u = await self._chat_user(chat_id)
-            return await self.user_summary(u, hours=24) if u else "Not linked."
+            return await self.user_summary(u0, hours=24) if u0 else "Not linked."
+        if ar:
+            return "<b>بوت التداول بتاعك</b>\n/me — نتيجتك في آخر 24 ساعة\n/stop — وقف الإشعارات في الشات ده"
         return "<b>Your trading bot</b>\n/me — your results in the last 24 h\n/stop — stop notes in this chat"
 
     async def user_summary(self, user, hours: int = 24) -> str:
@@ -549,6 +557,18 @@ class TelegramAlerts:
         opened = [r for r in rows if r.status == "open"]
         pnl = sum(r.pnl_usd or 0 for r in closed)
         wins = sum(1 for r in closed if (r.pnl_usd or 0) > 0)
+        if user.lang != "en":
+            lines = [f"<b>آخر {hours} ساعة</b>",
+                     f"النتيجة: {'+' if pnl >= 0 else '−'}${abs(pnl):,.2f} من {len(closed)} صفقة مقفولة"
+                     + (f" (كسبت {wins})" if closed else "")]
+            for r in sorted(closed, key=lambda r: r.pnl_usd or 0, reverse=True)[:5]:
+                p = r.pnl_usd or 0
+                lines.append(f"  ${e(r.symbol or r.token_address[:6])} {'+' if p >= 0 else '−'}${abs(p):,.2f}")
+            lines.append(f"مفتوح دلوقتي: {len(opened)} صفقة · ${sum(r.cost_usd for r in opened):,.2f} داخلين")
+            if acct.paused:
+                lines.append("⏸ حسابك متوقف (مفيش صفقات جديدة).")
+            lines.append(f"التفاصيل: {self.settings.site_url.rstrip('/')}/me")
+            return "\n".join(lines)
         lines = [f"<b>Your last {hours} h</b>",
                  f"Result: {'+' if pnl >= 0 else '−'}${abs(pnl):,.2f} from {len(closed)} closed trade"
                  f"{'' if len(closed) == 1 else 's'}" + (f" ({wins} won)" if closed else "")]
