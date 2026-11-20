@@ -105,7 +105,7 @@ def to_account(row: TradingAccount, s: Settings, private_key: str | None) -> Acc
                                    bool(d.get("new_tokens_only")), d.get("size_usd"))
                for d in row.leaders or []}
     return Account(row.name, row.size_usd, row.max_open_usd, row.max_daily_loss_usd, list(leaders), private_key,
-                   leaders=leaders, paused=bool(row.paused), take_capital_at_pct=row.take_capital_at_pct,
+                   leaders=leaders, paused=bool(row.paused or row.billing_hold), take_capital_at_pct=row.take_capital_at_pct,
                    max_hold_hours=row.max_hold_hours)
 
 
@@ -172,5 +172,6 @@ def public(row: TradingAccount, open_positions: int = 0) -> dict[str, Any]:
         "max_hold_hours": row.max_hold_hours, "leaders": row.leaders or [], "open_positions": open_positions,
         "user_id": row.user_id, "cap_size_usd": row.cap_size_usd, "cap_open_usd": row.cap_open_usd,
         "cap_loss_usd": row.cap_loss_usd, "key_revealed": bool(row.key_revealed),
+        "billing_hold": bool(row.billing_hold),
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }

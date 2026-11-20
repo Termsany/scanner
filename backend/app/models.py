@@ -493,6 +493,11 @@ class TradingAccount(Base):
     cap_open_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     cap_loss_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     key_revealed: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)  # shown to owner once
+    # Billing (users' accounts only): first billed period starts at billing_anchor (approval + trial);
+    # billing_hwm_usd = high-water mark of cumulative realized P&L already charged a profit share on
+    billing_anchor: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    billing_hwm_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    billing_hold: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)  # unpaid: no new buys
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -521,6 +526,7 @@ class User(Base):
     tg_link_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tg_daily: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
     lang: Mapped[str | None] = mapped_column(String(2), nullable=True, default="ar")   # ar | en (pages + notes)
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserSession(Base):
@@ -560,3 +566,36 @@ class PasswordReset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Bill(Base):
+    """One monthly bill of a user's account: fixed fee + profit share above the high-water mark.
+
+    Collected in SOL from the account's own wallet. status: due | sending | paid | check | waived
+    ("check": the transfer may or may not have landed; never retried automatically, the admin confirms).
+    """
+
+    __tablename__ = "bills"
+    __table_args__ = (UniqueConstraint("account", "period_start", name="uq_bill_period"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account: Mapped[str] = mapped_column(String(32), index=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fee_usd: Mapped[float] = mapped_column(Float)
+    profit_pct: Mapped[float] = mapped_column(Float)
+    cum_pnl_usd: Mapped[float] = mapped_column(Float)          # cumulative realized P&L at period end
+    hwm_before_usd: Mapped[float] = mapped_column(Float)
+    hwm_after_usd: Mapped[float] = mapped_column(Float)
+    share_usd: Mapped[float] = mapped_column(Float)
+    total_usd: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(8), default="due")
+    sol_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sol_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    signature: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    last_try_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

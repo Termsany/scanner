@@ -543,6 +543,72 @@ export interface MyAccount {
   open: MyPosition[];
   closed: MyPosition[];
   stats?: MyStats;
+  billing?: MyBilling | null;
+}
+
+export interface Bill {
+  id: number;
+  account?: string;
+  email?: string | null;
+  period_start: string;
+  period_end: string;
+  fee_usd: number;
+  profit_pct: number;
+  profit_usd: number;
+  share_usd: number;
+  total_usd: number;
+  status: "due" | "sending" | "paid" | "check" | "waived";
+  sol_amount: number | null;
+  signature: string | null;
+  attempts?: number;
+  error: string | null;
+  paid_at: string | null;
+  created_at: string | null;
+}
+
+export interface MyBilling {
+  fee_usd: number;
+  profit_pct: number;
+  grace_days: number;
+  hold: boolean;
+  current: {
+    trial: boolean;
+    trial_ends: string | null;
+    period_start: string | null;
+    period_end: string;
+    fee_usd: number;
+    profit_pct: number;
+    profit_usd: number;
+    share_usd: number;
+    total_usd: number;
+    hwm_usd: number;
+  };
+  bills: Bill[];
+}
+
+export interface BillingConfig {
+  enabled: boolean;
+  fee_usd: number;
+  profit_pct: number;
+  trial_days: number;
+  grace_days: number;
+  wallet: string;
+}
+
+export interface BillingAdmin {
+  config: BillingConfig;
+  live: boolean;
+  held: string[];
+  totals: { paid_30d_usd: number; paid_30d_sol: number; due_usd: number; check: number };
+  bills: Bill[];
+}
+
+export interface PublicTerms {
+  billing: boolean;
+  fee_usd: number;
+  profit_pct: number;
+  trial_days: number;
+  grace_days: number;
 }
 
 export interface Me {
@@ -591,6 +657,7 @@ export interface OverviewAccount {
   name: string;
   enabled: boolean;
   paused: boolean;
+  billing_hold: boolean;
   pubkey: string | null;
   owner: { id: number; email: string; status: string } | null;
   size_usd: number;

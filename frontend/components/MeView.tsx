@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlertTriangle,
   ArrowUpRight,
   BarChart3,
   Clock,
@@ -13,13 +14,14 @@ import {
   Save,
   Send,
   ShieldCheck,
+  Receipt,
   Wallet,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { I18nProvider, LangSwitch, useT } from "@/lib/i18n";
-import type { Me, MyAccount, MyPosition, MyStats } from "@/lib/types";
+import type { Me, MyAccount, MyBilling, MyPosition, MyStats } from "@/lib/types";
 
 const REFRESH_MS = 5_000;
 const input =
@@ -62,6 +64,71 @@ function DailyBars({ days }: { days: MyStats["daily"] }) {
         );
       })}
     </svg>
+  );
+}
+
+function day(iso: string | null | undefined) {
+  return iso ? iso.slice(0, 10) : "—";
+}
+
+function BillingCard({ b }: { b: MyBilling }) {
+  const { t } = useT();
+  const c = b.current;
+  const row = (label: string, value: string, cls = "") => (
+    <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
+      <span className="text-muted">{label}</span>
+      <span className={`num ${cls}`} dir="ltr">{value}</span>
+    </div>
+  );
+  return (
+    <section className="card p-4 sm:p-5">
+      <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+        <Receipt className="size-4 text-accent" /> {t("b.title")}
+      </h2>
+      {b.hold && (
+        <p className="mb-3 flex items-start gap-2 rounded-md bg-bear-soft p-2.5 text-xs text-bear">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" /> {t("b.hold")}
+        </p>
+      )}
+      {c.trial ? (
+        <p className="text-sm text-bull">{t("b.trial", { d: day(c.trial_ends) })}</p>
+      ) : (
+        <>
+          <p className="mb-1 text-xs text-faint">{t("b.period", { a: day(c.period_start), b: day(c.period_end) })}</p>
+          <div className="divide-y divide-line">
+            {row(t("b.fee"), money(c.fee_usd))}
+            {row(t("b.profit"), money(Math.max(c.profit_usd, 0)), c.profit_usd > 0 ? "text-bull" : "")}
+            {row(t("b.share", { pct: c.profit_pct }), money(c.share_usd))}
+            {row(t("b.est"), money(c.total_usd), "font-semibold")}
+          </div>
+        </>
+      )}
+      <p className="mt-2 text-xs text-faint">{t("b.how")}</p>
+      {b.bills.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">{t("b.history")}</div>
+          <ul className="divide-y divide-line text-sm">
+            {b.bills.map((x) => (
+              <li key={x.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
+                <span className="text-xs text-faint" dir="ltr">{day(x.period_start)} → {day(x.period_end)}</span>
+                <span className="num" dir="ltr">{money(x.total_usd)}</span>
+                <span className={`rounded px-1.5 py-0.5 text-[10px] ${
+                  x.status === "paid" ? "bg-bull-soft text-bull" : x.status === "due" ? "bg-warn-soft text-warn"
+                    : "bg-raised text-muted"}`}>
+                  {t(`b.s.${x.status}` as Parameters<typeof t>[0])}
+                </span>
+                {x.signature && (
+                  <a className="ms-auto text-xs text-faint hover:text-ink" target="_blank" rel="noreferrer"
+                    href={`https://solscan.io/tx/${x.signature}`}>
+                    <ExternalLink className="inline size-3" />
+                  </a>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -623,7 +690,13 @@ function Page() {
             <Stat label={t("m.wallet")} value={a.sol_balance != null ? `${a.sol_balance.toFixed(3)} SOL` : "—"}
               sub={a.sol_balance_usd != null ? money(a.sol_balance_usd) : undefined} />
           </section>
+          {a.billing?.hold && (
+            <p className="flex items-start gap-2 rounded-md border border-bear/40 bg-bear-soft p-3 text-sm text-bear">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" /> {t("b.hold")}
+            </p>
+          )}
           {a.stats && <PerformanceCard s={a.stats} />}
+          {a.billing && <BillingCard b={a.billing} />}
           <section className="card">
             <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">{t("m.open_trades")}</h2>
             <Positions rows={a.open} live onSell={async (p, sh) => {

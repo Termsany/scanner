@@ -7,6 +7,7 @@ leader-activity feed is not exposed, and exit reasons use neutral words.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 import httpx
@@ -42,6 +43,7 @@ class RegisterIn(BaseModel):
     password: str
     name: str = ""
     lang: str = "ar"
+    accept_terms: bool = False
 
 
 class LoginIn(BaseModel):
@@ -65,9 +67,14 @@ async def register(body: RegisterIn, request: Request, response: Response, sessi
         raise HTTPException(400, problem)
     if await user_by_email(session, email):
         raise HTTPException(400, "This email is already registered: sign in instead")
+    from app.billing import get_config
+
+    if (await get_config(session, s))["enabled"] and not body.accept_terms:
+        raise HTTPException(400, "Accept the fees and terms to sign up")
     failed("reg:" + ip)                       # counts sign-ups per IP (limits mass registration)
     user = User(email=email, name=body.name.strip()[:80], password_hash=hash_password(body.password),
-                lang="en" if body.lang == "en" else "ar")
+                lang="en" if body.lang == "en" else "ar",
+                terms_accepted_at=datetime.now(timezone.utc) if body.accept_terms else None)
     session.add(user)
     await session.flush()
     await audit(session, f"user:{user.id}", "register", email, ip=ip)
@@ -206,7 +213,37 @@ async def me(user: CurrentUser, request: Request, session: Session) -> dict[str,
     from app.users import account_stats
 
     out["account"]["stats"] = await account_stats(session, a.name, mode)
+    out["account"]["billing"] = await _my_billing(session, a, mode)
     return out
+
+
+async def _my_billing(session: AsyncSession, a: TradingAccount, mode: str) -> dict[str, Any] | None:
+    from app.billing import Bill, bill_out, cum_pnl, estimate, get_config
+
+    cfg = await get_config(session)
+    if not cfg["enabled"]:
+        return None
+    now = datetime.now(timezone.utc)
+    bills = (await session.execute(select(Bill).where(Bill.account == a.name).order_by(Bill.id.desc()).limit(12))
+             ).scalars().all()
+    est = estimate(a, cfg, await cum_pnl(session, a.name, mode, now),
+                   await cum_pnl(session, a.name, mode, a.billing_anchor or now), now)
+    if bills:
+        est["trial"] = False          # the next period has not started yet, but the trial is long over
+    return {"fee_usd": cfg["fee_usd"], "profit_pct": cfg["profit_pct"], "grace_days": cfg["grace_days"],
+            "hold": bool(a.billing_hold), "current": est,
+            "bills": [{k: v for k, v in bill_out(b).items() if k not in ("user_id", "account", "attempts")}
+                      for b in bills]}
+
+
+@router.get("/terms")
+async def terms(session: Session) -> dict[str, Any]:
+    """Public: the fees shown on the sign-up page."""
+    from app.billing import get_config
+
+    cfg = await get_config(session)
+    return {"billing": cfg["enabled"], "fee_usd": cfg["fee_usd"], "profit_pct": cfg["profit_pct"],
+            "trial_days": cfg["trial_days"], "grace_days": cfg["grace_days"]}
 
 
 class MySettingsIn(BaseModel):

@@ -1,10 +1,11 @@
 "use client";
 
 import { LogIn, UserPlus } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { I18nProvider, LangSwitch, useT } from "@/lib/i18n";
+import type { PublicTerms } from "@/lib/types";
 
 const input =
   "w-full rounded-md border border-line bg-carbon px-3 py-2 text-sm outline-none focus:border-accent";
@@ -19,12 +20,21 @@ function Login() {
   const [pw2, setPw2] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [terms, setTerms] = useState<PublicTerms | null>(null);
+  const [agree, setAgree] = useState(false);
+  useEffect(() => {
+    api.terms().then(setTerms).catch(() => undefined);
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr("");
     if (mode === "register" && pw !== pw2) {
       setErr(t("l.mismatch"));
+      return;
+    }
+    if (mode === "register" && terms?.billing && !agree) {
+      setErr(t("b.must"));
       return;
     }
     setBusy(true);
@@ -35,7 +45,7 @@ function Login() {
         return;
       }
       if (mode === "login") await api.login(email, pw);
-      else await api.register(email, pw, name, lang);
+      else await api.register(email, pw, name, lang, agree);
       window.location.href = "/me";
     } catch (e) {
       setErr(e instanceof ApiError ? srv(e.message) : t("c.error"));
@@ -68,6 +78,12 @@ function Login() {
         {mode === "register" && (
           <input className={input} type="password" placeholder={t("l.repeat")} value={pw2}
             required autoComplete="new-password" onChange={(e) => setPw2(e.target.value)} />
+        )}
+        {mode === "register" && terms?.billing && (
+          <label className="flex items-start gap-2 rounded-md border border-line p-2.5 text-xs leading-relaxed text-muted">
+            <input type="checkbox" className="mt-0.5" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
+            <span>{t("b.terms", { fee: terms.fee_usd, pct: terms.profit_pct, trial: terms.trial_days, grace: terms.grace_days })}</span>
+          </label>
         )}
         {err && <p className="text-xs text-bear">{err}</p>}
         {info && <p className="text-xs text-bull">{info}</p>}

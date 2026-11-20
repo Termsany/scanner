@@ -7,6 +7,10 @@ import type {
   LiveStatus,
   AccountsList,
   AdminOverview,
+  Bill,
+  BillingAdmin,
+  BillingConfig,
+  PublicTerms,
   Me,
   MySettings,
   SiteUser,
@@ -137,9 +141,24 @@ export const api = {
     }),
 
   // ---- registered users (session cookie) ----
-  register: (email: string, password: string, name: string, lang = "ar") =>
+  register: (email: string, password: string, name: string, lang = "ar", accept_terms = false) =>
     request<{ ok: boolean; status: string }>("/api/me/register", {
-      method: "POST", credentials: "include", body: JSON.stringify({ email, password, name, lang }),
+      method: "POST", credentials: "include", body: JSON.stringify({ email, password, name, lang, accept_terms }),
+    }),
+
+  terms: () => request<PublicTerms>("/api/me/terms"),
+
+  billing: (password: string) =>
+    request<BillingAdmin>("/api/live/billing", { headers: { "X-Live-Password": password } }),
+
+  billingConfig: (password: string, body: Partial<BillingConfig>) =>
+    request<{ config: BillingConfig }>("/api/live/billing/config", {
+      method: "PUT", headers: { "X-Live-Password": password }, body: JSON.stringify(body),
+    }),
+
+  billAction: (password: string, id: number, action: "waive" | "paid" | "due", signature?: string) =>
+    request<{ bill: Bill }>(`/api/live/billing/bills/${id}`, {
+      method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify({ action, signature }),
     }),
 
   setLang: (lang: string) =>

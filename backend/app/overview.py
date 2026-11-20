@@ -66,7 +66,7 @@ async def build_overview(session: AsyncSession, s: Settings, now: datetime | Non
         last = max((_utc(p.closed_at or p.opened_at) for p in ps if p.closed_at or p.opened_at), default=None)
         beat = await _get(session, _key(HEARTBEAT, r.name))
         accounts.append({
-            "name": r.name, "enabled": r.enabled, "paused": bool(r.paused),
+            "name": r.name, "enabled": r.enabled, "paused": bool(r.paused), "billing_hold": bool(r.billing_hold),
             "pubkey": await _get(session, _key(PUBKEY, r.name)) or r.pubkey,
             "owner": ({"id": owner.id, "email": owner.email, "status": owner.status} if owner else None),
             "size_usd": r.size_usd, "max_open_usd": r.max_open_usd,

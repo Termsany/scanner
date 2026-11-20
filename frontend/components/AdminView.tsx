@@ -8,6 +8,7 @@ import {
   ExternalLink,
   LayoutDashboard,
   Lock,
+  Receipt,
   RefreshCw,
   UserPlus,
   Users,
@@ -17,7 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
-import type { AdminOverview, OverviewAccount } from "@/lib/types";
+import type { AdminOverview, Bill, BillingAdmin, BillingConfig, OverviewAccount } from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live and Accounts pages
 const REFRESH_MS = 15_000;
@@ -133,6 +134,7 @@ function Status({ a, now }: { a: OverviewAccount; now: number }) {
   else if (a.paused) chips.push(["paused", "bg-warn-soft text-warn"]);
   else chips.push(["on", "bg-bull-soft text-bull"]);
   if (a.enabled && (beat == null || beat > STALE_MIN)) chips.push(["engine stale", "bg-bear-soft text-bear"]);
+  if (a.billing_hold) chips.push(["unpaid: buys held", "bg-bear-soft text-bear"]);
   if (a.owner?.status === "blocked") chips.push(["blocked", "bg-bear-soft text-bear"]);
   return (
     <span className="flex flex-wrap gap-1">
@@ -271,6 +273,211 @@ function Recent({ items, now }: { items: AdminOverview["recent"]; now: number })
           ))}
         </ul>
       )}
+    </section>
+  );
+}
+
+const STATUS_CLS: Record<Bill["status"], string> = {
+  paid: "bg-bull-soft text-bull",
+  due: "bg-warn-soft text-warn",
+  check: "bg-bear-soft text-bear",
+  sending: "bg-bear-soft text-bear",
+  waived: "bg-raised text-muted",
+};
+
+function BillingPanel({ password, now }: { password: string; now: number }) {
+  const [data, setData] = useState<BillingAdmin | null>(null);
+  const [draft, setDraft] = useState<Record<keyof BillingConfig, string> | null>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.billing(password);
+      setData(r);
+      setDraft((d) => d ?? {
+        enabled: r.config.enabled ? "1" : "", fee_usd: String(r.config.fee_usd),
+        profit_pct: String(r.config.profit_pct), trial_days: String(r.config.trial_days),
+        grace_days: String(r.config.grace_days), wallet: r.config.wallet,
+      });
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "Could not load billing.");
+    }
+  }, [password]);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 60_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  async function save() {
+    if (!draft || !data) return;
+    const enabling = !!draft.enabled && !data.config.enabled;
+    if (enabling && !confirm(
+      `Turn billing on? From now on users' accounts are charged automatically in SOL from their trading wallets `
+      + `to ${draft.wallet}: $${draft.fee_usd}/month + ${draft.profit_pct}% of profit above their high-water mark. `
+      + `Billing periods start now (no past months are billed).`)) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      const r = await api.billingConfig(password, {
+        enabled: !!draft.enabled, fee_usd: Number(draft.fee_usd), profit_pct: Number(draft.profit_pct),
+        trial_days: Number(draft.trial_days), grace_days: Number(draft.grace_days), wallet: draft.wallet.trim(),
+      });
+      setMsg(r.config.enabled ? "Saved. Billing is on." : "Saved. Billing is off.");
+      await load();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "Save failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function act(b: Bill, action: "waive" | "paid" | "due") {
+    let sig: string | undefined;
+    if (action === "paid") {
+      const v = prompt(`Bill #${b.id}: transaction signature from Solscan (optional)`, b.signature ?? "");
+      if (v === null) return;
+      sig = v.trim() || undefined;
+    } else if (action === "waive" && !confirm(`Waive bill #${b.id} ($${b.total_usd.toFixed(2)})?`)) {
+      return;
+    } else if (action === "due" && !confirm(
+      `Collect bill #${b.id} again? Only if Solscan shows the earlier transfer did NOT land.`)) {
+      return;
+    }
+    try {
+      await api.billAction(password, b.id, action, sig);
+      await load();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "Failed.");
+    }
+  }
+
+  const field = (k: keyof BillingConfig, label: string, cls = "") => draft && (
+    <label className={`flex flex-col gap-1 text-xs text-muted ${cls}`}>
+      {label}
+      <input className={`${input} num`} value={draft[k]} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} />
+    </label>
+  );
+
+  return (
+    <section className="card overflow-hidden">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+        <Receipt className="size-4 text-accent" />
+        <h2 className="text-sm font-semibold">Billing</h2>
+        {data && (
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
+            data.config.enabled ? "bg-bull-soft text-bull" : "bg-raised text-muted"}`}>
+            {data.config.enabled ? "on" : "off"}
+          </span>
+        )}
+        {data && !data.live && <span className="text-xs text-warn">Collects only when LIVE_MODE=live.</span>}
+        {data && (
+          <span className="ms-auto text-xs text-muted">
+            Collected 30d <b className="num text-ink">{money(data.totals.paid_30d_usd)}</b>
+            {" "}({data.totals.paid_30d_sol.toFixed(3)} SOL) · due <b className="num text-ink">{money(data.totals.due_usd)}</b>
+            {data.totals.check > 0 && <span className="text-bear"> · {data.totals.check} to check</span>}
+          </span>
+        )}
+      </header>
+      {draft && (
+        <div className="grid gap-3 border-b border-line p-4 sm:grid-cols-6">
+          {field("fee_usd", "Monthly fee ($)")}
+          {field("profit_pct", "Profit share (%)")}
+          {field("trial_days", "Free trial (days)")}
+          {field("grace_days", "Grace before pause (days)")}
+          {field("wallet", "Wallet that receives payments", "sm:col-span-2")}
+          <label className="flex items-center gap-2 text-sm sm:col-span-4">
+            <input type="checkbox" checked={!!draft.enabled}
+              onChange={(e) => setDraft({ ...draft, enabled: e.target.checked ? "1" : "" })} />
+            Billing on (charges users&apos; wallets automatically each month)
+          </label>
+          <div className="flex items-center gap-2 sm:col-span-2 sm:justify-end">
+            {msg && <span className="text-xs text-muted">{msg}</span>}
+            <button type="button" disabled={busy} onClick={save}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-carbon disabled:opacity-50">
+              Save
+            </button>
+          </div>
+          {data && data.held.length > 0 && (
+            <p className="text-xs text-bear sm:col-span-6">New buys paused for unpaid bills: {data.held.join(", ")}</p>
+          )}
+        </div>
+      )}
+      {data && (data.bills.length === 0 ? (
+        <p className="px-4 py-3 text-sm text-muted">No bills yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[860px] text-sm">
+            <thead className="text-[11px] tracking-wide text-muted uppercase">
+              <tr className="border-b border-line">
+                <th className="px-3 py-2 text-left font-medium">Bill</th>
+                <th className="px-3 py-2 text-left font-medium">Period</th>
+                <th className="px-3 py-2 text-right font-medium">Fee</th>
+                <th className="px-3 py-2 text-right font-medium">Profit → share</th>
+                <th className="px-3 py-2 text-right font-medium">Total</th>
+                <th className="px-3 py-2 text-left font-medium">Status</th>
+                <th className="px-3 py-2 text-right font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {data.bills.map((b) => (
+                <tr key={b.id} className="border-b border-line align-top last:border-0">
+                  <td className="px-3 py-2">
+                    <div className="font-medium">#{b.id} · {b.account}</div>
+                    <div className="text-xs text-faint">{b.email ?? ""}</div>
+                  </td>
+                  <td className="px-3 py-2 text-xs text-muted">
+                    {b.period_start.slice(0, 10)} → {b.period_end.slice(0, 10)}
+                  </td>
+                  <td className="num px-3 py-2 text-right">{money(b.fee_usd)}</td>
+                  <td className="num px-3 py-2 text-right">
+                    {money(b.profit_usd)} → {money(b.share_usd)}
+                    <div className="text-xs text-faint">{b.profit_pct}%</div>
+                  </td>
+                  <td className="num px-3 py-2 text-right font-medium">
+                    {money(b.total_usd)}
+                    {b.sol_amount != null && <div className="text-xs text-faint">{b.sol_amount.toFixed(4)} SOL</div>}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_CLS[b.status]}`}>
+                      {b.status === "sending" ? "check" : b.status}
+                    </span>
+                    {b.signature && (
+                      <a className="ms-1.5 inline-flex items-center gap-0.5 text-xs text-faint hover:text-ink"
+                        target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${b.signature}`}>
+                        tx <ExternalLink className="size-3" />
+                      </a>
+                    )}
+                    <div className="text-xs text-faint">
+                      {b.status === "paid" ? since(b.paid_at, now) : b.error ?? ""}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                    {(b.status === "check" || b.status === "sending") && (
+                      <>
+                        <button type="button" className={navBtn} onClick={() => act(b, "paid")}>Landed</button>{" "}
+                        <button type="button" className={navBtn} onClick={() => act(b, "due")}>Did not land</button>{" "}
+                      </>
+                    )}
+                    {b.status === "due" && (
+                      <>
+                        <button type="button" className={navBtn} onClick={() => act(b, "paid")}>Mark paid</button>{" "}
+                      </>
+                    )}
+                    {b.status !== "paid" && b.status !== "waived" && (
+                      <button type="button" className={navBtn} onClick={() => act(b, "waive")}>Waive</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
     </section>
   );
 }
@@ -439,6 +646,7 @@ export function AdminView() {
           </section>
 
           <AccountsTable accounts={data.accounts} now={now} />
+          <BillingPanel password={password} now={now} />
           <Recent items={data.recent} now={now} />
         </div>
       )}

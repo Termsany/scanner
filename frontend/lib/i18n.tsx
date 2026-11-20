@@ -91,6 +91,28 @@ const DICT = {
   "x.max hold time": ["max hold time", "انتهت مدة الاحتفاظ"],
 
   // performance
+  // billing
+  "b.title": ["Fees", "الرسوم"],
+  "b.terms": ["I agree to the fees: ${fee} a month plus {pct}% of each month's net profit above my best month so far (no share in a losing month until it is won back), taken in SOL from my trading wallet. The first {trial} days are free. If a bill stays unpaid {grace} days, new buys pause until it is paid.",
+    "موافق على الرسوم: ${fee} في الشهر + {pct}% من صافي ربح الشهر فوق أعلى مستوى وصلتله قبل كده (الشهر الخسران مفيهوش نسبة لحد ما الخسارة تتعوض)، بتتخصم SOL من محفظة التداول بتاعتي. أول {trial} أيام مجاناً. لو الفاتورة فضلت مش مدفوعة {grace} أيام، الشراء الجديد بيقف لحد ما تتدفع."],
+  "b.must": ["Accept the fees to sign up.", "لازم توافق على الرسوم علشان تسجل."],
+  "b.trial": ["Free trial until {d}", "فترة مجانية لحد {d}"],
+  "b.period": ["This month: {a} → {b}", "الشهر الحالي: من {a} إلى {b}"],
+  "b.fee": ["Monthly fee", "الاشتراك الشهري"],
+  "b.profit": ["Profit this month (above your best)", "ربح الشهر (فوق أعلى مستوى)"],
+  "b.share": ["Profit share ({pct}%)", "نسبة الربح ({pct}%)"],
+  "b.est": ["Bill if the month ended now", "الفاتورة لو الشهر خلص دلوقتي"],
+  "b.how": ["Taken in SOL from your trading wallet when the month ends. Keep some SOL there.",
+    "بتتخصم SOL من محفظة التداول آخر الشهر. سيب فيها SOL كفاية."],
+  "b.hold": ["A bill is unpaid: new buys are paused. Add SOL to your trading wallet; it is collected within the hour and buying resumes.",
+    "فيه فاتورة مش مدفوعة: الشراء الجديد واقف. ضيف SOL لمحفظة التداول، وهتتخصم خلال ساعة والشراء يرجع."],
+  "b.history": ["Past bills", "الفواتير السابقة"],
+  "b.s.paid": ["paid", "مدفوعة"],
+  "b.s.due": ["due", "مستحقة"],
+  "b.s.waived": ["waived", "معفاة"],
+  "b.s.check": ["being checked", "تحت المراجعة"],
+  "b.s.sending": ["being checked", "تحت المراجعة"],
+
   "f.title": ["Performance", "الأداء"],
   "f.none": ["No closed trades yet. Results show here after the first one closes.", "لسه مفيش صفقات مقفولة. النتايج هتظهر هنا بعد أول صفقة تتقفل."],
   "f.total": ["Total result", "النتيجة الكلية"],
@@ -189,6 +211,7 @@ export type Key = keyof typeof DICT;
 
 // Messages the server sends, shown in Arabic when they are known (prefix match); anything else stays as sent.
 const SERVER_AR: [RegExp, string][] = [
+  [/^Accept the fees and terms/, "لازم توافق على الرسوم علشان تسجل"],
   [/^Wrong email or password/, "الإيميل أو كلمة السر غلط"],
   [/^Wrong password/, "كلمة السر غلط"],
   [/^Current password is wrong/, "كلمة السر الحالية غلط"],

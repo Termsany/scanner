@@ -575,3 +575,85 @@ async def audit_log(session: Session, _: Auth, limit: int = 100, q: str = "") ->
     rows = (await session.execute(stmt)).scalars().all()
     return {"entries": [{"at": r.at.isoformat() if r.at else None, "actor": r.actor, "action": r.action,
                          "target": r.target, "details": r.details, "ip": r.ip} for r in rows]}
+
+
+# ---- billing (admin) -------------------------------------------------------------------
+class BillingConfigIn(BaseModel):
+    enabled: bool | None = None
+    fee_usd: float | None = None
+    profit_pct: float | None = None
+    trial_days: int | None = None
+    grace_days: int | None = None
+    wallet: str | None = None
+
+
+@router.get("/billing")
+async def billing(session: Session, _: Auth) -> dict[str, Any]:
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from app.billing import Bill, bill_out, get_config
+    from app.models import TradingAccount, User
+
+    cfg = await get_config(session)
+    bills = (await session.execute(select(Bill).order_by(Bill.id.desc()).limit(300))).scalars().all()
+    emails = {u.id: u.email for u in (await session.execute(select(User))).scalars().all()}
+    held = [r.name for r in (await session.execute(select(TradingAccount).where(
+        TradingAccount.billing_hold.is_(True)))).scalars().all()]
+    month_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    paid = [b for b in bills if b.status == "paid" and b.paid_at and utc(b.paid_at) >= month_ago]
+    return {
+        "config": cfg, "live": get_settings().live_mode == "live", "held": held,
+        "totals": {"paid_30d_usd": sum(b.total_usd for b in paid), "paid_30d_sol": sum(b.sol_amount or 0 for b in paid),
+                   "due_usd": sum(b.total_usd for b in bills if b.status == "due"),
+                   "check": sum(1 for b in bills if b.status in ("check", "sending"))},
+        "bills": [{**bill_out(b), "email": emails.get(b.user_id)} for b in bills],
+    }
+
+
+@router.put("/billing/config")
+async def billing_config(body: BillingConfigIn, request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    from app.billing import BillingError, set_config
+    from app.users import audit
+
+    try:
+        cfg = await set_config(session, body.model_dump(exclude_none=True))
+    except BillingError as exc:
+        raise HTTPException(400, str(exc)) from None
+    await audit(session, "admin", "billing_config", "billing", body.model_dump(exclude_none=True), _ip(request))
+    await session.commit()
+    return {"config": cfg}
+
+
+class BillActionIn(BaseModel):
+    action: str                 # waive | paid | due
+    signature: str | None = None
+
+
+@router.post("/billing/bills/{bill_id}")
+async def bill_action(bill_id: int, body: BillActionIn, request: Request, session: Session,
+                      _: Auth) -> dict[str, Any]:
+    """waive: forgive it. paid: a "check" transfer did land (with its signature). due: it did not, try again."""
+    from app.billing import Bill, bill_out, get_config, update_holds
+    from app.users import audit
+
+    b = await session.get(Bill, bill_id)
+    if b is None:
+        raise HTTPException(404, "No such bill")
+    allowed = {"waive": ("due", "check", "sending"), "paid": ("check", "sending", "due"), "due": ("check", "sending")}
+    if body.action not in allowed or b.status not in allowed[body.action]:
+        raise HTTPException(409, f"Cannot {body.action} a bill that is {b.status}")
+    now = datetime.now(timezone.utc)
+    if body.action == "waive":
+        b.status, b.error = "waived", None
+    elif body.action == "paid":
+        b.status, b.paid_at, b.error = "paid", now, None
+        if body.signature:
+            b.signature = body.signature.strip()[:128]
+    else:
+        b.status, b.last_try_at = "due", None
+    await audit(session, "admin", f"bill_{body.action}", b.account, {"bill": b.id, "usd": b.total_usd}, _ip(request))
+    await update_holds(session, await get_config(session), now)
+    await session.commit()
+    return {"bill": bill_out(b)}

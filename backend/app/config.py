@@ -156,6 +156,13 @@ class Settings(BaseSettings):
     user_default_size_usd: float = 10.0
     user_default_open_usd: float = 100.0
     user_default_loss_usd: float = 50.0   # unlocks /live on the dashboard; unset = page disabled
+    # Billing of users' accounts (first values only: the admin edits them on /admin, stored in the database).
+    # Off until the admin turns it on and sets the wallet that receives the payments.
+    billing_fee_usd: float = 59.0                 # fixed fee per month
+    billing_profit_pct: float = 15.0              # share of the month's net profit above the high-water mark
+    billing_trial_days: int = 7                   # free days after approval
+    billing_grace_days: int = 3                   # unpaid this long after the period ends: new buys pause
+    billing_interval_seconds: float = 600.0       # how often the worker creates and collects bills
 
     # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)
     perf_interval_seconds: int = 300
