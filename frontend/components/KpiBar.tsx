@@ -17,7 +17,7 @@ export function TelemetryBar({ status, socket, now }: { status: ScannerStatus | 
             <ScanSearch className="size-4 text-bull" />
           </div>
           <div className="leading-tight">
-            <h1 className="text-[14px] font-semibold tracking-tight">Alpha Scanner</h1>
+            <h1 className="text-[14px] font-semibold tracking-tight">سرب <span className="text-muted">Sirb</span></h1>
             <p className="text-[10.5px] text-faint">SOL · ETH · BASE · BSC</p>
           </div>
         </div>

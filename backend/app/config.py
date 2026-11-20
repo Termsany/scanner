@@ -149,7 +149,7 @@ class Settings(BaseSettings):
     site_url: str = "https://scanner.da3m.io"     # for links in reset messages
     # Password-reset email through Resend (https://resend.com). Unset = the link goes to the operator on Telegram
     resend_api_key: str | None = None
-    email_from: str = "Alpha Scanner <no-reply@da3m.io>"
+    email_from: str = "Sirb <no-reply@da3m.io>"
     password_reset_minutes: int = 60
     withdraw_lock_hours: int = 24                 # after a password reset or a 2FA reset/removal
     auth_cookie_secure: bool = True               # HTTPS only; set false for local http development

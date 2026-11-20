@@ -533,8 +533,8 @@ class TelegramAlerts:
         if cmd == "/me":
             return await self.user_summary(u0, hours=24) if u0 else "Not linked."
         if ar:
-            return "<b>بوت التداول بتاعك</b>\n/me — نتيجتك في آخر 24 ساعة\n/stop — وقف الإشعارات في الشات ده"
-        return "<b>Your trading bot</b>\n/me — your results in the last 24 h\n/stop — stop notes in this chat"
+            return "<b>سرب · بوت التداول بتاعك</b>\n/me — نتيجتك في آخر 24 ساعة\n/stop — وقف الإشعارات في الشات ده"
+        return "<b>Sirb · your trading bot</b>\n/me — your results in the last 24 h\n/stop — stop notes in this chat"
 
     async def user_summary(self, user, hours: int = 24) -> str:
         from datetime import timedelta
@@ -668,7 +668,7 @@ class TelegramAlerts:
             return await self._user_command(cmd, chat_id)
 
         if cmd in ("/start", "/help"):
-            return ("<b>Alpha Scanner</b>\n"
+            return ("<b>سرب Sirb</b>\n"
                     "/top [solana|ethereum|base|bsc] — top 5 by Alpha Score\n"
                     "/token &lt;address&gt; — score card\n"
                     "/status — scanner health\n"

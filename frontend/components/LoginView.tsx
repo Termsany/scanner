@@ -57,7 +57,13 @@ function Login() {
 
   return (
     <main className="mx-auto flex min-h-[75vh] max-w-sm flex-col justify-center px-4">
-      <div className="mb-3 flex justify-end"><LangSwitch /></div>
+      <div className="mb-4 flex items-center justify-between">
+        <div className="flex items-baseline gap-2">
+          <span className="text-2xl font-bold tracking-tight">سرب</span>
+          <span className="text-sm text-muted">Sirb</span>
+        </div>
+        <LangSwitch />
+      </div>
       <form className="card flex flex-col gap-3 p-6" onSubmit={submit}>
         <h1 className="flex items-center gap-2 text-base font-semibold">
           {mode === "login" ? <LogIn className="size-4 text-accent" /> : <UserPlus className="size-4 text-accent" />}

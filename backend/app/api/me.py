@@ -496,7 +496,7 @@ async def forgot(body: ForgotIn, request: Request, session: Session) -> dict[str
         await audit(session, f"user:{user.id}", "reset_requested", ip=ip)
         await session.commit()
         mins = get_settings().password_reset_minutes
-        sent = await send_email(email, "Reset your Alpha Scanner password",
+        sent = await send_email(email, "Reset your Sirb password · تغيير كلمة سر سرب",
                                 f"<p>Someone asked to reset the password of {email}.</p>"
                                 f'<p><a href="{link}">Choose a new password</a> (works once, for {mins} minutes).</p>'
                                 "<p>If it wasn't you, ignore this email.</p>")

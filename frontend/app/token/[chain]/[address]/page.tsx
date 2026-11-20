@@ -8,7 +8,7 @@ type Params = Promise<{ chain: string; address: string }>;
 
 export async function generateMetadata({ params }: { params: Params }): Promise<Metadata> {
   const { chain, address } = await params;
-  return { title: `${decodeURIComponent(address).slice(0, 6)}… on ${chain} · Alpha Scanner` };
+  return { title: `${decodeURIComponent(address).slice(0, 6)}… on ${chain} · Sirb` };
 }
 
 /** Deep link (used by Telegram alerts): dashboard with the inspector already open. */

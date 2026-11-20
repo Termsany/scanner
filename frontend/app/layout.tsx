@@ -10,7 +10,7 @@ const plexArabic = IBM_Plex_Sans_Arabic({
 });
 
 export const metadata: Metadata = {
-  title: "Alpha Scanner",
+  title: "سرب Sirb",
   description: "Real-time multi-chain DEX scanner with security audits and Alpha Score signals.",
 };
 

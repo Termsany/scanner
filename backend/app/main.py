@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await engine.dispose()
 
 
-app = FastAPI(title="Alpha Scanner API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Sirb API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1_024)
 app.add_middleware(
     CORSMiddleware,

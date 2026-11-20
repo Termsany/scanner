@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { LiveView } from "@/components/LiveView";
 
 export const metadata: Metadata = {
-  title: "Live Trading · Alpha Scanner",
+  title: "Live Trading · Sirb",
   robots: { index: false, follow: false },
 };
 

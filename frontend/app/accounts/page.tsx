@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { AccountsView } from "@/components/AccountsView";
 
 export const metadata: Metadata = {
-  title: "Trading Accounts · Alpha Scanner",
+  title: "Trading Accounts · Sirb",
   robots: { index: false, follow: false },
 };
 
