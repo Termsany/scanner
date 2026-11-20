@@ -11,9 +11,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, LockScreen, PageHeader, Panel, StatTile } from "@/components/ui";
-import { api, ApiError } from "@/lib/api";
+import { Badge, button, Empty, PageHeader, Panel, StatTile } from "@/components/ui";
+import { api, ApiError, SESSION } from "@/lib/api";
 import { ago, pct, price } from "@/lib/format";
 import type {
   LeaderTrade,
@@ -36,6 +37,7 @@ function readSaved(): string {
 
 function save(v: string | null) {
   try {
+    if (v === SESSION) return;
     if (v) localStorage.setItem(KEY, v);
     else localStorage.removeItem(KEY);
   } catch {
@@ -262,10 +264,7 @@ export function LiveView() {
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => {
-    const saved = readSaved();
-    if (saved) setPassword(saved);
-  }, []);
+  useAdminResume(setPassword);
 
   const load = useCallback(async (pw: string, signal?: AbortSignal) => {
     try {
@@ -343,8 +342,7 @@ export function LiveView() {
     return (
       <>
         <AppNav />
-        <LockScreen title="Live trading" hint="Private page. Enter the password the bot sent you on Telegram."
-          value={input} onChange={setInput} onSubmit={() => setPassword(input)} error={error} />
+        <AdminSignIn onDone={() => setPassword(SESSION)} />
       </>
     );
   }
@@ -389,8 +387,8 @@ export function LiveView() {
                 {data.paused ? "Resume buys" : "Pause buys"}
               </button>
             )}
-            <button onClick={() => { save(null); setPassword(""); setInput(""); setData(null); }} className={button("ghost")}>
-              <LogOut className="size-3.5" /> Lock
+            <button onClick={async () => { await adminSignOut(); setPassword(""); setInput(""); setData(null); }} className={button("ghost")}>
+              <LogOut className="size-3.5" /> Sign out
             </button>
           </>
         } />

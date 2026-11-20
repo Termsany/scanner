@@ -49,8 +49,12 @@ function Login() {
         setInfo(t("l.reset_sent"));
         return;
       }
-      if (mode === "login") await api.login(email, pw);
-      else await api.register(email, pw, name, lang, agree, coupon.trim());
+      if (mode === "login") {
+        const r = await api.login(email, pw);
+        window.location.href = r.role === "admin" ? "/admin" : "/me";
+        return;
+      }
+      await api.register(email, pw, name, lang, agree, coupon.trim());
       window.location.href = "/me";
     } catch (e) {
       setErr(e instanceof ApiError ? srv(e.message) : t("c.error"));

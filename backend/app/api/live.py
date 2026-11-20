@@ -1,4 +1,9 @@
-"""Private live copy-trading status. Every request needs the X-Live-Password header (LIVE_DASHBOARD_PASSWORD)."""
+"""Private operator API (live trading, accounts, users, billing).
+
+Sign-in: the operator signs in with their admin email and password (the same session cookie as users, on a user
+with role "admin"). Until an admin login exists, the X-Live-Password header (LIVE_DASHBOARD_PASSWORD) still works,
+and is what creates the admin login (/admin/setup); after that the header alone is refused.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,7 +36,8 @@ def _ip(request: Request) -> str:
     return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
 
 
-def check_password(request: Request, x_live_password: Annotated[str | None, Header()] = None) -> None:
+def _legacy_password_ok(request: Request, given: str | None) -> bool:
+    """The old shared password (LIVE_DASHBOARD_PASSWORD), with the per-IP lockout. Raises on a wrong one."""
     expected = get_settings().live_dashboard_password
     if not expected:
         raise HTTPException(404, "Live dashboard is not configured")
@@ -41,13 +47,104 @@ def check_password(request: Request, x_live_password: Annotated[str | None, Head
         q.popleft()
     if len(q) >= MAX_FAILS_PER_IP:
         raise HTTPException(429, "Too many wrong passwords, try again later")
-    if not x_live_password or not hmac.compare_digest(x_live_password.encode(), expected.encode()):
+    if not given or not hmac.compare_digest(given.encode(), expected.encode()):
         q.append(now)
         raise HTTPException(401, "Wrong password")
     q.clear()
+    return True
+
+
+async def _has_admin(session: AsyncSession) -> bool:
+    from sqlalchemy import select
+
+    from app.models import User
+
+    return (await session.execute(select(User.id).where(User.role == "admin", User.status == "active")
+                                  .limit(1))).first() is not None
+
+
+async def _admin_from_cookie(session: AsyncSession, token: str | None):
+    from app.models import User, UserSession
+    from app.users import _as_utc, _now, _token_hash
+
+    if not token:
+        return None
+    row = await session.get(UserSession, _token_hash(token))
+    if row is None or _as_utc(row.expires_at) < _now():
+        return None
+    user = await session.get(User, row.user_id)
+    return user if user is not None and user.role == "admin" and user.status == "active" else None
+
+
+async def check_password(request: Request, session: Session,
+                         x_live_password: Annotated[str | None, Header()] = None,
+                         alpha_session: Annotated[str | None, Cookie()] = None) -> None:
+    """Admin session cookie; or, only while no admin login exists yet, the old shared password."""
+    if await _admin_from_cookie(session, alpha_session) is not None:
+        return
+    if await _has_admin(session):
+        raise HTTPException(401, "Sign in with your admin email and password")
+    if not x_live_password:
+        raise HTTPException(401, "Sign in first")
+    _legacy_password_ok(request, x_live_password)
 
 
 Auth = Annotated[None, Depends(check_password)]
+
+
+# ---- admin sign-in -------------------------------------------------------------------
+@router.get("/admin/status")
+async def admin_status(session: Session) -> dict[str, Any]:
+    """Public: whether the admin email login has been set up (the sign-in page shows setup until it is)."""
+    return {"has_admin": await _has_admin(session)}
+
+
+@router.get("/admin/me")
+async def admin_me(session: Session, _: Auth, alpha_session: Annotated[str | None, Cookie()] = None) -> dict[str, Any]:
+    user = await _admin_from_cookie(session, alpha_session)
+    return {"email": user.email if user else None, "via": "session" if user else "password"}
+
+
+class AdminSetupIn(BaseModel):
+    current_password: str      # the old shared admin password (LIVE_DASHBOARD_PASSWORD)
+    email: str
+    password: str
+
+
+@router.post("/admin/setup")
+async def admin_setup(body: AdminSetupIn, request: Request, response: Response, session: Session) -> dict[str, Any]:
+    """One time: turn the shared password into an admin email login. Afterwards the shared password stops working."""
+    from app.notify import tell_admin
+    from app.users import (EMAIL_RE, audit, hash_password, new_session, password_problem, set_cookie,
+                           user_by_email)
+    from app.models import User
+
+    if await _has_admin(session):
+        raise HTTPException(409, "The admin login is already set up: sign in with it")
+    _legacy_password_ok(request, body.current_password)
+    email = body.email.strip().lower()
+    if not EMAIL_RE.fullmatch(email):
+        raise HTTPException(400, "Enter a valid email")
+    if problem := password_problem(body.password):
+        raise HTTPException(400, problem)
+    if hmac.compare_digest(body.password.encode(), (get_settings().live_dashboard_password or "").encode()):
+        raise HTTPException(400, "Choose a new password, not the old shared one")
+    user = await user_by_email(session, email)
+    if user is not None and user.role != "admin":
+        raise HTTPException(400, "This email belongs to a user account: use another email for the admin")
+    if user is None:
+        user = User(email=email, name="Admin", password_hash=hash_password(body.password), status="active", role="admin")
+        session.add(user)
+    else:
+        user.password_hash, user.status = hash_password(body.password), "active"
+    await session.flush()
+    token = await new_session(session, user)
+    await audit(session, "admin", "admin_login_setup", email, ip=_ip(request))
+    await session.commit()
+    set_cookie(response, token)
+    await tell_admin(f"🔐 Admin email login set up for {email} (IP {_ip(request)}). The old shared password no "
+                     "longer opens the admin pages.")
+    return {"ok": True, "email": email}
 
 
 def _pos(p: LivePosition) -> dict[str, Any]:
@@ -481,7 +578,8 @@ async def list_users(session: Session, _: Auth) -> dict[str, Any]:
 
     from app.models import TradingAccount, User
 
-    users = (await session.execute(select(User).order_by(User.id.desc()))).scalars().all()
+    users = (await session.execute(select(User).where(User.role.is_distinct_from("admin"))
+                                   .order_by(User.id.desc()))).scalars().all()
     accts = {r.user_id: r.name for r in (await session.execute(
         select(TradingAccount).where(TradingAccount.user_id.is_not(None)))).scalars().all()}
     return {"users": [{

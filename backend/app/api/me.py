@@ -123,7 +123,7 @@ async def login(body: LoginIn, request: Request, response: Response, session: Se
     await audit(session, f"user:{user.id}", "login", ip=ip)
     await session.commit()
     set_cookie(response, token)
-    return {"ok": True, "status": user.status}
+    return {"ok": True, "status": user.status, "role": user.role}
 
 
 @router.post("/logout")

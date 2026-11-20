@@ -527,6 +527,7 @@ class User(Base):
     tg_daily: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
     lang: Mapped[str | None] = mapped_column(String(2), nullable=True, default="ar")   # ar | en (pages + notes)
     terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    role: Mapped[str | None] = mapped_column(String(12), nullable=True)   # "admin" = the operator; NULL = a user
     # Coupon: % off the monthly fee only (never the profit share). Copied from the coupon when applied;
     # coupon_months_left NULL = every month, else the number of billed months still discounted.
     coupon_code: Mapped[str | None] = mapped_column(String(32), nullable=True)

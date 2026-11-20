@@ -40,7 +40,7 @@ async def build_overview(session: AsyncSession, s: Settings, now: datetime | Non
     mode = s.live_mode if s.live_mode in ("dry", "live") else "off"
     d1, d7, d30 = now - timedelta(days=1), now - timedelta(days=7), now - timedelta(days=DAYS)
 
-    users = (await session.execute(select(User))).scalars().all()
+    users = (await session.execute(select(User).where(User.role.is_distinct_from("admin")))).scalars().all()
     by_id = {u.id: u for u in users}
     accts = await account_rows(session, s)
     positions = (await session.execute(select(LivePosition).where(LivePosition.mode == mode))).scalars().all()

@@ -17,9 +17,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, LockScreen, PageHeader, Panel, StatTile } from "@/components/ui";
-import { api, ApiError } from "@/lib/api";
+import { Badge, button, Empty, PageHeader, Panel, StatTile } from "@/components/ui";
+import { api, ApiError, SESSION } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
 import type { AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount } from "@/lib/types";
 
@@ -37,6 +38,7 @@ function readSaved(): string {
 
 function save(v: string | null) {
   try {
+    if (v === SESSION) return;
     if (v) localStorage.setItem(KEY, v);
     else localStorage.removeItem(KEY);
   } catch {
@@ -624,10 +626,7 @@ export function AdminView() {
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => {
-    const saved = readSaved();
-    if (saved) setPassword(saved);
-  }, []);
+  useAdminResume(setPassword);
 
   const load = useCallback(async (pw: string) => {
     setLoading(true);
@@ -661,8 +660,7 @@ export function AdminView() {
     return (
       <>
         <AppNav />
-        <LockScreen title="Admin overview" hint="Private page. Same password as the Live page."
-          value={inputPw} onChange={setInputPw} onSubmit={() => setPassword(inputPw)} error={error} />
+        <AdminSignIn onDone={() => setPassword(SESSION)} />
       </>
     );
   }

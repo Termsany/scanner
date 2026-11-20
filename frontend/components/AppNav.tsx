@@ -2,6 +2,7 @@
 
 import { usePathname } from "next/navigation";
 
+import { AdminMenu } from "@/components/AdminAuth";
 import { SirbLockup } from "@/components/brand/Logo";
 
 /** Operator pages (password-protected) and the public data pages share one top bar. */
@@ -39,6 +40,7 @@ export function AppNav({ kind = "admin", right }: { kind?: "admin" | "public"; r
           })}
         </div>
         {right}
+        {kind === "admin" && <AdminMenu />}
         {kind === "public" && (
           <span className="flex shrink-0 items-center gap-2">
             <a href="/login" className="hidden rounded-lg px-3 py-1.5 text-sm text-muted hover:text-ink sm:inline">Sign in</a>

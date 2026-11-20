@@ -17,9 +17,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, LockScreen, PageHeader } from "@/components/ui";
-import { api, ApiError } from "@/lib/api";
+import { Badge, button, PageHeader } from "@/components/ui";
+import { api, ApiError, SESSION } from "@/lib/api";
 import type { AccountsList, AuditEntry, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live page
@@ -34,6 +35,7 @@ function readSaved(): string {
 
 function save(v: string | null) {
   try {
+    if (v === SESSION) return;
     if (v) localStorage.setItem(KEY, v);
     else localStorage.removeItem(KEY);
   } catch {
@@ -845,10 +847,7 @@ export function AccountsView() {
   const [error, setError] = useState("");
   const [secret, setSecret] = useState<{ name: string; pubkey: string | null; secret: string } | null>(null);
 
-  useEffect(() => {
-    const saved = readSaved();
-    if (saved) setPassword(saved);
-  }, []);
+  useAdminResume(setPassword);
 
   const load = useCallback(async (pw: string) => {
     try {
@@ -885,8 +884,7 @@ export function AccountsView() {
     return (
       <>
         <AppNav />
-        <LockScreen title="Trading accounts" hint="Private page. Same password as the Live page."
-          value={inputPw} onChange={setInputPw} onSubmit={() => setPassword(inputPw)} error={error} />
+        <AdminSignIn onDone={() => setPassword(SESSION)} />
       </>
     );
   }

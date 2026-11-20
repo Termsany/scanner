@@ -74,6 +74,14 @@ async function request<T>(path: string, init?: RequestInit & { signal?: AbortSig
   return res.json() as Promise<T>;
 }
 
+/** Admin requests: the session cookie (SESSION) or, before the email login exists, the shared password. */
+export const SESSION = "__session__";
+function adm(password: string): { headers?: Record<string, string>; credentials: RequestCredentials } {
+  return password && password !== SESSION
+    ? { headers: { "X-Live-Password": password }, credentials: "include" }
+    : { credentials: "include" };
+}
+
 function qs(params: Record<string, string | number | undefined>): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -105,45 +113,45 @@ export const api = {
     request<PaperSummary>(`/api/paper${qs({ hours })}`, { signal }),
 
   live: (password: string, signal?: AbortSignal) =>
-    request<LiveStatus>("/api/live", { headers: { "X-Live-Password": password }, signal }),
+    request<LiveStatus>("/api/live", { ...adm(password), signal }),
 
   livePause: (password: string, paused: boolean) =>
     request<{ paused: boolean }>("/api/live/pause", {
       method: "POST",
-      headers: { "X-Live-Password": password },
+      ...adm(password),
       body: JSON.stringify({ paused }),
     }),
 
   liveSell: (password: string, id: number, share: number) =>
     request<{ queued: boolean; message: string }>(`/api/live/positions/${id}/sell`, {
       method: "POST",
-      headers: { "X-Live-Password": password },
+      ...adm(password),
       body: JSON.stringify({ share }),
     }),
 
   overview: (password: string, signal?: AbortSignal) =>
-    request<AdminOverview>("/api/live/overview", { headers: { "X-Live-Password": password }, signal }),
+    request<AdminOverview>("/api/live/overview", { ...adm(password), signal }),
 
   accounts: (password: string, signal?: AbortSignal) =>
-    request<AccountsList>("/api/live/accounts", { headers: { "X-Live-Password": password }, signal }),
+    request<AccountsList>("/api/live/accounts", { ...adm(password), signal }),
 
   createAccount: (password: string, body: Record<string, unknown>) =>
     request<{ account: TradingAccountCfg; secret: string | null; note?: string }>("/api/live/accounts", {
       method: "POST",
-      headers: { "X-Live-Password": password },
+      ...adm(password),
       body: JSON.stringify(body),
     }),
 
   toggleLeader: (password: string, name: string, wallet: string, enabled: boolean, close_positions = false) =>
     request<{ account: TradingAccountCfg; closing: number }>(`/api/live/accounts/${encodeURIComponent(name)}/leaders/toggle`, {
-      method: "POST", headers: { "X-Live-Password": password },
+      method: "POST", ...adm(password),
       body: JSON.stringify({ wallet, enabled, close_positions }),
     }),
 
   editAccount: (password: string, name: string, body: Record<string, unknown>) =>
     request<{ account: TradingAccountCfg }>(`/api/live/accounts/${encodeURIComponent(name)}`, {
       method: "PATCH",
-      headers: { "X-Live-Password": password },
+      ...adm(password),
       body: JSON.stringify(body),
     }),
 
@@ -160,31 +168,31 @@ export const api = {
     }),
 
   coupons: (password: string) =>
-    request<{ coupons: Coupon[] }>("/api/live/coupons", { headers: { "X-Live-Password": password } }),
+    request<{ coupons: Coupon[] }>("/api/live/coupons", { ...adm(password) }),
 
   createCoupon: (password: string, body: Record<string, unknown>) =>
     request<{ coupon: Coupon }>("/api/live/coupons", {
-      method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify(body),
+      method: "POST", ...adm(password), body: JSON.stringify(body),
     }),
 
   editCoupon: (password: string, id: number, active: boolean) =>
     request<{ coupon: Coupon }>(`/api/live/coupons/${id}`, {
-      method: "PATCH", headers: { "X-Live-Password": password }, body: JSON.stringify({ active }),
+      method: "PATCH", ...adm(password), body: JSON.stringify({ active }),
     }),
 
   terms: () => request<PublicTerms>("/api/me/terms"),
 
   billing: (password: string) =>
-    request<BillingAdmin>("/api/live/billing", { headers: { "X-Live-Password": password } }),
+    request<BillingAdmin>("/api/live/billing", { ...adm(password) }),
 
   billingConfig: (password: string, body: Partial<BillingConfig>) =>
     request<{ config: BillingConfig }>("/api/live/billing/config", {
-      method: "PUT", headers: { "X-Live-Password": password }, body: JSON.stringify(body),
+      method: "PUT", ...adm(password), body: JSON.stringify(body),
     }),
 
   billAction: (password: string, id: number, action: "waive" | "paid" | "due", signature?: string) =>
     request<{ bill: Bill }>(`/api/live/billing/bills/${id}`, {
-      method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify({ action, signature }),
+      method: "POST", ...adm(password), body: JSON.stringify({ action, signature }),
     }),
 
   setLang: (lang: string) =>
@@ -192,8 +200,15 @@ export const api = {
       method: "POST", credentials: "include", body: JSON.stringify({ lang }),
     }),
 
+  adminStatus: () => request<{ has_admin: boolean }>("/api/live/admin/status"),
+  adminMe: () => request<{ email: string | null; via: string }>("/api/live/admin/me", { credentials: "include" }),
+  adminSetup: (current_password: string, email: string, password: string) =>
+    request<{ ok: boolean; email: string }>("/api/live/admin/setup", {
+      method: "POST", credentials: "include", body: JSON.stringify({ current_password, email, password }),
+    }),
+
   login: (email: string, password: string) =>
-    request<{ ok: boolean; status: string }>("/api/me/login", {
+    request<{ ok: boolean; status: string; role?: string | null }>("/api/me/login", {
       method: "POST", credentials: "include", body: JSON.stringify({ email, password }),
     }),
 
@@ -262,31 +277,31 @@ export const api = {
 
   // ---- admin: users ----
   users: (password: string) =>
-    request<{ users: SiteUser[] }>("/api/live/users", { headers: { "X-Live-Password": password } }),
+    request<{ users: SiteUser[] }>("/api/live/users", { ...adm(password) }),
 
   approveUser: (password: string, id: number, body: Record<string, unknown>) =>
     request<{ status: string }>(`/api/live/users/${id}/approve`, {
-      method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify(body),
+      method: "POST", ...adm(password), body: JSON.stringify(body),
     }),
 
   resetLink: (password: string, id: number) =>
     request<{ link: string; minutes: number }>(`/api/live/users/${id}/reset-link`, {
-      method: "POST", headers: { "X-Live-Password": password },
+      method: "POST", ...adm(password),
     }),
 
   reset2fa: (password: string, id: number) =>
     request<{ ok: boolean; withdraw_lock_hours: number }>(`/api/live/users/${id}/reset-2fa`, {
-      method: "POST", headers: { "X-Live-Password": password },
+      method: "POST", ...adm(password),
     }),
 
   audit: (password: string, q: string, limit = 200) =>
     request<{ entries: AuditEntry[] }>(`/api/live/audit?limit=${limit}&q=${encodeURIComponent(q)}`, {
-      headers: { "X-Live-Password": password },
+      ...adm(password),
     }),
 
   blockUser: (password: string, id: number, blocked: boolean) =>
     request<{ status: string }>(`/api/live/users/${id}/block`, {
-      method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify({ blocked }),
+      method: "POST", ...adm(password), body: JSON.stringify({ blocked }),
     }),
 
   signals: (minScore: number, limit = 30, signal?: AbortSignal) =>
