@@ -937,11 +937,36 @@ class CopyEngine:
                 log.info("live: %s capital already out: ignoring leader trim %.0f%%", sym, share * 100)
                 await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of ${sym}; "
                                   "your capital is already out, so the rest waits for its full exit")
+            elif share < 0.99 and self.s.live_trim_cap_pct is not None:
+                await self._capped_trim(session, pos, t, share)
             else:
                 await self._sell(session, pos, share, "leader_sold" if share >= 0.99 else "leader_trim")
                 await session.commit()
         if self.s.live_sell_manual_with_leader and self.x.mode == "live":
             await self._sell_manual(session, t, share)
+
+    async def _capped_trim(self, session: AsyncSession, pos: LivePosition, t: WalletTrade, share: float) -> None:
+        """Copy a leader's partial sell only until LIVE_TRIM_CAP_PCT of the position has been sold in all; the rest
+        waits for the leader's full exit."""
+        cap = self.s.live_trim_cap_pct / 100
+        held = int(pos.tokens_raw)
+        bought = int(pos.tokens_bought_raw or 0) or held
+        room = held - int(bought * (1 - cap))          # tokens we may still sell before the cap
+        want = int(held * share)
+        sym = pos.symbol or pos.token_address[:6]
+        who = t.wallet_label or t.wallet[:6]
+        if room <= bought // 100 or held <= 0:          # under 1% left before the cap: treat it as reached
+            await session.commit()
+            log.info("live: %s trim cap reached: ignoring leader trim %.0f%%", sym, share * 100)
+            await self.notify(f"{self._tag()} ⏸ {who} sold {share * 100:.0f}% of ${sym}; {cap * 100:.0f}% is already "
+                              "sold, so the rest waits for its full exit")
+            return
+        take = min(want, room)
+        await self._sell(session, pos, (take + 0.5) / held, "leader_trim")   # +0.5: int() in _sell lands on take
+        await session.commit()
+        if take < want:
+            await self.notify(f"{self._tag()} ⏸ ${sym}: sold only up to {cap * 100:.0f}% of the position; "
+                              "the rest waits for the leader's full exit")
 
     async def _sell_manual(self, session: AsyncSession, t: WalletTrade, share: float) -> None:
         """Tokens the owner bought by hand in this wallet follow the leader out too (same share)."""

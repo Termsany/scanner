@@ -65,6 +65,7 @@ def _db(body):
 
 
 def _s(**kw):
+    kw.setdefault("live_trim_cap_pct", None)      # most tests check plain copying; the cap has its own test
     return Settings(live_mode="live", live_wallets=[LEADER], live_size_usd=30, live_max_open_usd=100,
                     live_min_liquidity_usd=10_000, **kw)
 
@@ -864,14 +865,14 @@ class PricedExec(WalletExec):
         return {m: {"usd": self.price[m], "decimals": 6} for m in mints if m in self.price}
 
 
-def _run_priced(steps, x):
+def _run_priced(steps, x, **settings):
     notes = []
 
     async def note(text):
         notes.append(text)
 
     async def body(sess):
-        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0), notify=note)
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, **settings), notify=note)
         await eng.step(sess)
         for batch in steps:
             if callable(batch):
@@ -1468,3 +1469,18 @@ def test_time_stop_is_off_by_default():
     from app.config import Settings
 
     assert Settings().live_time_stop_minutes is None
+
+
+def test_partial_sells_are_copied_only_up_to_48_percent_then_the_rest_waits():
+    x = PricedExec()
+    pos, x, notes = _run_priced([
+        [_trade()],                                          # 1M tokens for $30
+        [_trade(side="sell", pct_sold=30, remaining=1)],     # copy: 300k
+        [_trade(side="sell", pct_sold=40, remaining=1)],     # wants 280k, only 180k left under 48%: 180k
+        [_trade(side="sell", pct_sold=20, remaining=1)],     # cap reached: ignored
+        [_trade(side="sell", pct_sold=100, remaining=0)],    # leader is out: sell the rest (520k)
+    ], x, live_trim_cap_pct=48.0)
+    sells = [c for c in x.calls if c[0] == "sell"]
+    assert sells == [("sell", "M1", 300_000), ("sell", "M1", 180_000), ("sell", "M1", 520_000)]
+    assert pos[0].status == "closed" and pos[0].exit_reason == "leader_sold"
+    assert any("already sold" in n for n in notes) and any("only up to 48%" in n for n in notes)
