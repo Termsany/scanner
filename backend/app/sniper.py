@@ -234,12 +234,13 @@ class PaperSniper:
                                 remaining_frac=1.0, proceeds_usd=0.0)
             session.add(row)
             rows[(pos["strategy"], pos["mint"])] = row
-            pos["row"] = row
             n += 1
-        self.opened.clear()
         await session.flush()
+        for pos in self.opened:          # keep the id: each flush has its own session
+            pos["row"] = rows[(pos["strategy"], pos["mint"])].id
+        self.opened.clear()
         for c in self.closed:
-            row = c.get("row")
+            row = await session.get(PaperPosition, c["row"]) if c.get("row") else None
             if row is None:
                 continue
             usd = self.sol_usd or 0.0
@@ -251,7 +252,27 @@ class PaperSniper:
             row.proceeds_usd, row.remaining_frac = c["pnl"] + row.size_usd, 0.0
             n += 1
         self.closed = [c for c in self.closed if c.get("row") is None]
+        n += await self._mark_open(session)
         await session.commit()
+        return n
+
+    async def _mark_open(self, session) -> int:
+        """Open rows: current price and what selling now would bring (after fee + slippage), so /paper is live."""
+        usd, size, n = self.sol_usd or 0.0, self.s.sniper_size_usd, 0
+        stamp = _now()
+        for w in self.watch.values():
+            if not w.price:
+                continue
+            for pos in w.held.values():
+                row = await session.get(PaperPosition, pos["row"]) if pos.get("row") else None
+                if row is None:
+                    continue
+                pnl = size / pos["fill"] * w.price * (1 - self._cost()) - size
+                row.last_price = w.price * usd if usd else w.price
+                row.last_priced_at = stamp
+                row.peak_pct, row.trough_pct = pos["peak"], pos["trough"]
+                row.pnl_usd, row.pnl_pct = pnl, pnl / size * 100
+                n += 1
         return n
 
     # ---- loop -------------------------------------------------------------------
@@ -343,7 +364,7 @@ class PaperSniper:
                     self._sub.pop(sid, None)
                     await hl.send(json.dumps({"jsonrpc": "2.0", "id": next(self._ids), "method": "accountUnsubscribe",
                                               "params": [sid]}))
-            if now - last_flush >= 5.0 and (self.opened or self.closed):
+            if now - last_flush >= 5.0 and (self.opened or self.closed or any(w.held for w in self.watch.values())):
                 last_flush = now
                 async with SessionLocal() as session:
                     await self.flush(session)

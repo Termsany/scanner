@@ -342,7 +342,7 @@ def _row(p: PaperPosition, s: Settings) -> dict[str, Any]:
         "pnl_usd": p.pnl_usd, "pnl_pct": p.pnl_pct,
         "remaining_pct": round((1.0 if p.remaining_frac is None else p.remaining_frac) * 100, 1),
     }
-    if p.status == "open" and p.last_price:
+    if p.status == "open" and p.last_price and not (p.strategy.startswith("snipe_") and p.pnl_usd is not None):
         d["pnl_usd"] = _value(p, p.last_price, s) - p.size_usd
         d["pnl_pct"] = d["pnl_usd"] / p.size_usd * 100
     return d

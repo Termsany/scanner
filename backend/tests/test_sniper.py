@@ -147,3 +147,37 @@ def test_mayhem_mode_tokens_are_skipped():
     sn = PaperSniper(S())
     assert sn.on_message({**create(), "is_mayhem_mode": True}, 0.0) == []
     assert PaperSniper(S(sniper_skip_mayhem=False)).on_message({**create(), "is_mayhem_mode": True}, 0.0) == ["M"]
+
+
+def test_open_rows_show_live_pnl():
+    async def go():
+        tmp = tempfile.mkdtemp()
+        eng = create_async_engine(f"sqlite+aiosqlite:///{tmp}/s.db".replace("\\", "/"))
+        async with eng.begin() as c:
+            await c.run_sync(Base.metadata.create_all)
+        try:
+            async with async_sessionmaker(eng, expire_on_commit=False)() as ses:
+                sn = PaperSniper(S(sniper_min_buyers=99), sol_usd=100.0)
+                sn.on_message(create(), 0.0)
+                sn.tick(2.0)
+                await sn.flush(ses)                               # opened at 30 vSol
+            mk = async_sessionmaker(eng, expire_on_commit=False)
+            async with mk() as ses:                               # the worker uses a new session per flush
+                sn.on_message(trade("buy", v_sol=39.0), 3.0)      # +30%: still open
+                await sn.flush(ses)
+            async with mk() as ses:
+                live = (await ses.execute(select(PaperPosition))).scalars().one()
+            async with mk() as ses:
+                sn.tick(400.0)                                    # max hold: closed by a later flush
+                await sn.flush(ses)
+            async with mk() as ses:
+                closed = (await ses.execute(select(PaperPosition))).scalars().one()
+            return live, closed
+        finally:
+            await eng.dispose()
+
+    r, closed = asyncio.run(go())
+    assert closed.status == "closed" and closed.exit_reason == "time"
+    exp = 30.0 / (30e-9 * 1.03) * (39e-9 * 0.97) - 30.0
+    assert r.status == "open" and abs(r.pnl_usd - exp) < 1e-6 and r.pnl_usd > 0
+    assert abs(r.last_price - 39e-9 * 100) < 1e-12 and abs(r.peak_pct - 30.0) < 1e-6
