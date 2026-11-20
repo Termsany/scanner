@@ -694,6 +694,7 @@ class WalletExec(FakeExec):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.balances, self.sales, self.history_calls = {}, {}, 0
+        self.buys, self.buy_calls = {}, 0
 
     async def buy(self, mint, usd, max_price=None, slippage_bps=None):
         f = await super().buy(mint, usd, max_price, slippage_bps)
@@ -719,6 +720,15 @@ class WalletExec(FakeExec):
     async def wallet_sales(self, mints, since):
         self.history_calls += 1
         return {m: list(self.sales.get(m, [])) for m in mints}
+
+    def hand_buy(self, mint, tokens, sol, sig):
+        self.balances[mint] = self.balances.get(mint, 0) + tokens
+        self.buys.setdefault(mint, []).append(
+            {"sig": sig, "at": datetime.now(timezone.utc), "tokens_raw": tokens, "sol": sol, "usd": 0.0})
+
+    async def wallet_buys(self, mints, since):
+        self.buy_calls += 1
+        return {m: list(self.buys.get(m, [])) for m in mints}
 
 
 def _run_wallet(steps, x=None):
@@ -1199,3 +1209,32 @@ def test_fake_token_with_the_same_name_is_not_held():
         [_trade(side="sell", mint="FakeSOLmint1111111111111111111111111111111", pct_sold=100, remaining=0)],
     ])
     assert [c[0] for c in x.calls] == ["buy", "sell"]
+
+
+def test_hand_buy_joins_the_position_cost_and_leaves_with_the_leader():
+    x = WalletExec()
+    pos, x, notes = _run_wallet([
+        [_trade()],                                               # bot buys 1_000_000 tokens for $30
+        lambda: x.hand_buy("M1", 500_000, 0.1333334, "hbuy1"),   # owner adds ~$20 in Phantom
+        [],                                                       # second check in a row books it
+        [], [],                                                   # never booked twice
+        [_trade(side="sell", pct_sold=100, remaining=0)],         # leader exits: everything goes
+    ], x)
+    p = pos[0]
+    assert abs(p.cost_usd - 50.0) < 0.01 and p.tokens_bought_raw == "1500000"
+    assert sum(1 for f in p.fills if f.get("side") == "buy_hand") == 1
+    assert p.status == "closed" and x.calls[-1] == ("sell", "M1", 1_500_000)
+    assert x.balances["M1"] == 0
+    assert any("by hand" in n and "total entry now $50.00" in n for n in notes)
+
+
+def test_tokens_sent_in_without_a_purchase_stay_the_owners():
+    x = WalletExec()
+    pos, x, _ = _run_wallet([
+        [_trade()],
+        lambda: x.hand_buy("M1", 500_000, 0.0, "airdrop"),        # transfer in: no SOL spent
+        [], [], [],
+    ], x)
+    p = pos[0]
+    assert p.cost_usd == 30.0 and p.tokens_raw == "1000000"
+    assert x.buy_calls == 1                                        # looked up once, not on every check

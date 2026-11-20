@@ -374,8 +374,28 @@ class JupiterExecutor:
         Raises SwapError when the history could not be read completely (nothing must be booked then).
         """
         out: dict[str, list[dict[str, Any]]] = {m: [] for m in mints}
+        for sig, d in await self._wallet_history(mints, since):
+            sold = [m for m in mints if d["tokens"].get(m, 0) < 0]
+            for m in sold:              # one tx selling several tokens at once: split what came in evenly
+                out[m].append({"sig": sig, "at": d["at"], "tokens_raw": -d["tokens"][m],
+                               "sol": max(d["sol"], 0.0) / len(sold), "usd": max(d["usd"], 0.0) / len(sold)})
+        return out
+
+    async def wallet_buys(self, mints: set[str], since: datetime) -> dict[str, list[dict[str, Any]]]:
+        """Like wallet_sales, for transactions that raised the balance: {mint: [{sig, at, tokens_raw (bought, > 0),
+        sol (spent, >= 0), usd (stablecoins spent)}]}. A plain transfer in shows sol ~0 (the caller skips it)."""
+        out: dict[str, list[dict[str, Any]]] = {m: [] for m in mints}
+        for sig, d in await self._wallet_history(mints, since):
+            got = [m for m in mints if d["tokens"].get(m, 0) > 0]
+            for m in got:
+                out[m].append({"sig": sig, "at": d["at"], "tokens_raw": d["tokens"][m],
+                               "sol": max(-d["sol"], 0.0) / len(got), "usd": max(-d["usd"], 0.0) / len(got)})
+        return out
+
+    async def _wallet_history(self, mints: set[str], since: datetime) -> list[tuple[str, dict[str, Any]]]:
+        """(signature, balance changes) of every confirmed transaction of this wallet since `since`."""
         if not self.pubkey or not mints:
-            return out
+            return []
         floor = since.timestamp()
         sigs: list[dict[str, Any]] = []
         before, complete = None, False
@@ -397,6 +417,7 @@ class JupiterExecutor:
         if not complete:
             raise SwapError("wallet history too long to read")
         cache = self.__dict__.setdefault("_tx_cache", {})
+        out: list[tuple[str, dict[str, Any]]] = []
         for r in sigs:
             sig = r["signature"]
             if sig not in cache:
@@ -407,11 +428,7 @@ class JupiterExecutor:
                 cache[sig] = _tx_deltas(tx, self.pubkey)
                 if len(cache) > 5000:
                     cache.pop(next(iter(cache)))
-            d = cache[sig]
-            sold = [m for m in mints if d["tokens"].get(m, 0) < 0]
-            for m in sold:              # one tx selling several tokens at once: split what came in evenly
-                out[m].append({"sig": sig, "at": d["at"], "tokens_raw": -d["tokens"][m],
-                               "sol": max(d["sol"], 0.0) / len(sold), "usd": max(d["usd"], 0.0) / len(sold)})
+            out.append((sig, cache[sig]))
         return out
 
     async def _send(self, q: dict[str, Any]) -> tuple[str, bool]:
@@ -639,6 +656,8 @@ class CopyEngine:
         self.cursor = _key(CURSOR, self.a.name)
         self._reconciled = 0.0              # monotonic time of the last wallet reconcile
         self._short_seen: dict[str, int] = {}   # mint -> reconciles in a row where the wallet held less
+        self._extra_seen: dict[str, int] = {}   # mint -> reconciles in a row where the wallet held more
+        self._extra_done: dict[str, int] = {}   # mint -> surplus already looked up (don't re-read history for it)
         self._priced = 0.0                  # monotonic time of the last take-capital price check
         self._said: dict[str, float] = {}    # repeating skip notices -> last time sent
         self._beat = 0.0                     # monotonic time of the last heartbeat written
@@ -923,6 +942,7 @@ class CopyEngine:
         for p in opened:
             by_mint.setdefault(p.token_address, []).append(p)
         short: dict[str, int] = {}
+        extra: dict[str, int] = {}
         for mint, ps in by_mint.items():
             try:
                 held = await self.x.token_balance(mint)
@@ -936,9 +956,18 @@ class CopyEngine:
                     short[mint] = missing
             else:
                 self._short_seen.pop(mint, None)
-        for mint in list(self._short_seen):
-            if mint not in by_mint:
-                self._short_seen.pop(mint)
+            if missing < 0 and self.s.live_book_hand_buys and self._extra_done.get(mint) != -missing:
+                self._extra_seen[mint] = self._extra_seen.get(mint, 0) + 1
+                if self._extra_seen[mint] >= 2:
+                    extra[mint] = -missing
+            else:
+                self._extra_seen.pop(mint, None)
+        for d in (self._short_seen, self._extra_seen, self._extra_done):
+            for mint in list(d):
+                if mint not in by_mint:
+                    d.pop(mint)
+        if extra and hasattr(self.x, "wallet_buys"):
+            await self._book_hand_buys(session, by_mint, extra)
         if not short:
             return
         rows = (await session.execute(select(LivePosition).where(
@@ -999,6 +1028,53 @@ class CopyEngine:
             await self.notify(f"{self._tag()} 🧾 Found sales you made by hand in the wallet, P&L updated:\n"
                               + "\n".join(lines))
             await self.tell_user(user_note(self.a.user_lang, "hand", lines="\n".join(lines)))
+
+    async def _book_hand_buys(self, session: AsyncSession, by_mint: dict[str, list[LivePosition]],
+                              extra: dict[str, int]) -> None:
+        """Tokens the owner bought by hand (e.g. in Phantom) of a token the bot holds join that open position:
+        its cost (total entry), tokens and P&L then include them, and they follow the leader's sells with it.
+        Only real purchases count (SOL or stablecoins spent); a plain transfer in stays the owner's own."""
+        rows = (await session.execute(select(LivePosition).where(
+            LivePosition.token_address.in_(list(extra)), *self._mine()))).scalars().all()
+        known = {p.buy_signature for p in rows if p.buy_signature}
+        for p in rows:
+            for f in p.fills or []:
+                known.update(s for s in [f.get("sig"), *(f.get("sigs") or [])] if s)
+        since = min(utc(p.opened_at) for m in extra for p in by_mint[m]) - timedelta(minutes=2)
+        try:
+            buys = await self.x.wallet_buys(set(extra), since)
+            px = await self.x.sol_price()
+        except Exception as exc:
+            log.warning("live: hand-buy history failed: %s", exc)
+            return
+        lines = []
+        for mint, surplus in extra.items():
+            self._extra_done[mint], self._extra_seen[mint] = surplus, 0
+            hs = [h for h in buys.get(mint, []) if h["sig"] not in known and (h["sol"] > 1e-4 or h["usd"] > 0.01)]
+            got = sum(h["tokens_raw"] for h in hs)
+            if got <= 0:
+                continue
+            booked = min(surplus, got)
+            k = booked / got
+            sol_out = sum(h["sol"] for h in hs) * k
+            usd_out = sol_out * px + sum(h["usd"] for h in hs) * k
+            p = by_mint[mint][-1]                       # the newest open position of this token
+            p.tokens_raw = str(int(p.tokens_raw) + booked)
+            p.tokens_bought_raw = str(int(p.tokens_bought_raw or 0) + booked)
+            p.cost_usd += usd_out
+            p.sol_spent += sol_out
+            p.fills = [*(p.fills or []), {"side": "buy_hand", "sigs": [h["sig"] for h in hs], "sol": sol_out,
+                                          "tokens_raw": str(booked), "usd": round(usd_out, 2),
+                                          "at": max(h["at"] for h in hs).isoformat()}]
+            self._extra_done[mint] = 0
+            sym = p.symbol or mint[:6]
+            lines.append(f"${sym}: +${usd_out:,.2f} added by hand, total entry now ${p.cost_usd:,.2f}")
+            log.info("live: booked %d raw %s bought by hand for %.4f SOL ($%.2f) into position %d", booked,
+                     mint[:8], sol_out, usd_out, p.id)
+        await session.commit()
+        if lines:
+            await self.notify(f"{self._tag()} 🧾 Found buys you made by hand in the wallet, added to the position:\n"
+                              + "\n".join(lines))
 
     async def _take_capital(self, session: AsyncSession) -> None:
         """Position up LIVE_TAKE_CAPITAL_AT_PCT (value now + already sold vs cost): sell tokens worth what is still

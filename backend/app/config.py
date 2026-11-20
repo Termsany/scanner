@@ -119,6 +119,7 @@ class Settings(BaseSettings):
     # Once a position is up this much (100 = 2x), sell just enough to get its cost back; the rest (pure profit)
     # stays until the leader sells. None = off
     live_take_capital_at_pct: float | None = 100.0
+    live_book_hand_buys: bool = True             # buys made by hand of a token the bot holds join its position
     live_take_capital_check_seconds: float = 5.0
     # Hold-only tokens (by mint, never by name: fake "SOL"/"ETH" tokens are everywhere). The bot copies their buys
     # but never sells them by itself: not when the leader sells, not to take the capital, not at max hold.
