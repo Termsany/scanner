@@ -140,9 +140,11 @@ class Account:
 
 # What a user is told about an exit: never which wallet, only what happened
 USER_REASON = {"leader_sold": "exit signal", "leader_trim": "partial exit", "take_capital": "capital taken back",
-               "sold_by_hand": "sold by hand", "manual": "sold from your page", "max_hold": "max hold time"}
+               "sold_by_hand": "sold by hand", "manual": "sold from your page", "max_hold": "max hold time",
+               "time_stop": "time limit, no profit"}
 USER_REASON_AR = {"leader_sold": "إشارة خروج", "leader_trim": "خروج جزئي", "take_capital": "سحب رأس المال",
-                  "sold_by_hand": "اتباعت يدوي", "manual": "اتباعت من صفحتك", "max_hold": "انتهت مدة الاحتفاظ"}
+                  "sold_by_hand": "اتباعت يدوي", "manual": "اتباعت من صفحتك", "max_hold": "انتهت مدة الاحتفاظ",
+                  "time_stop": "انتهى الوقت من غير ربح"}
 
 
 def user_note(lang: str, key: str, **v) -> str:
@@ -1320,9 +1322,17 @@ class CopyEngine:
                 await self._sell(session, pos, float(last.get("share", 1.0)), last.get("reason", "retry"))
                 await session.commit()
                 continue
-            if (_now() - utc(pos.opened_at) >= timedelta(hours=self.a.max_hold_hours or self.s.live_max_hold_hours)
+            age = _now() - utc(pos.opened_at)
+            if (age >= timedelta(hours=self.a.max_hold_hours or self.s.live_max_hold_hours)
                     and not failed and not self._hold(pos.token_address) and pos.leader_wallet != MANUAL):
                 await self._sell(session, pos, 1.0, "max_hold")
+                await session.commit()
+                continue
+            stop = self.s.live_time_stop_minutes
+            if (stop and age >= timedelta(minutes=stop) and not failed and not self._capital_back(pos)
+                    and not self._hold(pos.token_address) and pos.leader_wallet != MANUAL):
+                # its capital never came back: the trades that sit for hours are where the losses gathered
+                await self._sell(session, pos, 1.0, "time_stop")
                 await session.commit()
 
     @staticmethod

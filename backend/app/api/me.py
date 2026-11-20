@@ -28,7 +28,8 @@ router = APIRouter(prefix="/api/me", tags=["me"])
 Session = Annotated[AsyncSession, Depends(get_session)]
 
 EXIT_WORDS = {"leader_sold": "exit signal", "leader_trim": "partial exit", "take_capital": "capital taken",
-              "sold_by_hand": "sold by hand", "manual": "sold from page", "max_hold": "max hold time"}
+              "sold_by_hand": "sold by hand", "manual": "sold from page", "max_hold": "max hold time",
+              "time_stop": "time limit"}
 _withdraw_lock = asyncio.Lock()
 
 

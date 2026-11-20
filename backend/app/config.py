@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     # Skip a copy buy when the live quote's price per token is more than this % above the price recorded with
     # the leader's buy (we would be buying the leader's pump). None = no limit.
     live_max_chase_pct: float | None = 10.0
-    live_max_chase_pct_no_checks: float | None = 50.0   # same guard for "no checks" leaders: never buy
+    live_max_chase_pct_no_checks: float | None = 300.0   # same guard for "no checks" leaders: never buy
                                                  # more than this % above the leader's price
     # When the leader sells, also sell the same share of tokens the owner bought by hand in the trading wallet
     live_sell_manual_with_leader: bool = True
@@ -140,6 +140,8 @@ class Settings(BaseSettings):
         "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",    # TTWO
     ])
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
+    live_time_stop_minutes: float | None = 90.0  # capital not back this long after the buy: sell it all
+                                                 # (losses gathered in trades held 1-24 h); None = off
     live_rpc_url: str | None = None              # defaults to SOLANA_RPC_URL
     jupiter_api_url: str = "https://lite-api.jup.ag"
     # Extra trading wallets copying the same leaders with their own budget, e.g.

@@ -1368,7 +1368,7 @@ def test_no_checks_leader_still_has_a_chase_limit_and_per_wallet_override():
     async def body(sess):
         eng = CopyEngine(x, _s(), account=acct, notify=note)
         await eng.step(sess)
-        x.pay_price = 2.5                                          # SI-like: +150% over the leader: skip
+        x.pay_price = 4.5                                          # +350% over the leader: past +300%, skip
         sess.add(_trade(mint="SI"))
         await sess.commit()
         await eng.step(sess)
@@ -1382,7 +1382,7 @@ def test_no_checks_leader_still_has_a_chase_limit_and_per_wallet_override():
 
     _db(body)
     assert [c[1] for c in x.calls if c[0] == "buy"] == ["OK1"]
-    assert any("+150% above" in n for n in notes) and any("limit +20%" in n for n in notes)
+    assert any("+350% above" in n for n in notes) and any("limit +20%" in n for n in notes)
 
 
 class FastExec(PricedExec):
@@ -1416,4 +1416,49 @@ def test_just_past_the_target_still_needs_two_readings():
         lambda: (x.price.update(M1=61.0), x.fast.update(M1=61.0)),   # 2.03x: one reading only
         lambda: (x.price.update(M1=50.0), x.fast.update(M1=50.0)),   # gone
     ], x)
+    assert [c for c in x.calls if c[0] == "sell"] == []
+
+
+
+def _aged_position(x, minutes, proceeds=0.0, leader=LEADER, mint="M1"):
+    from datetime import datetime, timedelta, timezone
+
+    return LivePosition(mode="live", account="main", token_address=mint, symbol=mint, leader_wallet=leader,
+                        leader_trade_id=0, status="open", cost_usd=30.0, proceeds_usd=proceeds,
+                        tokens_raw="1000000", tokens_bought_raw="1000000",
+                        opened_at=datetime.now(timezone.utc) - timedelta(minutes=minutes))
+
+
+def test_time_stop_sells_when_capital_never_came_back():
+    x = FakeExec()
+
+    async def body(sess):
+        sess.add_all([_aged_position(x, 95, mint="OLD"),                 # 95 min, nothing back: sell
+                      _aged_position(x, 30, mint="YOUNG"),               # 30 min: wait
+                      _aged_position(x, 300, proceeds=30.0, mint="BAG"),  # capital already back: keep the bag
+                      _aged_position(x, 300, leader="manual", mint="MINE")])   # bought by hand: never
+        await sess.commit()
+        eng = CopyEngine(x, _s(live_time_stop_minutes=90))
+        await eng.step(sess)                                             # first step: sets the cursor only
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition).order_by(LivePosition.id))).scalars().all()
+
+    pos = _db(body)
+    assert [c[1] for c in x.calls if c[0] == "sell"] == ["OLD"]
+    by = {p.token_address: p for p in pos}
+    assert by["OLD"].status == "closed" and by["OLD"].exit_reason == "time_stop"
+    assert all(by[m].status == "open" for m in ("YOUNG", "BAG", "MINE"))
+
+
+def test_time_stop_off():
+    x = FakeExec()
+
+    async def body(sess):
+        sess.add(_aged_position(x, 500))
+        await sess.commit()
+        eng = CopyEngine(x, _s(live_time_stop_minutes=None))
+        await eng.step(sess)
+        await eng.step(sess)
+
+    _db(body)
     assert [c for c in x.calls if c[0] == "sell"] == []

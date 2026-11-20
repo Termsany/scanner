@@ -89,6 +89,7 @@ const DICT = {
   "x.sold by hand": ["sold by hand", "اتباعت يدوي"],
   "x.sold from page": ["sold from page", "اتباعت من الصفحة"],
   "x.max hold time": ["max hold time", "انتهت مدة الاحتفاظ"],
+  "x.time limit": ["time limit, no profit", "انتهى الوقت من غير ربح"],
 
   // performance
   // billing
