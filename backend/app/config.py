@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     # stays until the leader sells. None = off
     live_take_capital_at_pct: float | None = 100.0
     live_book_hand_buys: bool = True             # buys made by hand of a token the bot holds join its position
+    live_adopt_hand_buys: bool = True            # tokens bought by hand that the bot doesn't hold: tracked as a
+                                                 # "manual" position (capital out at the take-capital target)
+    live_adopt_lookback_hours: float = 24.0      # how far back a hand buy can be to be adopted
     live_take_capital_check_seconds: float = 5.0
     # Hold-only tokens (by mint, never by name: fake "SOL"/"ETH" tokens are everywhere). The bot copies their buys
     # but never sells them by itself: not when the leader sells, not to take the capital, not at max hold.

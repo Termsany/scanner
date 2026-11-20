@@ -1264,3 +1264,62 @@ def test_leader_turned_off_buys_nothing_but_its_positions_still_follow_its_sells
 
     pos = _db(body)
     assert len(pos) == 1 and pos[0].status == "closed" and pos[0].exit_reason == "leader_sold"
+
+
+def test_hand_add_on_after_capital_was_taken_takes_it_again():
+    x = PricedExec()
+    pos, x, _ = _run_priced([
+        [_trade()],                                          # bot: $30 for 1M
+        lambda: x.price.update(M1=60.0), [],                 # 2x twice: capital out (sell 500k for $30)
+        lambda: x.hand_buy("M1", 1_000_000, 0.2, "hb1"),     # owner adds $30 by hand: entry now $60
+        [], [],                                              # booked; still 2x on the new entry -> take again
+        [],
+    ], x)
+    sells = [c for c in x.calls if c[0] == "sell"]
+    assert sells == [("sell", "M1", 500_000), ("sell", "M1", 500_000)]
+    p = pos[0]
+    assert abs(p.cost_usd - 60.0) < 0.01 and p.status == "open"
+    assert [f.get("cost_at") for f in p.fills if f.get("reason") == "take_capital"] == [30.0, 60.0]
+
+
+class AdoptExec(PricedExec):
+    async def wallet_tokens(self):
+        return {m: b for m, b in self.balances.items() if b > 0}
+
+    async def token_symbol(self, mint):
+        return "HND"
+
+
+def test_own_hand_bought_token_is_adopted_and_capital_comes_out_at_2x():
+    from datetime import datetime, timedelta, timezone
+
+    x = AdoptExec()
+    notes = []
+
+    async def note(text):
+        notes.append(text)
+
+    def buy_old():
+        x.hand_buy("H1", 1_000_000, 0.2, "hb1")                # $30 at $150/SOL
+        x.buys["H1"][0]["at"] = datetime.now(timezone.utc) - timedelta(hours=3)
+        x.hand_buy("AIR", 5_000_000, 0.0, "air1")              # airdrop: never adopted
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_max_hold_hours=1),
+                         notify=note)
+        await eng.step(sess)
+        buy_old()
+        await eng.step(sess)                                   # adopted as a manual position
+        x.price.update(H1=60.0)
+        await eng.step(sess)
+        await eng.step(sess)                                   # 2x twice: capital out
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition).order_by(LivePosition.id))).scalars().all()
+
+    pos = _db(body)
+    assert len(pos) == 1
+    p = pos[0]
+    assert p.leader_wallet == "manual" and p.symbol == "HND" and abs(p.cost_usd - 30.0) < 0.01
+    assert p.status == "open"                                  # 3h old, max hold 1h: never sold for max hold
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "H1", 500_000)]
+    assert any("bought by hand" in n for n in notes)

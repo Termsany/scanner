@@ -39,6 +39,7 @@ LAMPORTS = 1_000_000_000
 MAX_TRADE_AGE_SECONDS = 180
 MAX_SELL_ATTEMPTS = 8
 CURSOR = "live:wallet_trades"
+MANUAL = "manual"                # leader_wallet of a position the owner opened by hand (no leader to follow)
 PAUSED = "live:paused"
 PUBKEY = "live:pubkey"
 HEARTBEAT = "live:heartbeat"     # + ":<account>": ISO time of the last engine step (see deploy/monitor)
@@ -320,6 +321,31 @@ class JupiterExecutor:
             info = acc["account"]["data"]["parsed"]["info"]
             total += int(info["tokenAmount"]["amount"])
         return total
+
+    async def wallet_tokens(self) -> dict[str, int]:
+        """{mint: raw balance} of every token this wallet holds (SPL Token and Token-2022)."""
+        out: dict[str, int] = {}
+        for program in ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"):
+            res = await self._rpc("getTokenAccountsByOwner", [self.pubkey, {"programId": program},
+                                                              {"encoding": "jsonParsed", "commitment": "confirmed"}])
+            for acc in (res or {}).get("value", []):
+                info = acc["account"]["data"]["parsed"]["info"]
+                amt = int(info["tokenAmount"]["amount"])
+                if amt > 0:
+                    out[info["mint"]] = out.get(info["mint"], 0) + amt
+        return out
+
+    async def token_symbol(self, mint: str) -> str | None:
+        try:
+            r = await self.http.get(f"https://api.dexscreener.com/tokens/v1/solana/{mint}", timeout=8)
+            pairs = r.json() if r.status_code == 200 else []
+            for p in pairs if isinstance(pairs, list) else []:
+                b = p.get("baseToken") or {}
+                if b.get("address") == mint and b.get("symbol"):
+                    return str(b["symbol"])[:60]
+        except Exception:
+            return None
+        return None
 
     async def _history_rpc(self, method: str, params: list[Any]) -> Any:
         """Paced RPC call for history reads (many in a row): waits out 429s instead of failing."""
@@ -660,6 +686,8 @@ class CopyEngine:
         self._extra_seen: dict[str, int] = {}   # mint -> reconciles in a row where the wallet held more
         self._extra_done: dict[str, int] = {}   # mint -> surplus already looked up (don't re-read history for it)
         self._priced = 0.0                  # monotonic time of the last take-capital price check
+        self._adopted = 0.0                 # monotonic time of the last look for the owner's own hand-bought tokens
+        self._adopt_done: dict[str, int] = {}   # mint -> balance already looked up (no buy found / dust)
         self._said: dict[str, float] = {}    # repeating skip notices -> last time sent
         self._beat = 0.0                     # monotonic time of the last heartbeat written
         self._up_seen: dict[int, int] = {}  # position id -> checks in a row at or above the target
@@ -1080,6 +1108,69 @@ class CopyEngine:
             await self.notify(f"{self._tag()} 🧾 Found buys you made by hand in the wallet, added to the position:\n"
                               + "\n".join(lines))
 
+    async def _adopt_hand_buys(self, session: AsyncSession) -> None:
+        """Tokens the owner bought by hand that the bot does not hold become a "manual" position (no leader): the
+        bot takes the capital out at the take-capital target and books hand sales, and never sells it for max hold.
+        Only real purchases count (SOL or stablecoins spent) within LIVE_ADOPT_LOOKBACK_HOURS; airdrops and
+        transfers in stay the owner's own."""
+        if not self.s.live_adopt_hand_buys or self.x.mode != "live" or not hasattr(self.x, "wallet_tokens"):
+            return
+        if time.monotonic() - self._adopted < self.s.live_reconcile_seconds:
+            return
+        self._adopted = time.monotonic()
+        try:
+            held = await self.x.wallet_tokens()
+        except Exception as exc:
+            log.warning("live: adopt balances failed: %s", exc)
+            return
+        opened = {p.token_address for p in (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine()))).scalars().all()}
+        skip = set(STABLES) | {SOL_MINT} | set(self.s.live_hold_mints)
+        new = {m: b for m, b in held.items()
+               if m not in opened and m not in skip and self._adopt_done.get(m) != b}
+        self._adopt_done = {m: b for m, b in self._adopt_done.items() if m in held}
+        if not new:
+            return
+        rows = (await session.execute(select(LivePosition).where(
+            LivePosition.token_address.in_(list(new)), *self._mine()))).scalars().all()
+        known = {p.buy_signature for p in rows if p.buy_signature}
+        for p in rows:
+            for f in p.fills or []:
+                known.update(s for s in [f.get("sig"), *(f.get("sigs") or [])] if s)
+        since = _now() - timedelta(hours=self.s.live_adopt_lookback_hours)
+        try:
+            buys = await self.x.wallet_buys(set(new), since)
+            px = await self.x.sol_price()
+        except Exception as exc:
+            log.warning("live: adopt history failed: %s", exc)
+            return
+        lines = []
+        for mint, bal in new.items():
+            self._adopt_done[mint] = bal
+            hs = [h for h in buys.get(mint, []) if h["sig"] not in known and (h["sol"] > 1e-4 or h["usd"] > 0.01)]
+            got = sum(h["tokens_raw"] for h in hs)
+            if got <= 0:
+                continue
+            tokens = min(bal, got)
+            k = tokens / got
+            sol_out = sum(h["sol"] for h in hs) * k
+            usd_out = sol_out * px + sum(h["usd"] for h in hs) * k
+            sym = (await self.x.token_symbol(mint) if hasattr(self.x, "token_symbol") else None) or mint[:6]
+            first = min(h["at"] for h in hs)
+            session.add(LivePosition(
+                mode=self.x.mode, account=self.a.name, token_address=mint, symbol=sym, leader_wallet=MANUAL,
+                leader_trade_id=0, status="open", cost_usd=usd_out, sol_spent=sol_out, tokens_raw=str(tokens),
+                tokens_bought_raw=str(tokens), buy_signature=hs[0]["sig"], opened_at=first,
+                fills=[{"side": "buy_hand", "sigs": [h["sig"] for h in hs], "sol": sol_out, "tokens_raw": str(tokens),
+                        "usd": round(usd_out, 2), "at": max(h["at"] for h in hs).isoformat()}]))
+            lines.append(f"${sym}: ${usd_out:,.2f} entry")
+            log.info("live: adopted %s bought by hand: %d raw for %.4f SOL ($%.2f)", mint[:8], tokens, sol_out, usd_out)
+        await session.commit()
+        if lines:
+            target = self._take_capital_target()
+            await self.notify(f"{self._tag()} 🧾 Tracking tokens you bought by hand"
+                              + (f" (capital comes out at +{target:.0f}%)" if target else "") + ":\n" + "\n".join(lines))
+
     async def _take_capital(self, session: AsyncSession) -> None:
         """Position up LIVE_TAKE_CAPITAL_AT_PCT (value now + already sold vs cost): sell tokens worth what is still
         missing to get the cost back, once per position. The rest keeps following the leader's sells."""
@@ -1091,9 +1182,14 @@ class CopyEngine:
         self._priced = time.monotonic()
         opened = (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine()))).scalars().all()
+        def taken(p: LivePosition) -> bool:
+            # capital was taken at this entry level already; a hand add-on raises the cost and allows it again
+            return any(f.get("reason") == "take_capital" and float(f.get("cost_at") or p.cost_usd) >= p.cost_usd - 0.01
+                       for f in (p.fills or []))
+
         todo = [p for p in opened
                 if not self._hold(p.token_address)
-                and not any(f.get("reason") == "take_capital" for f in (p.fills or []))
+                and not taken(p)
                 and (p.proceeds_usd or 0) < p.cost_usd and int(p.tokens_raw) > 0 and not p.manual_sell_frac]
         self._up_seen = {k: v for k, v in self._up_seen.items() if k in {p.id for p in todo}}
         if not todo:
@@ -1117,12 +1213,16 @@ class CopyEngine:
             self._up_seen.pop(p.id, None)
             share = min((p.cost_usd - (p.proceeds_usd or 0)) / value, 1.0)
             share = min(share, 0.98)             # always keep a profit bag (>= 0.99 would sell everything)
-            await self._sell(session, p, share, "take_capital")
+            if await self._sell(session, p, share, "take_capital"):
+                fills = [dict(f) for f in (p.fills or [])]
+                fills[-1]["cost_at"] = round(p.cost_usd, 2)     # the entry this take-capital paid back
+                p.fills = fills
             await session.commit()
 
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         await self._reconcile(session)
+        await self._adopt_hand_buys(session)
         await self._take_capital(session)
         opened = (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine()))).scalars().all()
@@ -1140,7 +1240,7 @@ class CopyEngine:
                 await session.commit()
                 continue
             if (_now() - utc(pos.opened_at) >= timedelta(hours=self.a.max_hold_hours or self.s.live_max_hold_hours)
-                    and not failed and not self._hold(pos.token_address)):
+                    and not failed and not self._hold(pos.token_address) and pos.leader_wallet != MANUAL):
                 await self._sell(session, pos, 1.0, "max_hold")
                 await session.commit()
 
