@@ -1462,3 +1462,9 @@ def test_time_stop_off():
 
     _db(body)
     assert [c for c in x.calls if c[0] == "sell"] == []
+
+
+def test_time_stop_is_off_by_default():
+    from app.config import Settings
+
+    assert Settings().live_time_stop_minutes is None

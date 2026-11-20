@@ -140,8 +140,8 @@ class Settings(BaseSettings):
         "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",    # TTWO
     ])
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
-    live_time_stop_minutes: float | None = 90.0  # capital not back this long after the buy: sell it all
-                                                 # (losses gathered in trades held 1-24 h); None = off
+    live_time_stop_minutes: float | None = None  # off (user's choice). Set N to sell positions whose capital
+                                                 # is not back N minutes after the buy
     live_rpc_url: str | None = None              # defaults to SOLANA_RPC_URL
     jupiter_api_url: str = "https://lite-api.jup.ag"
     # Extra trading wallets copying the same leaders with their own budget, e.g.
