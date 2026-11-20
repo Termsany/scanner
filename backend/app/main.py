@@ -23,6 +23,7 @@ from sqlalchemy import text
 from app.ai_analyst import AIAnalyst
 from app.api import ai as ai_routes
 from app.api import live as live_routes
+from app.api import me as me_routes
 from app.api import tokens as token_routes
 from app.cache import Cache
 from app.config import get_settings
@@ -85,13 +86,14 @@ app.add_middleware(GZipMiddleware, minimum_size=1_024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["*"],
 )
 app.include_router(token_routes.router)
 app.include_router(ai_routes.router)
 app.include_router(live_routes.router)
+app.include_router(me_routes.router)
 
 
 @app.get("/healthz", tags=["ops"])

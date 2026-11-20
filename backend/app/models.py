@@ -486,5 +486,52 @@ class TradingAccount(Base):
     max_hold_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)        # None = LIVE_MAX_HOLD_HOURS
     # [{"wallet", "label", "unconditional", "new_tokens_only", "size_usd"}]
     leaders: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Owner (a registered user); NULL = the operator's own account. Users never see `leaders`.
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # Admin caps on what the owner may set; NULL = no cap
+    cap_size_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cap_open_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cap_loss_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    key_revealed: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)  # shown to owner once
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class User(Base):
+    """Someone who registered on the site. Trades only after the operator approves them (status "active")."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True)
+    name: Mapped[str] = mapped_column(String(80), default="")
+    password_hash: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(12), default="pending")    # pending | active | blocked
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UserSession(Base):
+    """Login session; only the SHA-256 of the cookie token is stored."""
+
+    __tablename__ = "user_sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AuditLog(Base):
+    """Who changed what: logins, approvals, settings, key reveals, withdrawals."""
+
+    __tablename__ = "audit_log"
+    __table_args__ = (Index("ix_audit_at", "at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    actor: Mapped[str] = mapped_column(String(80))          # admin | user:<id>
+    action: Mapped[str] = mapped_column(String(40))
+    target: Mapped[str] = mapped_column(String(80), default="")
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    ip: Mapped[str] = mapped_column(String(64), default="")

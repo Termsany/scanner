@@ -485,10 +485,76 @@ export interface TradingAccountCfg {
   leaders: LeaderCfg[];
   open_positions: number;
   updated_at: string | null;
+  user_id: number | null;
+  cap_size_usd: number | null;
+  cap_open_usd: number | null;
+  cap_loss_usd: number | null;
+  key_revealed: boolean;
 }
 
 export interface AccountsList {
   accounts: TradingAccountCfg[];
   can_store_keys: boolean;
   defaults: { max_hold_hours: number; reload_seconds: number };
+}
+
+export interface MyPosition {
+  id: number;
+  token_address: string;
+  symbol: string;
+  status: "open" | "closed" | "failed";
+  cost_usd: number;
+  proceeds_usd: number;
+  pnl_usd: number | null;
+  price_usd?: number | null;
+  value_usd?: number | null;
+  unrealized_usd?: number | null;
+  unrealized_pct?: number | null;
+  exit_reason: string | null;
+  manual_sell_frac: number | null;
+  buy_signature: string | null;
+  opened_at: string | null;
+  closed_at: string | null;
+}
+
+export interface MySettings {
+  size_usd: number;
+  max_open_usd: number;
+  max_daily_loss_usd: number;
+  take_capital_at_pct: number | null;
+  paused: boolean;
+  caps: { size_usd: number | null; max_open_usd: number | null; max_daily_loss_usd: number | null };
+}
+
+export interface MyAccount {
+  name: string;
+  enabled: boolean;
+  pubkey: string | null;
+  mode: "off" | "dry" | "live";
+  key_revealed: boolean;
+  sol_balance: number | null;
+  sol_usd: number | null;
+  sol_balance_usd: number | null;
+  settings: MySettings;
+  realized_usd: number;
+  realized_24h: number;
+  unrealized_usd: number | null;
+  open_cost_usd: number;
+  open: MyPosition[];
+  closed: MyPosition[];
+}
+
+export interface Me {
+  user: { email: string; name: string; status: "pending" | "active" | "blocked" };
+  account: MyAccount | null;
+}
+
+export interface SiteUser {
+  id: number;
+  email: string;
+  name: string;
+  status: "pending" | "active" | "blocked";
+  account: string | null;
+  created_at: string | null;
+  last_login_at: string | null;
 }

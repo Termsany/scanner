@@ -6,6 +6,9 @@ import type {
   PaginatedTokens,
   LiveStatus,
   AccountsList,
+  Me,
+  MySettings,
+  SiteUser,
   TradingAccountCfg,
   PaperSummary,
   Performance,
@@ -126,6 +129,60 @@ export const api = {
       method: "PATCH",
       headers: { "X-Live-Password": password },
       body: JSON.stringify(body),
+    }),
+
+  // ---- registered users (session cookie) ----
+  register: (email: string, password: string, name: string) =>
+    request<{ ok: boolean; status: string }>("/api/me/register", {
+      method: "POST", credentials: "include", body: JSON.stringify({ email, password, name }),
+    }),
+
+  login: (email: string, password: string) =>
+    request<{ ok: boolean; status: string }>("/api/me/login", {
+      method: "POST", credentials: "include", body: JSON.stringify({ email, password }),
+    }),
+
+  logout: () => request<{ ok: boolean }>("/api/me/logout", { method: "POST", credentials: "include" }),
+
+  me: (signal?: AbortSignal) => request<Me>("/api/me", { credentials: "include", signal }),
+
+  mySettings: (body: Record<string, unknown>) =>
+    request<{ settings: MySettings }>("/api/me/account", {
+      method: "PATCH", credentials: "include", body: JSON.stringify(body),
+    }),
+
+  revealKey: (password: string) =>
+    request<{ secret: string; pubkey: string }>("/api/me/account/reveal-key", {
+      method: "POST", credentials: "include", body: JSON.stringify({ password }),
+    }),
+
+  withdraw: (password: string, to: string, sol: number | null) =>
+    request<{ ok: boolean; sol: number; signature: string }>("/api/me/account/withdraw", {
+      method: "POST", credentials: "include", body: JSON.stringify({ password, to, sol, all: sol == null }),
+    }),
+
+  mySell: (id: number, share: number) =>
+    request<{ queued: boolean; message: string }>(`/api/me/positions/${id}/sell`, {
+      method: "POST", credentials: "include", body: JSON.stringify({ share }),
+    }),
+
+  changePassword: (current: string, next: string) =>
+    request<{ ok: boolean }>("/api/me/password", {
+      method: "POST", credentials: "include", body: JSON.stringify({ current, new: next }),
+    }),
+
+  // ---- admin: users ----
+  users: (password: string) =>
+    request<{ users: SiteUser[] }>("/api/live/users", { headers: { "X-Live-Password": password } }),
+
+  approveUser: (password: string, id: number, body: Record<string, unknown>) =>
+    request<{ status: string }>(`/api/live/users/${id}/approve`, {
+      method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify(body),
+    }),
+
+  blockUser: (password: string, id: number, blocked: boolean) =>
+    request<{ status: string }>(`/api/live/users/${id}/block`, {
+      method: "POST", headers: { "X-Live-Password": password }, body: JSON.stringify({ blocked }),
     }),
 
   signals: (minScore: number, limit = 30, signal?: AbortSignal) =>

@@ -132,7 +132,16 @@ class Settings(BaseSettings):
     # without it those wallets can't be used. Unset = new accounts can't be created from the page
     live_key_encryption_key: str | None = None
     live_accounts_reload_seconds: float = 30.0   # how often the worker picks up account edits
-    live_dashboard_password: str | None = None   # unlocks /live on the dashboard; unset = page disabled
+    live_dashboard_password: str | None = None
+    # Registered users (/login, /me). Off = no sign-ups and no user logins
+    users_enabled: bool = True
+    users_registration_open: bool = True          # new sign-ups (they still wait for the operator's approval)
+    user_session_days: int = 14
+    auth_cookie_secure: bool = True               # HTTPS only; set false for local http development
+    # Defaults for a newly approved user's account
+    user_default_size_usd: float = 10.0
+    user_default_open_usd: float = 100.0
+    user_default_loss_usd: float = 50.0   # unlocks /live on the dashboard; unset = page disabled
 
     # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)
     perf_interval_seconds: int = 300

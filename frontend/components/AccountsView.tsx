@@ -17,7 +17,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
-import type { AccountsList, LeaderCfg, TradingAccountCfg } from "@/lib/types";
+import type { AccountsList, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live page
 
@@ -55,6 +55,9 @@ interface Draft {
   take_capital_at_pct: string;
   max_hold_hours: string;
   leaders: LeaderCfg[];
+  cap_size_usd?: string;
+  cap_open_usd?: string;
+  cap_loss_usd?: string;
 }
 
 function toDraft(a: TradingAccountCfg): Draft {
@@ -67,7 +70,41 @@ function toDraft(a: TradingAccountCfg): Draft {
     take_capital_at_pct: String(a.take_capital_at_pct ?? 100),
     max_hold_hours: a.max_hold_hours != null ? String(a.max_hold_hours) : "",
     leaders: a.leaders.map((l) => ({ ...l })),
+    ...(a.user_id != null
+      ? {
+          cap_size_usd: a.cap_size_usd != null ? String(a.cap_size_usd) : "",
+          cap_open_usd: a.cap_open_usd != null ? String(a.cap_open_usd) : "",
+          cap_loss_usd: a.cap_loss_usd != null ? String(a.cap_loss_usd) : "",
+        }
+      : {}),
   };
+}
+
+function Caps({ d, set }: { d: Draft; set: (d: Draft) => void }) {
+  const f = (label: string, k: "cap_size_usd" | "cap_open_usd" | "cap_loss_usd") => (
+    <Field label={label} hint="empty = no limit">
+      <input className={`${input} num`} inputMode="decimal" value={d[k] ?? ""}
+        onChange={(e) => set({ ...d, [k]: e.target.value })} />
+    </Field>
+  );
+  return (
+    <div className="mt-4">
+      <div className="mb-2 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">
+        User limits (the most the user may set)
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        {f("Max entry", "cap_size_usd")}
+        {f("Max budget", "cap_open_usd")}
+        {f("Max loss / 24h", "cap_loss_usd")}
+      </div>
+    </div>
+  );
+}
+
+function capsPayload(d: Draft) {
+  if (d.cap_size_usd === undefined) return {};
+  const v = (x?: string) => (x ? num(x) : -1); // -1 clears a cap
+  return { cap_size_usd: v(d.cap_size_usd), cap_open_usd: v(d.cap_open_usd), cap_loss_usd: v(d.cap_loss_usd) };
 }
 
 const EMPTY: Draft = {
@@ -248,11 +285,13 @@ function AccountCard({
   password,
   defaultHold,
   onSaved,
+  owner,
 }: {
   a: TradingAccountCfg;
   password: string;
   defaultHold: number;
   onSaved: (a: TradingAccountCfg) => void;
+  owner?: string;
 }) {
   const [d, setD] = useState<Draft>(() => toDraft(a));
   const [busy, setBusy] = useState(false);
@@ -294,6 +333,9 @@ function AccountCard({
           </a>
         )}
         <span className="text-xs text-faint">{a.open_positions} open</span>
+        {owner && (
+          <span className="rounded-full border border-accent/50 px-2 py-0.5 text-[10px] text-accent">user: {owner}</span>
+        )}
         <div className="ml-auto flex gap-2">
           {a.enabled && (
             <button type="button" disabled={busy}
@@ -315,12 +357,14 @@ function AccountCard({
       </header>
       <Settings d={d} set={setD} defaultHold={defaultHold} />
       <Leaders d={d} set={setD} />
+      {a.user_id != null && <Caps d={d} set={setD} />}
       <footer className="mt-4 flex flex-wrap items-center gap-3">
         <button type="button" disabled={busy || !dirty}
           className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-carbon disabled:opacity-40"
           onClick={() =>
             send({
               ...payload(d),
+              ...capsPayload(d),
               ...(d.take_on ? { take_capital_at_pct: num(d.take_capital_at_pct) } : { take_capital_off: true }),
               ...(d.max_hold_hours ? { max_hold_hours: num(d.max_hold_hours) } : { max_hold_default: true }),
             }, "Saved: the bot picks it up within 30 s")
@@ -475,6 +519,102 @@ function SecretOnce({ name, pubkey, secret, onClose }: {
   );
 }
 
+function UsersPanel({ password, onChange }: { password: string; onChange: () => void }) {
+  const [users, setUsers] = useState<SiteUser[] | null>(null);
+  const [err, setErr] = useState("");
+  const load = useCallback(async () => {
+    try {
+      setUsers((await api.users(password)).users);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "Could not load users");
+    }
+  }, [password]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function act(fn: () => Promise<unknown>) {
+    setErr("");
+    try {
+      await fn();
+      await load();
+      onChange();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "Failed");
+    }
+  }
+
+  if (!users) return null;
+  const pending = users.filter((u) => u.status === "pending").length;
+  return (
+    <section className="card">
+      <header className="flex items-center gap-2 border-b border-line px-4 py-3">
+        <Users className="size-4 text-accent" />
+        <h2 className="text-sm font-semibold">Registered users ({users.length})</h2>
+        {pending > 0 && (
+          <span className="rounded-full border border-warn/60 px-2 py-0.5 text-[10px] text-warn">{pending} waiting</span>
+        )}
+        {err && <span className="ml-auto text-xs text-bear">{err}</span>}
+      </header>
+      {users.length === 0 ? (
+        <p className="px-4 py-4 text-xs text-faint">Nobody has signed up yet. The sign-up page is /login.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[620px] text-sm">
+            <thead className="text-[11px] text-muted uppercase">
+              <tr className="border-b border-line">
+                <th className="px-4 py-2 text-left">Email</th>
+                <th className="px-4 py-2 text-left">Name</th>
+                <th className="px-4 py-2 text-left">Status</th>
+                <th className="px-4 py-2 text-left">Account</th>
+                <th className="px-4 py-2 text-left">Signed up</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.id} className="border-b border-line/60 last:border-0">
+                  <td className="px-4 py-2">{u.email}</td>
+                  <td className="px-4 py-2 text-muted">{u.name}</td>
+                  <td className={`px-4 py-2 text-xs font-semibold ${u.status === "active" ? "text-bull" : u.status === "pending" ? "text-warn" : "text-bear"}`}>
+                    {u.status}
+                  </td>
+                  <td className="num px-4 py-2 text-xs">{u.account ?? "—"}</td>
+                  <td className="px-4 py-2 text-xs text-muted">{u.created_at ? new Date(u.created_at).toLocaleDateString() : ""}</td>
+                  <td className="px-4 py-2 text-right">
+                    <span className="inline-flex gap-1.5">
+                      {u.status === "pending" && (
+                        <button type="button" className="rounded-md bg-accent px-2.5 py-1 text-xs font-semibold text-carbon"
+                          title="Gives a new wallet copying the same smart wallets as main; edit it below afterwards"
+                          onClick={() => confirm(`Approve ${u.email}? They get a new wallet copying main's smart wallets.`) &&
+                            act(() => api.approveUser(password, u.id, {}))}>
+                          Approve
+                        </button>
+                      )}
+                      {u.status !== "blocked" ? (
+                        <button type="button" className="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-raised"
+                          onClick={() => confirm(`Block ${u.email}? They are signed out and their account stops buying.`) &&
+                            act(() => api.blockUser(password, u.id, true))}>
+                          Block
+                        </button>
+                      ) : (
+                        <button type="button" className="rounded-md border border-line px-2.5 py-1 text-xs hover:bg-raised"
+                          onClick={() => act(() => api.blockUser(password, u.id, false))}>
+                          Unblock
+                        </button>
+                      )}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function AccountsView() {
   const [password, setPassword] = useState("");
   const [inputPw, setInputPw] = useState("");
@@ -505,6 +645,11 @@ export function AccountsView() {
   useEffect(() => {
     if (password) load(password);
   }, [password, load]);
+  const [owners, setOwners] = useState<Record<number, string>>({});
+  useEffect(() => {
+    if (!password || !data) return;
+    api.users(password).then((r) => setOwners(Object.fromEntries(r.users.map((u) => [u.id, u.email])))).catch(() => undefined);
+  }, [password, data]);
 
   useEffect(() => {
     if (!secret) return;
@@ -557,8 +702,10 @@ export function AccountsView() {
       {error && <p className="mb-4 text-sm text-bear">{error}</p>}
       <div className="flex flex-col gap-4">
         {secret && <SecretOnce {...secret} onClose={() => setSecret(null)} />}
+        {data && <UsersPanel password={password} onChange={() => load(password)} />}
         {data?.accounts.map((a) => (
-          <AccountCard key={a.name} a={a} password={password} defaultHold={hold} onSaved={replace} />
+          <AccountCard key={a.name} a={a} password={password} defaultHold={hold} onSaved={replace}
+            owner={a.user_id != null ? (owners[a.user_id] ?? `#${a.user_id}`) : undefined} />
         ))}
         {data && (
           <NewAccount password={password} canStore={data.can_store_keys} defaultHold={hold}

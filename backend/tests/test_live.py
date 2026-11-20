@@ -1061,3 +1061,25 @@ def test_supervisor_starts_updates_and_stops_engines_without_restart():
         for task, _, _ in running.values():
             task.cancel()
     asyncio.run(go())
+
+
+def test_only_the_wallet_that_gave_the_entry_closes_the_position():
+    """Both wallets are copied. A opens the position; B buying or selling the same token never touches it;
+    only A's sell closes it."""
+    from app.live import Leader
+
+    (pos, _), x = _engine_with({"leaders": {LEADER: Leader(LEADER), W2: Leader(W2)}}, [
+        [_trade(mint="T")],                                             # A buys: we copy
+        [_trade(wallet=W2, mint="T")],                                  # B buys the same token: still one position
+        [_trade(wallet=W2, side="sell", mint="T", pct_sold=100, remaining=0)],   # B exits: we keep holding
+        [_trade(wallet=W2, side="sell", mint="T", pct_sold=50, remaining=1)],    # B trims: nothing either
+    ])
+    assert x.calls == [("buy", "T", 30)] and pos[0].status == "open" and pos[0].tokens_raw == "1000000"
+
+    (pos, _), x = _engine_with({"leaders": {LEADER: Leader(LEADER), W2: Leader(W2)}}, [
+        [_trade(mint="T")],
+        [_trade(wallet=W2, side="sell", mint="T", pct_sold=100, remaining=0)],
+        [_trade(side="sell", mint="T", pct_sold=100, remaining=0)],     # A exits: we exit
+    ])
+    assert x.calls == [("buy", "T", 30), ("sell", "T", 1_000_000)]
+    assert pos[0].status == "closed" and pos[0].exit_reason == "leader_sold" and pos[0].leader_wallet == LEADER

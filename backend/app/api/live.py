@@ -247,6 +247,10 @@ class AccountPatch(BaseModel):
     max_hold_hours: int | None = None
     max_hold_default: bool = False      # back to LIVE_MAX_HOLD_HOURS
     leaders: list[LeaderIn] | None = None
+    # admin caps on what the owner may set; a negative number clears a cap
+    cap_size_usd: float | None = None
+    cap_open_usd: float | None = None
+    cap_loss_usd: float | None = None
 
 
 async def _open_counts(session: AsyncSession) -> dict[str, int]:
@@ -337,7 +341,8 @@ async def create_account(body: AccountIn, session: Session, _: Auth) -> dict[str
 
 
 @router.patch("/accounts/{name}")
-async def edit_account(name: str, body: AccountPatch, session: Session, _: Auth) -> dict[str, Any]:
+async def edit_account(name: str, body: AccountPatch, request: Request, session: Session,
+                       _: Auth) -> dict[str, Any]:
     from app.accounts import AccountError, check_limits, clean_leaders, ensure_tracked, public
 
     row = await _row(session, name)
@@ -366,5 +371,128 @@ async def edit_account(name: str, body: AccountPatch, session: Session, _: Auth)
     if leaders is not None:
         row.leaders = leaders
         await ensure_tracked(session, [ld["wallet"] for ld in leaders])
+    for f in ("cap_size_usd", "cap_open_usd", "cap_loss_usd"):
+        v = getattr(body, f)
+        if v is not None:
+            setattr(row, f, None if v < 0 else v)
+    from app.users import audit
+
+    await audit(session, "admin", "account_edit", row.name, body.model_dump(exclude_none=True), _ip(request))
     await session.commit()
     return {"account": public(row, counts.get(row.name, 0))}
+
+
+# ---- registered users (admin) -------------------------------------------------------
+@router.get("/users")
+async def list_users(session: Session, _: Auth) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.models import TradingAccount, User
+
+    users = (await session.execute(select(User).order_by(User.id.desc()))).scalars().all()
+    accts = {r.user_id: r.name for r in (await session.execute(
+        select(TradingAccount).where(TradingAccount.user_id.is_not(None)))).scalars().all()}
+    return {"users": [{
+        "id": u.id, "email": u.email, "name": u.name, "status": u.status, "account": accts.get(u.id),
+        "created_at": u.created_at.isoformat() if u.created_at else None,
+        "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
+    } for u in users]}
+
+
+class ApproveIn(BaseModel):
+    leaders: list[LeaderIn] | None = None     # None = copy the smart wallets of account "main"
+    size_usd: float | None = None
+    max_open_usd: float | None = None
+    max_daily_loss_usd: float | None = None
+    cap_size_usd: float | None = None
+    cap_open_usd: float | None = None
+    cap_loss_usd: float | None = None
+    take_capital_at_pct: float | None = 100.0
+
+
+@router.post("/users/{user_id}/approve")
+async def approve_user(user_id: int, body: ApproveIn, request: Request, session: Session,
+                       _: Auth) -> dict[str, Any]:
+    """Activate a user and give them a trading account with a fresh wallet (key shown once to them, not here)."""
+    from sqlalchemy import select
+
+    from app.accounts import (AccountError, check_limits, clean_leaders, encrypt_key, ensure_tracked, new_wallet,
+                              public, rows)
+    from app.models import TradingAccount, User
+    from app.users import audit
+
+    s = get_settings()
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "No such user")
+    existing = (await session.execute(select(TradingAccount).where(TradingAccount.user_id == user.id))
+                ).scalars().first()
+    if existing is None:
+        try:
+            if body.leaders is None:
+                main = next((r for r in await rows(session, s) if r.name == "main"), None)
+                leaders = [dict(d) for d in (main.leaders if main else [])]
+            else:
+                leaders = clean_leaders([ld.model_dump() for ld in body.leaders])
+            size = body.size_usd or s.user_default_size_usd
+            max_open = body.max_open_usd or s.user_default_open_usd
+            loss = body.max_daily_loss_usd or s.user_default_loss_usd
+            check_limits(size, max_open, loss, body.take_capital_at_pct, None)
+            pubkey, secret = new_wallet()
+            enc = encrypt_key(s, secret)
+        except AccountError as exc:
+            raise HTTPException(400, str(exc)) from None
+        existing = TradingAccount(
+            name=f"u{user.id}", user_id=user.id, key_source="db", key_enc=enc, pubkey=pubkey, key_revealed=False,
+            size_usd=size, max_open_usd=max_open, max_daily_loss_usd=loss,
+            take_capital_at_pct=body.take_capital_at_pct, leaders=leaders,
+            cap_size_usd=body.cap_size_usd, cap_open_usd=body.cap_open_usd, cap_loss_usd=body.cap_loss_usd)
+        session.add(existing)
+        await ensure_tracked(session, [d["wallet"] for d in leaders])
+    user.status = "active"
+    existing.enabled = True
+    await audit(session, "admin", "user_approved", user.email, {"account": existing.name}, _ip(request))
+    await session.commit()
+    return {"user_id": user.id, "status": user.status, "account": public(existing)}
+
+
+class BlockIn(BaseModel):
+    blocked: bool
+
+
+@router.post("/users/{user_id}/block")
+async def block_user(user_id: int, body: BlockIn, request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    """Blocked: signed out, can't sign in, and their account stops buying (sells keep working)."""
+    from sqlalchemy import select
+
+    from app.models import TradingAccount, User
+    from app.users import audit, end_all_sessions
+
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "No such user")
+    acct = (await session.execute(select(TradingAccount).where(TradingAccount.user_id == user.id))
+            ).scalars().first()
+    if body.blocked:
+        user.status = "blocked"
+        await end_all_sessions(session, user.id)
+        if acct:
+            acct.paused = True
+    else:
+        user.status = "active" if acct else "pending"
+    await audit(session, "admin", "user_blocked" if body.blocked else "user_unblocked", user.email,
+                ip=_ip(request))
+    await session.commit()
+    return {"user_id": user.id, "status": user.status}
+
+
+@router.get("/audit")
+async def audit_log(session: Session, _: Auth, limit: int = 100) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.models import AuditLog
+
+    rows = (await session.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(min(limit, 500))
+                                  )).scalars().all()
+    return {"entries": [{"at": r.at.isoformat() if r.at else None, "actor": r.actor, "action": r.action,
+                         "target": r.target, "details": r.details, "ip": r.ip} for r in rows]}

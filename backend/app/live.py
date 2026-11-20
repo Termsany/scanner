@@ -291,6 +291,35 @@ class JupiterExecutor:
                 await asyncio.sleep(1.5 * (attempt + 1))
         raise SwapError("unreachable")
 
+    async def transfer_sol(self, to: str, lamports: int) -> str:
+        """Send SOL from this wallet (owner's withdrawal). Returns the signature once confirmed."""
+        from solders.hash import Hash
+        from solders.message import Message
+        from solders.pubkey import Pubkey
+        from solders.system_program import TransferParams, transfer
+        from solders.transaction import Transaction
+
+        if self.mode != "live" or self.kp is None:
+            raise SwapError("withdrawals need live mode and the wallet key")
+        if lamports <= 0:
+            raise SwapError("nothing to send")
+        bh = await self._rpc("getLatestBlockhash", [{"commitment": "confirmed"}])
+        blockhash = Hash.from_string(bh["value"]["blockhash"])
+        ix = transfer(TransferParams(from_pubkey=self.kp.pubkey(), to_pubkey=Pubkey.from_string(to),
+                                     lamports=lamports))
+        tx = Transaction([self.kp], Message.new_with_blockhash([ix], self.kp.pubkey(), blockhash), blockhash)
+        sig = await self._rpc("sendTransaction", [base64.b64encode(bytes(tx)).decode(),
+                                                  {"encoding": "base64", "preflightCommitment": "confirmed"}])
+        for _ in range(40):
+            await asyncio.sleep(1)
+            st = await self._rpc("getSignatureStatuses", [[sig]])
+            v = ((st or {}).get("value") or [None])[0]
+            if v and v.get("err"):
+                raise SwapError(f"transfer failed on-chain: {v['err']}")
+            if v and v.get("confirmationStatus") in ("confirmed", "finalized"):
+                return sig
+        raise SwapError(f"transfer {sig} sent but not confirmed yet: check Solscan before trying again")
+
     async def token_prices(self, mints: list[str]) -> dict[str, dict[str, float]]:
         """{mint: {"usd", "decimals"}} from DexScreener (Jupiter only once per mint, for decimals)."""
         from app.api.live import jupiter_prices
@@ -569,6 +598,7 @@ class CopyEngine:
         self._reconciled = 0.0              # monotonic time of the last wallet reconcile
         self._short_seen: dict[str, int] = {}   # mint -> reconciles in a row where the wallet held less
         self._priced = 0.0                  # monotonic time of the last take-capital price check
+        self._said: dict[str, float] = {}    # repeating skip notices -> last time sent
         self._up_seen: dict[int, int] = {}  # position id -> checks in a row at or above the target
 
     def update(self, account: Account) -> None:
@@ -670,7 +700,14 @@ class CopyEngine:
         why = await self._skip_reason(session, t)
         if why:
             log.info("live: skip buy %s (%s)", sym, why)
-            if "already holding" not in why:
+            quiet = "already holding" in why
+            if why.startswith("not enough SOL") or why.startswith("account ") or why.startswith("limit:"):
+                # an unfunded, paused or full account would repeat this on every leader buy: say it every 6 h
+                key = why.split(" ")[0]
+                quiet = time.monotonic() - self._said.get(key, -1e9) < 6 * 3600
+                if not quiet:
+                    self._said[key] = time.monotonic()
+            if not quiet:
                 await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
             return
         free = self._free(t.wallet)
