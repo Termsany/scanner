@@ -63,10 +63,10 @@ export function PaperView() {
   return (
     <>
     <AppNav kind="public" />
-    <main className="mx-auto max-w-[1400px] px-4 pt-5 pb-12 sm:px-6">
-      <header className="flex flex-wrap items-center gap-3">
+    <main className="mx-auto max-w-[1400px] px-4 pt-6 pb-14 sm:px-6">
+      <header className="mb-2 flex flex-wrap items-center gap-3">
         <FlaskConical className="size-5 text-accent" />
-        <h1 className="text-lg font-semibold tracking-tight">Paper trading</h1>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Paper trading</h1>
         <div role="radiogroup" aria-label="Window" className="ml-auto flex rounded-lg border border-line bg-carbon/60 p-0.5">
           {WINDOWS.map((w) => (
             <button
@@ -109,7 +109,7 @@ export function PaperView() {
         <>
           <section className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {data.strategies.map((s) => (
-              <div key={s.name} className="card px-4 py-3.5">
+              <div key={s.name} className="card p-5 transition hover:border-line-strong">
                 <div className="num text-[11px] font-medium tracking-[0.14em] text-muted uppercase">{s.name}</div>
                 <div className="mt-1 text-xs text-faint">{s.title}</div>
                 <div className={`num mt-3 text-2xl font-semibold ${pctClass(s.realized_usd || null)}`}>{money(s.realized_usd)}</div>
@@ -128,49 +128,50 @@ export function PaperView() {
             ))}
           </section>
 
-          <section className="card mt-4 overflow-x-auto">
-            <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">Positions</h2>
+          <section className="card mt-6 overflow-hidden">
+            <h2 className="border-b border-line px-5 py-4 text-[15px] font-semibold tracking-tight">Positions</h2>
             {data.positions.length === 0 ? (
               <p className="px-4 py-6 text-sm text-muted">
                 No paper trades yet. The first one opens on the next tracked-wallet buy or 80+ signal.
               </p>
             ) : (
-              <table className="w-full min-w-[960px] text-sm">
-                <thead className="text-[10.5px] tracking-[0.12em] text-muted uppercase">
-                  <tr className="border-b border-line">
-                    <th className="px-4 py-2 text-left">Token</th>
-                    <th className="px-3 py-2 text-left">Strategy</th>
-                    <th className="px-3 py-2 text-left">Trigger</th>
-                    <th className="px-3 py-2 text-right">Opened</th>
-                    <th className="px-3 py-2 text-right">Entry</th>
-                    <th className="px-3 py-2 text-right">Now / exit</th>
-                    <th className="px-3 py-2 text-right">Peak</th>
-                    <th className="px-3 py-2 text-right">P&amp;L</th>
-                    <th className="px-3 py-2 text-left">Status</th>
+              <div className="overflow-x-auto">
+              <table className="data-table min-w-[960px]">
+                <thead>
+                  <tr>
+                    <th className="text-left">Token</th>
+                    <th className="text-left">Strategy</th>
+                    <th className="text-left">Trigger</th>
+                    <th className="text-right">Opened</th>
+                    <th className="text-right">Entry</th>
+                    <th className="text-right">Now / exit</th>
+                    <th className="text-right">Peak</th>
+                    <th className="text-right">P&amp;L</th>
+                    <th className="text-left">Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.positions.map((p) => (
-                    <tr key={p.id} className="border-b border-line/60 hover:bg-white/[0.025]">
-                      <td className="px-4 py-2">
+                    <tr key={p.id}>
+                      <td>
                         <a href={`/token/${p.chain}/${p.token_address}`} className="flex items-center gap-1.5 hover:underline">
                           <span className="font-semibold">${p.symbol || p.token_address.slice(0, 6)}</span>
                           <ChainPill chain={p.chain} />
                         </a>
                       </td>
-                      <td className="num px-3 py-2 text-xs text-muted">{p.strategy}</td>
+                      <td className="num text-xs text-muted">{p.strategy}</td>
                       <td className="max-w-[220px] truncate px-3 py-2 text-xs text-muted" title={p.trigger}>
                         {p.trigger}
                       </td>
-                      <td className="num px-3 py-2 text-right text-muted">{ago(p.entry_time, now)}</td>
-                      <td className="num px-3 py-2 text-right">{price(p.entry_price)}</td>
-                      <td className="num px-3 py-2 text-right">{price(p.status === "open" ? p.last_price : p.exit_price)}</td>
-                      <td className="num px-3 py-2 text-right text-bull">{pct(p.peak_pct)}</td>
-                      <td className={`num px-3 py-2 text-right ${pctClass(p.pnl_usd)}`}>
+                      <td className="num text-right text-muted">{ago(p.entry_time, now)}</td>
+                      <td className="num text-right">{price(p.entry_price)}</td>
+                      <td className="num text-right">{price(p.status === "open" ? p.last_price : p.exit_price)}</td>
+                      <td className="num text-right text-bull">{pct(p.peak_pct)}</td>
+                      <td className={`num text-right ${pctClass(p.pnl_usd)}`}>
                         {money(p.pnl_usd)}
                         <span className="block text-[10px]">{pct(p.pnl_pct)}</span>
                       </td>
-                      <td className="px-3 py-2 text-xs">
+                      <td className="text-xs">
                         {p.status === "open" ? (
                           <span className="rounded-full border border-accent/40 px-2 py-0.5 text-accent">
                             Open{p.remaining_pct < 100 ? ` · ${p.remaining_pct.toFixed(0)}% left` : ""}
@@ -183,6 +184,7 @@ export function PaperView() {
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
           </section>
         </>

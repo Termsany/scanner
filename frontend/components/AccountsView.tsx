@@ -18,6 +18,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { AppNav } from "@/components/AppNav";
+import { Badge, button, LockScreen, PageHeader } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import type { AccountsList, AuditEntry, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
 
@@ -205,47 +206,47 @@ function Leaders({ d, set }: { d: Draft; set: (d: Draft) => void }) {
       <div className="mb-2 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">
         Smart wallets to copy ({d.leaders.length})
       </div>
-      <div className="overflow-x-auto rounded-md border border-line">
-        <table className="w-full min-w-[640px] text-sm">
-          <thead className="text-[11px] text-muted uppercase">
-            <tr className="border-b border-line">
-              <th className="px-3 py-2 text-left">Wallet</th>
-              <th className="px-3 py-2 text-left">Label</th>
-              <th className="px-3 py-2 text-left">Entry</th>
-              <th className="px-3 py-2 text-center" title="Copy with no liquidity, chase or scanner checks">
+      <div className="overflow-x-auto rounded-xl border border-line">
+        <table className="data-table min-w-[640px] text-sm">
+          <thead>
+            <tr>
+              <th className="text-left">Wallet</th>
+              <th className="text-left">Label</th>
+              <th className="text-left">Entry</th>
+              <th className="text-center" title="Copy with no liquidity, chase or scanner checks">
                 No checks
               </th>
-              <th className="px-3 py-2 text-center" title="Only tokens it did not hold before">New tokens only</th>
+              <th className="text-center" title="Only tokens it did not hold before">New tokens only</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {d.leaders.map((l, i) => (
-              <tr key={l.wallet} className="border-b border-line/60 last:border-0">
-                <td className="num px-3 py-1.5">
+              <tr key={l.wallet}>
+                <td className="num ">
                   <a className="inline-flex items-center gap-1 hover:underline" target="_blank" rel="noreferrer"
                     href={`https://solscan.io/account/${l.wallet}`}>
                     {short(l.wallet)} <ExternalLink className="size-3" />
                   </a>
                 </td>
-                <td className="px-3 py-1.5">
+                <td >
                   <input className={input} value={l.label} maxLength={40}
                     onChange={(e) => upd(i, { label: e.target.value })} />
                 </td>
-                <td className="px-3 py-1.5">
+                <td >
                   <input className={`${input} num w-24`} inputMode="decimal" placeholder="account"
                     value={l.size_usd ?? ""}
                     onChange={(e) => upd(i, { size_usd: e.target.value ? Number(e.target.value) : null })} />
                 </td>
-                <td className="px-3 py-1.5 text-center">
+                <td className="text-center">
                   <input type="checkbox" checked={l.unconditional}
                     onChange={(e) => upd(i, { unconditional: e.target.checked })} />
                 </td>
-                <td className="px-3 py-1.5 text-center">
+                <td className="text-center">
                   <input type="checkbox" checked={l.new_tokens_only}
                     onChange={(e) => upd(i, { new_tokens_only: e.target.checked })} />
                 </td>
-                <td className="px-3 py-1.5 text-right">
+                <td className="text-right">
                   <button type="button" aria-label="Remove" className="text-muted hover:text-bear"
                     onClick={() => set({ ...d, leaders: d.leaders.filter((_, j) => j !== i) })}>
                     <Trash2 className="size-4" />
@@ -267,7 +268,7 @@ function Leaders({ d, set }: { d: Draft; set: (d: Draft) => void }) {
         <input className={`${input} num`} placeholder="Smart wallet address to copy" value={add}
           onChange={(e) => setAdd(e.target.value)} />
         <button type="button"
-          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-line px-3 text-sm hover:bg-raised"
+          className={button("secondary", "shrink-0")}
           onClick={() => {
             const w = add.trim();
             if (!w || d.leaders.some((l) => l.wallet === w)) return;
@@ -316,18 +317,17 @@ function AccountCard({
   }
 
   return (
-    <section className={`card p-4 sm:p-5 ${a.enabled ? "" : "opacity-70"}`}>
-      <header className="mb-4 flex flex-wrap items-center gap-2">
-        <h2 className="text-base font-semibold">{a.name}</h2>
-        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold tracking-[0.1em] ${
-          !a.enabled ? "border-line text-muted" : a.paused ? "border-warn/60 text-warn" : "border-bull/50 text-bull"}`}>
+    <section className={`card overflow-hidden ${a.enabled ? "" : "opacity-70"}`}>
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-4">
+        <h2 className="num text-[15px] font-semibold">{a.name}</h2>
+        <Badge tone={!a.enabled ? "muted" : a.paused ? "gold" : "mint"} dot>
           {!a.enabled ? "DISABLED" : a.paused ? "PAUSED" : "ACTIVE"}
-        </span>
-        <span className="rounded-full border border-line px-2 py-0.5 text-[10px] text-muted"
-          title={a.key_source === "env" ? "Key in the server environment" : "Key stored encrypted"}>
-          <KeyRound className="mr-1 inline size-3" />
+        </Badge>
+        {a.billing_hold && <Badge tone="bear">unpaid bill: buys held</Badge>}
+        <Badge tone="muted">
+          <KeyRound className="size-3" />
           {a.key_source === "env" ? "server key" : "stored key"}
-        </span>
+        </Badge>
         {a.pubkey && (
           <a className="num inline-flex items-center gap-1 text-xs text-muted hover:underline" target="_blank"
             rel="noreferrer" href={`https://solscan.io/account/${a.pubkey}`}>
@@ -336,19 +336,19 @@ function AccountCard({
         )}
         <span className="text-xs text-faint">{a.open_positions} open</span>
         {owner && (
-          <span className="rounded-full border border-accent/50 px-2 py-0.5 text-[10px] text-accent">user: {owner}</span>
+          <Badge tone="sky">user: {owner}</Badge>
         )}
-        <div className="ml-auto flex gap-2">
+        <div className="ms-auto flex gap-2">
           {a.enabled && (
             <button type="button" disabled={busy}
-              className="inline-flex items-center gap-1 rounded-md border border-line px-2.5 py-1 text-xs hover:bg-raised"
+              className={button("secondary")}
               onClick={() => send({ paused: !a.paused }, a.paused ? "Resumed" : "Paused: no new buys, sells continue")}>
               {a.paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
               {a.paused ? "Resume" : "Pause"}
             </button>
           )}
           <button type="button" disabled={busy}
-            className="inline-flex items-center gap-1 rounded-md border border-line px-2.5 py-1 text-xs hover:bg-raised"
+            className={button("secondary")}
             onClick={() => {
               if (a.enabled && !confirm(`Stop account ${a.name} completely?`)) return;
               send({ enabled: !a.enabled }, a.enabled ? "Disabled" : "Enabled");
@@ -357,12 +357,14 @@ function AccountCard({
           </button>
         </div>
       </header>
+      <div className="p-5">
       <Settings d={d} set={setD} defaultHold={defaultHold} />
       <Leaders d={d} set={setD} />
       {a.user_id != null && <Caps d={d} set={setD} />}
-      <footer className="mt-4 flex flex-wrap items-center gap-3">
+      </div>
+      <footer className="flex flex-wrap items-center gap-3 border-t border-line bg-surface-2/50 px-5 py-3">
         <button type="button" disabled={busy || !dirty}
-          className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-carbon disabled:opacity-40"
+          className={button("primary")}
           onClick={() =>
             send({
               ...payload(d),
@@ -405,15 +407,15 @@ function NewAccount({
   if (!open) {
     return (
       <button type="button"
-        className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-line px-3 py-2 text-sm text-muted hover:bg-raised hover:text-ink"
+        className="inline-flex items-center justify-center gap-1.5 rounded-2xl border border-dashed border-line px-4 py-5 text-sm text-muted transition hover:border-mint/40 hover:bg-mint-soft/40 hover:text-mint"
         onClick={() => setOpen(true)}>
         <Plus className="size-4" /> New account
       </button>
     );
   }
   return (
-    <section className="card border-accent/40 p-4 sm:p-5">
-      <h2 className="mb-3 text-base font-semibold">New account</h2>
+    <section className="card border-mint/30 p-5">
+      <h2 className="mb-4 text-[15px] font-semibold">New account</h2>
       {!canStore && (
         <p className="mb-3 rounded-md border border-warn/50 px-3 py-2 text-xs text-warn">
           The server has no LIVE_KEY_ENCRYPTION_KEY yet, so it can't keep a wallet key safely. Set it in
@@ -445,7 +447,7 @@ function NewAccount({
       </div>
       <footer className="mt-4 flex flex-wrap items-center gap-3">
         <button type="button" disabled={busy || !canStore || !d.name}
-          className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-carbon disabled:opacity-40"
+          className={button("primary")}
           onClick={async () => {
             setBusy(true);
             setErr("");
@@ -487,7 +489,7 @@ function SecretOnce({ name, pubkey, secret, onClose }: {
 }) {
   const [copied, setCopied] = useState(false);
   return (
-    <section className="card border-warn/60 p-4 sm:p-5">
+    <section className="card border-gold/50 bg-gold-soft/30 p-5">
       <h2 className="mb-2 flex items-center gap-2 text-base font-semibold text-warn">
         <KeyRound className="size-4" /> Save the private key of “{name}” now
       </h2>
@@ -551,9 +553,9 @@ function UsersPanel({ password, onChange }: { password: string; onChange: () => 
   const pending = users.filter((u) => u.status === "pending").length;
   return (
     <section className="card">
-      <header className="flex items-center gap-2 border-b border-line px-4 py-3">
+      <header className="flex items-center gap-2 border-b border-line px-5 py-4">
         <Users className="size-4 text-accent" />
-        <h2 className="text-sm font-semibold">Registered users ({users.length})</h2>
+        <h2 className="text-[15px] font-semibold tracking-tight">Registered users ({users.length})</h2>
         {pending > 0 && (
           <span className="rounded-full border border-warn/60 px-2 py-0.5 text-[10px] text-warn">{pending} waiting</span>
         )}
@@ -579,9 +581,9 @@ function UsersPanel({ password, onChange }: { password: string; onChange: () => 
         <p className="px-4 py-4 text-xs text-faint">Nobody has signed up yet. The sign-up page is /login.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[620px] text-sm">
-            <thead className="text-[11px] text-muted uppercase">
-              <tr className="border-b border-line">
+          <table className="data-table min-w-[620px] text-sm">
+            <thead>
+              <tr>
                 <th className="px-4 py-2 text-left">Email</th>
                 <th className="px-4 py-2 text-left">Name</th>
                 <th className="px-4 py-2 text-left">Status</th>
@@ -593,7 +595,7 @@ function UsersPanel({ password, onChange }: { password: string; onChange: () => 
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr key={u.id} className="border-b border-line/60 last:border-0">
+                <tr key={u.id}>
                   <td className="px-4 py-2">{u.email}</td>
                   <td className="px-4 py-2 text-muted">{u.name}</td>
                   <td className={`px-4 py-2 text-xs font-semibold ${u.status === "active" ? "text-bull" : u.status === "pending" ? "text-warn" : "text-bear"}`}>
@@ -701,9 +703,9 @@ function ActivityPanel({ password }: { password: string }) {
 
   return (
     <section className="card">
-      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-4">
         <ScrollText className="size-4 text-accent" />
-        <h2 className="text-sm font-semibold">Activity log</h2>
+        <h2 className="text-[15px] font-semibold tracking-tight">Activity log</h2>
         <span className="text-xs text-faint">sign-ins, approvals, settings, keys, withdrawals</span>
         <button type="button" className="ml-auto rounded-md border border-line px-2.5 py-1 text-xs hover:bg-raised"
           onClick={() => setOpen(!open)}>
@@ -717,9 +719,9 @@ function ActivityPanel({ password }: { password: string }) {
               onChange={(e) => setQ(e.target.value)} />
           </div>
           <div className="max-h-[480px] overflow-auto">
-            <table className="w-full min-w-[720px] text-xs">
-              <thead className="sticky top-0 bg-[var(--color-surface,#11131a)] text-[11px] text-muted uppercase">
-                <tr className="border-b border-line">
+            <table className="data-table min-w-[720px] text-xs">
+              <thead className="sticky top-0">
+                <tr>
                   <th className="px-4 py-2 text-left">When</th>
                   <th className="px-4 py-2 text-left">Who</th>
                   <th className="px-4 py-2 text-left">What</th>
@@ -798,24 +800,11 @@ export function AccountsView() {
 
   if (!password) {
     return (
-      <main className="mx-auto flex min-h-[70vh] max-w-sm flex-col justify-center px-4">
-        <form className="card flex flex-col gap-3 p-6"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (inputPw) setPassword(inputPw);
-          }}>
-          <h1 className="flex items-center gap-2 text-base font-semibold">
-            <Lock className="size-4 text-accent" /> Trading accounts
-          </h1>
-          <p className="text-xs text-muted">Private page. Same password as the Live page.</p>
-          <input type="password" autoComplete="current-password" value={inputPw}
-            onChange={(e) => setInputPw(e.target.value)} placeholder="Password" className={input} />
-          {error && <p className="text-xs text-bear">{error}</p>}
-          <button type="submit" className="rounded-md bg-accent px-3 py-2 text-sm font-semibold text-carbon">
-            Unlock
-          </button>
-        </form>
-      </main>
+      <>
+        <AppNav />
+        <LockScreen title="Trading accounts" hint="Private page. Same password as the Live page."
+          value={inputPw} onChange={setInputPw} onSubmit={() => setPassword(inputPw)} error={error} />
+      </>
     );
   }
 
@@ -826,17 +815,12 @@ export function AccountsView() {
   return (
     <>
     <AppNav />
-    <main className="mx-auto max-w-[1200px] px-4 pt-5 pb-12 sm:px-6">
-      <header className="mb-5 flex flex-wrap items-center gap-3">
-        <Users className="size-5 text-accent" />
-        <h1 className="text-lg font-semibold tracking-tight">Trading accounts</h1>
-        <span className="text-xs text-faint">
-          Each account: its own wallet, smart wallets, entry, budget and loss limit. Edits apply within
-          {" "}{data?.defaults.reload_seconds ?? 30} s, no restart.
-        </span>
-      </header>
+    <main className="mx-auto max-w-[1200px] px-4 pt-6 pb-14 sm:px-6">
+      <PageHeader icon={<Users className="size-5" />} title="Trading accounts"
+        subtitle={<>Each account: its own wallet, smart wallets, entry, budget and loss limit. Edits apply within {data?.defaults.reload_seconds ?? 30}s, no restart.</>}
+        badges={data && <Badge tone="muted">{data.accounts.length} accounts</Badge>} />
       {error && <p className="mb-4 text-sm text-bear">{error}</p>}
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-6">
         {secret && <SecretOnce {...secret} onClose={() => setSecret(null)} />}
         {data && <UsersPanel password={password} onChange={() => load(password)} />}
         {data && <ActivityPanel password={password} />}

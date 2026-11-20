@@ -475,6 +475,7 @@ export interface TradingAccountCfg {
   name: string;
   enabled: boolean;
   paused: boolean;
+  billing_hold?: boolean;
   key_source: "env" | "db";
   pubkey: string | null;
   size_usd: number;

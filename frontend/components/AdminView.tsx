@@ -18,6 +18,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AppNav } from "@/components/AppNav";
+import { Badge, button, Empty, LockScreen, PageHeader, Panel, StatTile } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
 import type { AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount } from "@/lib/types";
@@ -84,15 +85,7 @@ function Tile({ icon, label, value, sub, tone }: {
   sub?: React.ReactNode;
   tone?: string;
 }) {
-  return (
-    <div className="card flex flex-col gap-1 p-4">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">
-        {icon} {label}
-      </div>
-      <div className={`num text-xl font-semibold ${tone ?? ""}`}>{value}</div>
-      {sub && <div className="text-xs text-muted">{sub}</div>}
-    </div>
-  );
+  return <StatTile icon={icon} label={label} value={value} sub={sub} tone={tone || "text-ink"} />;
 }
 
 function DailyBars({ days }: { days: AdminOverview["daily"] }) {
@@ -139,9 +132,9 @@ function Status({ a, now }: { a: OverviewAccount; now: number }) {
   if (a.billing_hold) chips.push(["unpaid: buys held", "bg-bear-soft text-bear"]);
   if (a.owner?.status === "blocked") chips.push(["blocked", "bg-bear-soft text-bear"]);
   return (
-    <span className="flex flex-wrap gap-1">
+    <span className="flex gap-1">
       {chips.map(([t, c]) => (
-        <span key={t} className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${c}`}>{t}</span>
+        <span key={t} className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${c}`}>{t}</span>
       ))}
     </span>
   );
@@ -159,26 +152,21 @@ function AccountsTable({ accounts, now }: { accounts: OverviewAccount[]; now: nu
     });
   }, [accounts, sort, desc]);
   const th = (k: SortKey, label: string, right = true) => (
-    <th className={`px-3 py-2 font-medium ${right ? "text-right" : "text-left"}`}>
-      <button type="button" className="hover:text-ink"
+    <th className={right ? "text-right" : "text-left"}>
+      <button type="button" className="uppercase hover:text-ink"
         onClick={() => (k === sort ? setDesc(!desc) : (setSort(k), setDesc(k !== "name")))}>
         {label}{sort === k ? (desc ? " ↓" : " ↑") : ""}
       </button>
     </th>
   );
   return (
-    <section className="card overflow-hidden">
-      <header className="flex items-center gap-2 border-b border-line px-4 py-3">
-        <Wallet className="size-4 text-accent" />
-        <h2 className="text-sm font-semibold">Accounts</h2>
-        <span className="text-xs text-faint">{accounts.length} · click a column to sort</span>
-      </header>
+    <Panel icon={<Wallet />} title="Accounts" meta={`${accounts.length} · click a column to sort`} flush>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px] text-sm">
-          <thead className="text-[11px] tracking-wide text-muted uppercase">
-            <tr className="border-b border-line">
+        <table className="data-table min-w-[980px] text-sm">
+          <thead>
+            <tr>
               {th("name", "Account", false)}
-              <th className="px-3 py-2 text-left font-medium">Status</th>
+              <th className="text-left">Status</th>
               {th("sol", "Wallet")}
               {th("open", "Open")}
               {th("unrealized", "Unrealized")}
@@ -191,9 +179,9 @@ function AccountsTable({ accounts, now }: { accounts: OverviewAccount[]; now: nu
           </thead>
           <tbody>
             {rows.map((a) => (
-              <tr key={a.name} className="border-b border-line last:border-0 hover:bg-raised/40">
-                <td className="px-3 py-2">
-                  <div className="font-medium">{a.name}</div>
+              <tr key={a.name}>
+                <td>
+                  <div className="num font-semibold">{a.name}</div>
                   <div className="text-xs text-faint">
                     {a.owner ? a.owner.email : "admin"}
                     {a.pubkey && (
@@ -204,78 +192,92 @@ function AccountsTable({ accounts, now }: { accounts: OverviewAccount[]; now: nu
                     )}
                   </div>
                 </td>
-                <td className="px-3 py-2"><Status a={a} now={now} /></td>
-                <td className="num px-3 py-2 text-right">
+                <td><Status a={a} now={now} /></td>
+                <td className="num text-right">
                   <div>{money(a.sol_balance_usd)}</div>
                   <div className="text-xs text-faint">{sol(a.sol_balance)}</div>
                 </td>
-                <td className="num px-3 py-2 text-right">
+                <td className="num text-right">
                   <div>{a.open_count ? money(a.open_value_usd ?? a.open_cost_usd) : "—"}</div>
                   <div className="text-xs text-faint">
                     {a.open_count} pos · {money(a.open_cost_usd)} in
                   </div>
                 </td>
-                <td className={`num px-3 py-2 text-right ${pctClass(a.unrealized_usd)}`}>
+                <td className={`num text-right ${pctClass(a.unrealized_usd)}`}>
                   {a.open_count ? money(a.unrealized_usd, true) : "—"}
                 </td>
-                <td className={`num px-3 py-2 text-right ${pctClass(a.realized_24h)}`}>{money(a.realized_24h, true)}</td>
-                <td className={`num px-3 py-2 text-right ${pctClass(a.realized_7d)}`}>{money(a.realized_7d, true)}</td>
-                <td className={`num px-3 py-2 text-right font-medium ${pctClass(a.realized_all)}`}>
+                <td className={`num text-right ${pctClass(a.realized_24h)}`}>{money(a.realized_24h, true)}</td>
+                <td className={`num text-right ${pctClass(a.realized_7d)}`}>{money(a.realized_7d, true)}</td>
+                <td className={`num text-right font-medium ${pctClass(a.realized_all)}`}>
                   {money(a.realized_all, true)}
                 </td>
-                <td className="num px-3 py-2 text-right">
+                <td className="num text-right">
                   <div>{a.win_rate == null ? "—" : `${a.win_rate.toFixed(0)}%`}</div>
                   <div className="text-xs text-faint">
                     {a.wins}/{a.trades}
                     {a.failed_24h > 0 && <span className="ms-1 text-bear">· {a.failed_24h} failed</span>}
                   </div>
                 </td>
-                <td className="px-3 py-2 text-right text-xs text-muted">{since(a.last_trade_at, now)}</td>
+                <td className="text-right text-xs text-muted">{since(a.last_trade_at, now)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-    </section>
+    </Panel>
   );
 }
 
 function Recent({ items, now }: { items: AdminOverview["recent"]; now: number }) {
   return (
-    <section className="card overflow-hidden">
-      <header className="flex items-center gap-2 border-b border-line px-4 py-3">
-        <Activity className="size-4 text-accent" />
-        <h2 className="text-sm font-semibold">Latest closed and failed trades</h2>
-      </header>
+    <Panel icon={<Activity />} title="Latest closed and failed trades" meta={`${items.length} most recent`} flush>
       {items.length === 0 ? (
-        <p className="px-4 py-3 text-sm text-muted">No trades yet.</p>
+        <Empty>No trades yet.</Empty>
       ) : (
-        <ul className="divide-y divide-line">
-          {items.map((p) => (
-            <li key={p.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-sm">
-              <span className="w-20 shrink-0 text-xs text-faint">{since(p.at, now)}</span>
-              <span className="w-16 shrink-0 text-xs text-muted">{p.account}</span>
-              <a className="font-medium hover:text-accent" target="_blank" rel="noreferrer"
-                href={`https://dexscreener.com/solana/${p.token_address}`}>
-                ${p.symbol || short(p.token_address)}
-              </a>
-              {p.status === "failed" ? (
-                <span className="truncate text-xs text-bear" title={p.error ?? ""}>
-                  failed{p.error ? `: ${p.error}` : ""}
-                </span>
-              ) : (
-                <>
-                  <span className={`num ${pctClass(p.pnl_usd)}`}>{money(p.pnl_usd, true)}</span>
-                  <span className={`num text-xs ${pctClass(p.pnl_pct)}`}>{pct(p.pnl_pct)}</span>
-                  {p.exit_reason && <span className="text-xs text-faint">{p.exit_reason.replace(/_/g, " ")}</span>}
-                </>
-              )}
-              <span className="num ms-auto text-xs text-faint">{money(p.cost_usd)} in</span>
-            </li>
-          ))}
-        </ul>
+        <div className="overflow-x-auto">
+          <table className="data-table compact min-w-[720px]">
+            <thead>
+              <tr>
+                <th className="text-left">When</th>
+                <th className="text-left">Account</th>
+                <th className="text-left">Token</th>
+                <th className="text-right">Cost</th>
+                <th className="text-right">Result</th>
+                <th className="text-left">Exit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((p) => (
+                <tr key={p.id}>
+                  <td className="text-xs text-muted">{since(p.at, now)}</td>
+                  <td><Badge tone="muted" className="num text-ink">{p.account}</Badge></td>
+                  <td>
+                    <a className="font-medium hover:text-mint" target="_blank" rel="noreferrer"
+                      href={`https://dexscreener.com/solana/${p.token_address}`}>
+                      ${p.symbol || short(p.token_address)}
+                    </a>
+                  </td>
+                  <td className="num text-right text-muted">{money(p.cost_usd)}</td>
+                  <td className="num text-right">
+                    {p.status === "failed" ? <span className="text-faint">—</span> : (
+                      <>
+                        <span className={pctClass(p.pnl_usd)}>{money(p.pnl_usd, true)}</span>
+                        <span className={`ms-2 text-xs ${pctClass(p.pnl_pct)}`}>{pct(p.pnl_pct)}</span>
+                      </>
+                    )}
+                  </td>
+                  <td className="max-w-[320px] truncate text-xs">
+                    {p.status === "failed"
+                      ? <span className="text-bear" title={p.error ?? ""}>failed{p.error ? `: ${p.error}` : ""}</span>
+                      : <span className="text-muted">{(p.exit_reason ?? "").replace(/_/g, " ")}</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
-    </section>
+    </Panel>
   );
 }
 
@@ -367,9 +369,9 @@ function BillingPanel({ password, now }: { password: string; now: number }) {
 
   return (
     <section className="card overflow-hidden">
-      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-4">
         <Receipt className="size-4 text-accent" />
-        <h2 className="text-sm font-semibold">Billing</h2>
+        <h2 className="text-[15px] font-semibold tracking-tight">Billing</h2>
         {data && (
           <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
             data.config.enabled ? "bg-bull-soft text-bull" : "bg-raised text-muted"}`}>
@@ -413,44 +415,44 @@ function BillingPanel({ password, now }: { password: string; now: number }) {
         <p className="px-4 py-3 text-sm text-muted">No bills yet.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[860px] text-sm">
-            <thead className="text-[11px] tracking-wide text-muted uppercase">
-              <tr className="border-b border-line">
-                <th className="px-3 py-2 text-left font-medium">Bill</th>
-                <th className="px-3 py-2 text-left font-medium">Period</th>
-                <th className="px-3 py-2 text-right font-medium">Fee</th>
-                <th className="px-3 py-2 text-right font-medium">Profit → share</th>
-                <th className="px-3 py-2 text-right font-medium">Total</th>
-                <th className="px-3 py-2 text-left font-medium">Status</th>
-                <th className="px-3 py-2 text-right font-medium" />
+          <table className="data-table min-w-[860px] text-sm">
+            <thead>
+              <tr>
+                <th className="text-left">Bill</th>
+                <th className="text-left">Period</th>
+                <th className="text-right">Fee</th>
+                <th className="text-right">Profit → share</th>
+                <th className="text-right">Total</th>
+                <th className="text-left">Status</th>
+                <th className="text-right font-medium" />
               </tr>
             </thead>
             <tbody>
               {data.bills.map((b) => (
                 <tr key={b.id} className="border-b border-line align-top last:border-0">
-                  <td className="px-3 py-2">
+                  <td>
                     <div className="font-medium">#{b.id} · {b.account}</div>
                     <div className="text-xs text-faint">{b.email ?? ""}</div>
                   </td>
-                  <td className="px-3 py-2 text-xs text-muted">
+                  <td className="text-xs text-muted">
                     {b.period_start.slice(0, 10)} → {b.period_end.slice(0, 10)}
                   </td>
-                  <td className="num px-3 py-2 text-right">
+                  <td className="num text-right">
                     {money(b.fee_usd)}
                     {b.discount_usd > 0 && (
                       <div className="text-xs text-bull">−{money(b.discount_usd)} {b.coupon_code}</div>
                     )}
                   </td>
-                  <td className="num px-3 py-2 text-right">
+                  <td className="num text-right">
                     {money(b.profit_usd)} → {money(b.share_usd)}
                     <div className="text-xs text-faint">{b.profit_pct}%</div>
                   </td>
-                  <td className="num px-3 py-2 text-right font-medium">
+                  <td className="num text-right font-medium">
                     {money(b.total_usd)}
                     {b.sol_amount != null && <div className="text-xs text-faint">{b.sol_amount.toFixed(4)} SOL</div>}
                   </td>
-                  <td className="px-3 py-2">
-                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_CLS[b.status]}`}>
+                  <td>
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${STATUS_CLS[b.status]}`}>
                       {b.status === "sending" ? "check" : b.status}
                     </span>
                     {b.signature && (
@@ -463,7 +465,7 @@ function BillingPanel({ password, now }: { password: string; now: number }) {
                       {b.status === "paid" ? since(b.paid_at, now) : b.error ?? ""}
                     </div>
                   </td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                  <td className="text-right whitespace-nowrap">
                     {(b.status === "check" || b.status === "sending") && (
                       <>
                         <button type="button" className={navBtn} onClick={() => act(b, "paid")}>Landed</button>{" "}
@@ -537,9 +539,9 @@ function CouponsPanel({ password, now }: { password: string; now: number }) {
 
   return (
     <section className="card overflow-hidden">
-      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-4">
         <Ticket className="size-4 text-accent" />
-        <h2 className="text-sm font-semibold">Discount codes</h2>
+        <h2 className="text-[15px] font-semibold tracking-tight">Discount codes</h2>
         <span className="text-xs text-faint">% off the monthly fee only, never the profit share</span>
       </header>
       <form className="grid gap-3 border-b border-line p-4 sm:grid-cols-7" onSubmit={create}>
@@ -561,16 +563,16 @@ function CouponsPanel({ password, now }: { password: string; now: number }) {
         <p className="px-4 py-3 text-sm text-muted">No codes yet.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-sm">
-            <thead className="text-[11px] tracking-wide text-muted uppercase">
-              <tr className="border-b border-line">
-                <th className="px-3 py-2 text-left font-medium">Code</th>
-                <th className="px-3 py-2 text-right font-medium">Discount</th>
-                <th className="px-3 py-2 text-right font-medium">Months</th>
-                <th className="px-3 py-2 text-right font-medium">Used</th>
-                <th className="px-3 py-2 text-left font-medium">Apply by</th>
-                <th className="px-3 py-2 text-left font-medium">Users</th>
-                <th className="px-3 py-2 text-right font-medium" />
+          <table className="data-table min-w-[760px] text-sm">
+            <thead>
+              <tr>
+                <th className="text-left">Code</th>
+                <th className="text-right">Discount</th>
+                <th className="text-right">Months</th>
+                <th className="text-right">Used</th>
+                <th className="text-left">Apply by</th>
+                <th className="text-left">Users</th>
+                <th className="text-right font-medium" />
               </tr>
             </thead>
             <tbody>
@@ -579,22 +581,22 @@ function CouponsPanel({ password, now }: { password: string; now: number }) {
                 const full = c.max_uses != null && c.uses >= c.max_uses;
                 return (
                   <tr key={c.id} className={`border-b border-line align-top last:border-0 ${c.active ? "" : "opacity-50"}`}>
-                    <td className="px-3 py-2">
+                    <td>
                       <div className="num font-medium">{c.code}</div>
                       {c.note && <div className="text-xs text-faint">{c.note}</div>}
                     </td>
-                    <td className="num px-3 py-2 text-right">{c.percent}%</td>
-                    <td className="num px-3 py-2 text-right">{c.months ?? "always"}</td>
-                    <td className="num px-3 py-2 text-right">
+                    <td className="num text-right">{c.percent}%</td>
+                    <td className="num text-right">{c.months ?? "always"}</td>
+                    <td className="num text-right">
                       {c.uses}{c.max_uses != null ? ` / ${c.max_uses}` : ""}
                       {full && <div className="text-xs text-warn">used up</div>}
                     </td>
-                    <td className="px-3 py-2 text-xs text-muted">
+                    <td className="text-xs text-muted">
                       {c.expires_at ? c.expires_at.slice(0, 10) : "—"}
                       {expired && <span className="ms-1 text-warn">expired</span>}
                     </td>
-                    <td className="px-3 py-2 text-xs text-muted">{c.users.join(", ") || "—"}</td>
-                    <td className="px-3 py-2 text-right">
+                    <td className="text-xs text-muted">{c.users.join(", ") || "—"}</td>
+                    <td className="text-right">
                       <button type="button" className={navBtn}
                         onClick={async () => {
                           await api.editCoupon(password, c.id, !c.active).catch(() => undefined);
@@ -657,24 +659,11 @@ export function AdminView() {
 
   if (!password) {
     return (
-      <main className="mx-auto flex min-h-[70vh] max-w-sm flex-col justify-center px-4">
-        <form className="card flex flex-col gap-3 p-6"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (inputPw) setPassword(inputPw);
-          }}>
-          <h1 className="flex items-center gap-2 text-base font-semibold">
-            <Lock className="size-4 text-accent" /> Admin overview
-          </h1>
-          <p className="text-xs text-muted">Private page. Same password as the Live page.</p>
-          <input type="password" autoComplete="current-password" value={inputPw}
-            onChange={(e) => setInputPw(e.target.value)} placeholder="Password" className={input} />
-          {error && <p className="text-xs text-bear">{error}</p>}
-          <button type="submit" className="rounded-md bg-accent px-3 py-2 text-sm font-semibold text-carbon">
-            Unlock
-          </button>
-        </form>
-      </main>
+      <>
+        <AppNav />
+        <LockScreen title="Admin overview" hint="Private page. Same password as the Live page."
+          value={inputPw} onChange={setInputPw} onSubmit={() => setPassword(inputPw)} error={error} />
+      </>
     );
   }
 
@@ -689,36 +678,28 @@ export function AdminView() {
     <>
     <AppNav />
     <main className="mx-auto max-w-[1400px] px-4 pt-5 pb-12 sm:px-6">
-      <header className="mb-5 flex flex-wrap items-center gap-3">
-        <LayoutDashboard className="size-5 text-accent" />
-        <h1 className="text-lg font-semibold tracking-tight">Admin overview</h1>
-        {data && (
+      <PageHeader icon={<LayoutDashboard className="size-5" />} title="Admin overview"
+        subtitle="Every account, user and trade at a glance. Read-only; changes happen on Accounts and Live."
+        badges={data && (
           <>
-            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
-              data.mode === "live" ? "bg-bull-soft text-bull" : "bg-warn-soft text-warn"}`}>
-              {data.mode}
-            </span>
-            {data.paused && (
-              <span className="rounded bg-warn-soft px-1.5 py-0.5 text-[10px] font-semibold text-warn uppercase">
-                all paused
-              </span>
-            )}
+            <Badge tone={data.mode === "live" ? "mint" : "gold"} dot>{data.mode.toUpperCase()}</Badge>
+            {data.paused && <Badge tone="gold">ALL PAUSED</Badge>}
           </>
         )}
-        <button type="button" onClick={() => load(password)}
-          className={`${navBtn} ms-auto`} disabled={loading}>
-          <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
-          {data ? `Updated ${since(data.updated_at, now)}` : "Refresh"}
-        </button>
-      </header>
+        actions={
+          <button type="button" onClick={() => load(password)} className={button("secondary")} disabled={loading}>
+            <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+            {data ? `Updated ${since(data.updated_at, now)}` : "Refresh"}
+          </button>
+        } />
 
       {error && <p className="mb-4 text-sm text-bear">{error}</p>}
       {!data && !error && <p className="text-sm text-muted">Loading…</p>}
 
       {data && t && u && (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-6">
           {(stale.length > 0 || t.failed_24h > 0) && (
-            <div className="card flex flex-wrap items-center gap-2 border-bear/40 p-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-bear/30 bg-bear-soft px-4 py-3 text-sm">
               <AlertTriangle className="size-4 text-bear" />
               {stale.length > 0 && (
                 <span>Engine not stepping for: <b>{stale.map((a) => a.name).join(", ")}</b>.</span>
@@ -730,7 +711,7 @@ export function AdminView() {
           )}
 
           {u.pending > 0 && (
-            <div className="card flex flex-wrap items-center gap-2 border-accent/40 p-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-mint/30 bg-mint-soft/60 px-4 py-3 text-sm">
               <UserPlus className="size-4 text-accent" />
               <span>
                 {u.pending} sign-up{u.pending > 1 ? "s" : ""} waiting for approval:{" "}
@@ -740,7 +721,7 @@ export function AdminView() {
             </div>
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Tile icon={<Wallet className="size-3.5" />} label="Wallets (SOL)" value={money(t.sol_balance_usd)}
               sub={<>{sol(t.sol_balance)} · {t.enabled}/{t.accounts} accounts on{t.paused ? `, ${t.paused} paused` : ""}</>} />
             <Tile icon={<Activity className="size-3.5" />} label="Open positions"
@@ -760,22 +741,15 @@ export function AdminView() {
               sub={<>active · {u.pending} pending · {u.blocked} blocked · +{u.new_7d} this week</>} />
           </div>
 
-          <section className="card p-4">
-            <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
-              <span className="text-[11px] font-medium tracking-[0.12em] uppercase">Realized P&L per day · all accounts</span>
-              <span>
-                30d: {t.trades_30d} trades · win rate {t.win_rate_30d == null ? "—" : `${t.win_rate_30d.toFixed(0)}%`}
-              </span>
-              <span className="ms-auto">
-                Scanner: {data.signals.last_24h} signals in 24h · last {since(data.signals.last_at, now)}
-              </span>
-            </div>
+          <Panel icon={<BarChart3 />} title="Realized P&L per day · all accounts"
+            meta={`30d: ${t.trades_30d} trades · win rate ${t.win_rate_30d == null ? "—" : `${t.win_rate_30d.toFixed(0)}%`}`}
+            actions={<span className="text-xs text-muted">Scanner: {data.signals.last_24h} signals in 24h · last {since(data.signals.last_at, now)}</span>}>
             <DailyBars days={data.daily} />
-            <div className="mt-1 flex justify-between text-[10px] text-faint">
-              <span>{data.daily[0]?.day}</span>
-              <span>{data.daily[data.daily.length - 1]?.day}</span>
+            <div className="mt-2 flex justify-between text-[11px] text-faint">
+              <span className="num">{data.daily[0]?.day}</span>
+              <span className="num">{data.daily[data.daily.length - 1]?.day}</span>
             </div>
-          </section>
+          </Panel>
 
           <AccountsTable accounts={data.accounts} now={now} />
           <BillingPanel password={password} now={now} />

@@ -12,6 +12,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { AppNav } from "@/components/AppNav";
+import { Badge, button, Empty, LockScreen, PageHeader, Panel, StatTile } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { ago, pct, price } from "@/lib/format";
 import type {
@@ -77,30 +78,6 @@ function TxLink({ sig }: { sig?: string | null }) {
   );
 }
 
-function Stat({
-  label,
-  value,
-  sub,
-  cls,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  cls?: string;
-}) {
-  return (
-    <div className="card px-4 py-3.5">
-      <div className="text-[11px] font-medium tracking-[0.14em] text-muted uppercase">
-        {label}
-      </div>
-      <div className={`num mt-2 text-2xl font-semibold ${cls ?? ""}`}>
-        {value}
-      </div>
-      {sub && <div className="mt-1 text-xs text-faint">{sub}</div>}
-    </div>
-  );
-}
-
 function SellButtons({
   p,
   onSell,
@@ -131,13 +108,13 @@ function SellButtons({
               setConfirm(null);
             }
           }}
-          className="rounded border border-bear/60 px-1.5 py-0.5 text-bear disabled:opacity-50"
+          className="rounded-md border border-bear/60 px-2 py-0.5 text-bear disabled:opacity-50"
         >
           Yes, sell
         </button>
         <button
           onClick={() => setConfirm(null)}
-          className="rounded border border-line px-1.5 py-0.5 text-muted"
+          className="rounded-md border border-line px-2 py-0.5 text-muted"
         >
           Cancel
         </button>
@@ -148,13 +125,13 @@ function SellButtons({
     <span className="mt-1 flex gap-1">
       <button
         onClick={() => setConfirm(0.5)}
-        className="rounded border border-line px-1.5 py-0.5 text-muted hover:text-ink"
+        className="rounded-md border border-line bg-raised px-2 py-0.5 text-muted hover:text-ink"
       >
         Sell 50%
       </button>
       <button
         onClick={() => setConfirm(1)}
-        className="rounded border border-bear/50 px-1.5 py-0.5 text-bear hover:bg-bear/10"
+        className="rounded-md border border-bear/50 px-2 py-0.5 text-bear hover:bg-bear-soft"
       >
         Sell 100%
       </button>
@@ -188,10 +165,7 @@ function PositionRows({
               : null
             : (p.unrealized_pct ?? null);
         return (
-          <tr
-            key={p.id}
-            className="border-b border-line/60 align-top hover:bg-white/[0.025]"
-          >
+          <tr key={p.id} className="align-top">
             <td className="px-4 py-2">
               <a
                 href={`/token/solana/${p.token_address}`}
@@ -243,7 +217,7 @@ function PositionRows({
             <td className="px-3 py-2 text-xs">
               {p.status === "open" ? (
                 <>
-                  <span className="text-accent">Open</span>
+                  <Badge tone="mint" dot>Open</Badge>
                   <SellButtons p={p} onSell={onSell} />
                 </>
               ) : p.status === "failed" ? (
@@ -367,152 +341,82 @@ export function LiveView() {
 
   if (!password) {
     return (
-      <main className="mx-auto flex min-h-[70vh] max-w-sm flex-col justify-center px-4">
-        <form
-          className="card flex flex-col gap-3 p-6"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (input) setPassword(input);
-          }}
-        >
-          <h1 className="flex items-center gap-2 text-base font-semibold">
-            <Lock className="size-4 text-accent" /> Live trading
-          </h1>
-          <p className="text-xs text-muted">
-            Private page. Enter the password the bot sent you on Telegram.
-          </p>
-          <input
-            type="password"
-            autoComplete="current-password"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Password"
-            className="rounded-md border border-line bg-carbon px-3 py-2 text-sm outline-none focus:border-accent"
-          />
-          {error && <p className="text-xs text-bear">{error}</p>}
-          <button
-            type="submit"
-            className="rounded-md bg-accent px-3 py-2 text-sm font-semibold text-carbon"
-          >
-            Unlock
-          </button>
-        </form>
-      </main>
+      <>
+        <AppNav />
+        <LockScreen title="Live trading" hint="Private page. Enter the password the bot sent you on Telegram."
+          value={input} onChange={setInput} onSubmit={() => setPassword(input)} error={error} />
+      </>
     );
   }
 
-  const modeLabel =
-    data?.mode === "live" ? "LIVE" : data?.mode === "dry" ? "DRY-RUN" : "OFF";
+  const totalLive = data ? data.accounts.reduce((s, a) => s + a.realized_usd + (a.unrealized_usd ?? 0), 0) : null;
+  const totalReal = data ? data.accounts.reduce((s, a) => s + a.realized_usd, 0) : null;
+  const total24 = data ? data.accounts.reduce((s, a) => s + a.realized_24h, 0) : null;
+  const totalOpen = data ? data.accounts.reduce((s, a) => s + a.open_cost_usd, 0) : null;
+  const totalSol = data ? data.accounts.reduce((s, a) => s + (a.sol_balance ?? 0), 0) : null;
+  const totalSolUsd = data ? data.accounts.reduce((s, a) => s + (a.sol_balance_usd ?? 0), 0) : null;
+  const fresh = tick - now < REFRESH_MS * 3;
 
   return (
     <>
     <AppNav />
-    <main className="mx-auto max-w-[1400px] px-4 pt-5 pb-12 sm:px-6">
-      <header className="flex flex-wrap items-center gap-3">
-        <Wallet className="size-5 text-accent" />
-        <h1 className="text-lg font-semibold tracking-tight">
-          Live copy trading
-        </h1>
-        {data && (
-          <span
-            className={`rounded-full border px-2.5 py-0.5 text-[11px] font-bold tracking-[0.12em] ${
-              data.mode === "live"
-                ? "border-bull/50 text-bull"
-                : "border-line text-muted"
-            }`}
-          >
-            {modeLabel}
-            {data.paused ? " · PAUSED" : ""}
-          </span>
+    <main className="mx-auto max-w-[1400px] px-4 pt-6 pb-14 sm:px-6">
+      <PageHeader icon={<Wallet className="size-5" />} title="Live copy trading"
+        badges={data && (
+          <>
+            <Badge tone={data.mode === "live" ? "mint" : data.mode === "dry" ? "gold" : "muted"} dot>
+              {data.mode === "live" ? "LIVE" : data.mode === "dry" ? "DRY-RUN" : "OFF"}
+            </Badge>
+            {data.paused && <Badge tone="gold">ALL BUYS PAUSED</Badge>}
+          </>
         )}
-        {data && (
-          <span className="num inline-flex items-center gap-1.5 text-[11px] text-muted">
-            <span
-              className={`size-1.5 rounded-full ${tick - now < REFRESH_MS * 3 ? "animate-pulse bg-bull" : "bg-warn"}`}
-            />
-            <span
-              className={`rounded border px-1.5 py-0.5 text-xs font-semibold ${tone(
-                data.accounts.reduce(
-                  (s, a) => s + a.realized_usd + (a.unrealized_usd ?? 0),
-                  0,
-                ),
-              )}`}
-            >
-              Live P&amp;L{" "}
-              {money(
-                data.accounts.reduce(
-                  (s, a) => s + a.realized_usd + (a.unrealized_usd ?? 0),
-                  0,
-                ),
-                true,
-              )}
-            </span>
+        subtitle={data && (
+          <span className="inline-flex flex-wrap items-center gap-x-2">
+            <span className={`size-1.5 rounded-full ${fresh ? "animate-pulse bg-mint" : "bg-warn"}`} />
             updated {Math.max(0, Math.round((tick - now) / 1000))}s ago
-            {data.sol_usd ? ` · SOL ${money(data.sol_usd)}` : ""}
+            {data.sol_usd ? <span>· SOL <span className="num">{money(data.sol_usd)}</span></span> : null}
+            <span className="text-faint">
+              · {data.mode === "dry" ? "Dry-run: real quotes, nothing is sent." : data.mode === "live" ? "Real money." : "Copy trading is off on the server."}
+              {" "}Pausing stops new buys on every account; open positions still sell.
+            </span>
           </span>
         )}
-        <div className="ml-auto flex items-center gap-2">
-          {data && data.mode !== "off" && (
-            <button
-              onClick={togglePause}
-              disabled={busy}
-              className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs ${
-                data.paused
-                  ? "border-bull/50 text-bull"
-                  : "border-bear/50 text-bear"
-              } disabled:opacity-50`}
-            >
-              {data.paused ? (
-                <Play className="size-3.5" />
-              ) : (
-                <Pause className="size-3.5" />
-              )}
-              {data.paused ? "Resume buys" : "Pause buys"}
+        actions={
+          <>
+            {data && data.mode !== "off" && (
+              <button onClick={togglePause} disabled={busy} className={button(data.paused ? "good" : "danger")}>
+                {data.paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
+                {data.paused ? "Resume buys" : "Pause buys"}
+              </button>
+            )}
+            <button onClick={() => { save(null); setPassword(""); setInput(""); setData(null); }} className={button("ghost")}>
+              <LogOut className="size-3.5" /> Lock
             </button>
-          )}
-          <button
-            onClick={() => {
-              save(null);
-              setPassword("");
-              setInput("");
-              setData(null);
-            }}
-            className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:text-ink"
-          >
-            <LogOut className="size-3.5" /> Lock
-          </button>
-        </div>
-      </header>
+          </>
+        } />
 
-      {error && <p className="card mt-4 p-4 text-sm text-bear">{error}</p>}
+      {error && <p className="card mb-4 border-bear/40 p-4 text-sm text-bear">{error}</p>}
 
       {!data ? (
-        <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {[0, 1, 2, 3].map((i) => (
-            <span key={i} className="skeleton h-24" />
-          ))}
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => <span key={i} className="skeleton h-28 rounded-2xl" />)}
         </div>
       ) : (
-        <>
-          <p className="mt-3 text-xs text-faint">
-            {data.mode === "dry"
-              ? "Dry-run: real Jupiter quotes, no transactions are sent. "
-              : data.mode === "live"
-                ? "Real money. "
-                : "Copy trading is off on the server. "}
-            Pausing stops new buys on every account; open positions still sell
-            with the wallet.
-          </p>
+        <div className="flex flex-col gap-6">
+          <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <StatTile label="Live P&L · all accounts" value={money(totalLive, true)} tone={tone(totalLive) || "text-ink"}
+              sub={`realized ${money(totalReal, true)} · open ${money((totalLive ?? 0) - (totalReal ?? 0), true)}`} />
+            <StatTile label="Realized · 24h" value={money(total24, true)} tone={tone(total24) || "text-ink"}
+              sub={`${data.accounts.reduce((s, a) => s + a.closed.length, 0)} closed trades shown`} />
+            <StatTile label="In open trades" value={money(totalOpen)}
+              sub={`${data.accounts.reduce((s, a) => s + a.open.length, 0)} open across ${data.accounts.length} accounts`} />
+            <StatTile label="Wallets" value={`${(totalSol ?? 0).toFixed(3)} SOL`} sub={`≈ ${money(totalSolUsd)} free to trade`} />
+          </section>
           <LeaderFeed rows={data.leader_activity} now={tick} />
           {data.accounts.map((a) => (
-            <AccountSection
-              key={a.name}
-              a={a}
-              now={now}
-              onSell={sellPosition}
-            />
+            <AccountSection key={a.name} a={a} now={now} onSell={sellPosition} />
           ))}
-        </>
+        </div>
       )}
     </main>
     </>
@@ -528,118 +432,73 @@ function AccountSection({
   now: number;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
 }) {
-  // failed buys spent nothing: they stay out of the table (count only, in the Budget card)
+  // failed buys spent nothing: they stay out of the table (count only, in the Budget tile)
   const all = [...data.open, ...data.closed].sort((x, y) =>
     (y.opened_at ?? "").localeCompare(x.opened_at ?? ""),
   );
-  const sellPosition = onSell;
+  const livePnl = data.realized_usd + (data.unrealized_usd ?? 0);
+  const unpriced = data.open.filter((p) => p.unrealized_usd == null).length;
   return (
-    <section className="mt-6 border-t border-line pt-5">
-      <h2 className="flex flex-wrap items-center gap-2 text-base font-semibold">
-        Account{" "}
-        <span className="num rounded border border-line px-1.5 text-sm">
-          {data.name}
+    <section className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2">
+        <h2 className="text-lg font-semibold tracking-tight">Account</h2>
+        <Badge tone="muted" className="num text-[12px] text-ink">{data.name}</Badge>
+        {!data.active && <Badge tone="gold">idle: no key on the server yet</Badge>}
+        {data.paused && <Badge tone="gold">paused</Badge>}
+        <span className="text-xs text-muted">
+          {money(data.size_usd)} per buy · max {money(data.max_open_usd)} open · buys pause after {money(data.max_daily_loss_usd)} loss in 24h
+          {data.pubkey && (
+            <> · wallet{" "}
+              <a href={`https://solscan.io/account/${data.pubkey}`} target="_blank" rel="noreferrer" className="num text-mint hover:underline">
+                {short(data.pubkey)}
+              </a>
+            </>
+          )}
+          {data.wallets.length > 0 && <> · copying {data.wallets.map(short).join(", ")}</>}
         </span>
-        {!data.active && (
-          <span className="text-xs font-normal text-warn">
-            idle: no key on the server yet
-          </span>
-        )}
-      </h2>
-      <p className="mt-1 text-xs text-faint">
-        Copying {data.wallets.map(short).join(", ") || "—"} ·{" "}
-        {money(data.size_usd)} per buy · max {money(data.max_open_usd)} open ·
-        buys pause after {money(data.max_daily_loss_usd)} loss in 24h.
-        {data.pubkey && (
-          <>
-            {" "}
-            Trading wallet{" "}
-            <a
-              href={`https://solscan.io/account/${data.pubkey}`}
-              target="_blank"
-              rel="noreferrer"
-              className="num text-accent hover:underline"
-            >
-              {short(data.pubkey)}
-            </a>
-            .
-          </>
-        )}
-      </p>
+      </div>
 
-      <section className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat
-          label="Wallet"
-          value={
-            data.sol_balance != null
-              ? `${data.sol_balance.toFixed(3)} SOL`
-              : "—"
-          }
-          sub={
-            data.sol_balance_usd != null
-              ? `≈ ${money(data.sol_balance_usd)} free to trade`
-              : "balance unavailable"
-          }
-        />
-        <Stat
-          label="Live P&L now"
-          value={money(data.realized_usd + (data.unrealized_usd ?? 0), true)}
-          cls={tone(data.realized_usd + (data.unrealized_usd ?? 0))}
-          sub={`realized ${money(data.realized_usd, true)} · open ${money(
-            data.unrealized_usd ?? null,
-            true,
-          )}${
-            data.open.some((p) => p.unrealized_usd == null)
-              ? ` · ${data.open.filter((p) => p.unrealized_usd == null).length} without a price`
-              : ""
-          }`}
-        />
-        <Stat
-          label="Realized P&L"
-          value={money(data.realized_usd, true)}
-          cls={tone(data.realized_usd)}
-          sub={`${data.closed.length} closed · 24h ${money(data.realized_24h, true)}`}
-        />
-        <Stat
-          label="Budget"
-          value={`${money(data.open_cost_usd)} / ${money(data.max_open_usd)}`}
-          sub={`${money(data.size_usd)} per buy${
-            data.failed.length
-              ? ` · ${data.failed.length} buys didn't go through (nothing spent)`
-              : ""
-          }`}
-        />
-      </section>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile label="Wallet" value={data.sol_balance != null ? `${data.sol_balance.toFixed(3)} SOL` : "—"}
+          sub={data.sol_balance_usd != null ? `≈ ${money(data.sol_balance_usd)} free to trade` : "balance unavailable"} />
+        <StatTile label="Live P&L now" value={money(livePnl, true)} tone={tone(livePnl) || "text-ink"}
+          sub={`realized ${money(data.realized_usd, true)} · open ${money(data.unrealized_usd ?? null, true)}${unpriced ? ` · ${unpriced} without a price` : ""}`} />
+        <StatTile label="Realized P&L" value={money(data.realized_usd, true)} tone={tone(data.realized_usd) || "text-ink"}
+          sub={`${data.closed.length} closed · 24h ${money(data.realized_24h, true)}`} />
+        <StatTile label="Budget" value={<>{money(data.open_cost_usd)} <span className="text-base text-muted">/ {money(data.max_open_usd)}</span></>}
+          sub={<>
+            <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-raised">
+              <span className="block h-full rounded-full bg-mint" style={{ width: `${Math.min(100, (data.open_cost_usd / Math.max(data.max_open_usd, 1)) * 100)}%` }} />
+            </span>
+            <span className="mt-1.5 block">{money(data.size_usd)} per buy{data.failed.length ? ` · ${data.failed.length} buys didn't go through (nothing spent)` : ""}</span>
+          </>} />
+      </div>
 
-      <section className="card mt-4 overflow-x-auto">
-        <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">
-          Trades
-        </h2>
+      <Panel title="Trades" meta={`${data.open.length} open · ${data.closed.length} closed`} flush>
         {all.length === 0 ? (
-          <p className="px-4 py-6 text-sm text-muted">
-            No trades yet. The first one happens on the copied wallet&apos;s
-            next buy.
-          </p>
+          <Empty>No trades yet. The first one happens on the copied wallet&apos;s next buy.</Empty>
         ) : (
-          <table className="w-full min-w-[860px] text-sm">
-            <thead className="text-[10.5px] tracking-[0.12em] text-muted uppercase">
-              <tr className="border-b border-line">
-                <th className="px-4 py-2 text-left">Token</th>
-                <th className="px-3 py-2 text-right">Opened</th>
-                <th className="px-3 py-2 text-right">Cost</th>
-                <th className="px-3 py-2 text-right">Sold for</th>
-                <th className="px-3 py-2 text-right">Value now</th>
-                <th className="px-3 py-2 text-right">P&amp;L</th>
-                <th className="px-3 py-2 text-left">Status</th>
-                <th className="px-3 py-2 text-left">Fills</th>
-              </tr>
-            </thead>
-            <tbody>
-              <PositionRows rows={all} now={now} onSell={sellPosition} />
-            </tbody>
-          </table>
+          <div className="overflow-x-auto">
+            <table className="data-table min-w-[900px]">
+              <thead>
+                <tr>
+                  <th className="text-left">Token</th>
+                  <th className="text-right">Opened</th>
+                  <th className="text-right">Cost</th>
+                  <th className="text-right">Sold for</th>
+                  <th className="text-right">Value now</th>
+                  <th className="text-right">P&amp;L</th>
+                  <th className="text-left">Status</th>
+                  <th className="text-left">Fills</th>
+                </tr>
+              </thead>
+              <tbody>
+                <PositionRows rows={all} now={now} onSell={onSell} />
+              </tbody>
+            </table>
+          </div>
         )}
-      </section>
+      </Panel>
     </section>
   );
 }
@@ -647,44 +506,31 @@ function AccountSection({
 function LeaderFeed({ rows, now }: { rows: LeaderTrade[]; now: number }) {
   if (!rows.length) return null;
   return (
-    <section className="card mt-4 overflow-x-auto">
-      <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">
-        Copied wallet activity
-      </h2>
-      <ul className="divide-y divide-line/60 text-sm">
-        {rows.map((t) => (
-          <li
-            key={t.id}
-            className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-4 py-2"
-          >
-            <span
-              className={`w-10 text-xs font-bold ${t.side === "buy" ? "text-bull" : "text-bear"}`}
-            >
-              {t.side === "buy" ? "BUY" : "SELL"}
-            </span>
-            <a
-              href={`/token/solana/${t.token_address}`}
-              className="font-semibold hover:underline"
-            >
-              ${t.symbol || short(t.token_address)}
-            </a>
-            <span className="num text-muted">
-              {t.usd != null ? money(t.usd) : "—"}
-              {t.side === "sell" && t.pct_sold != null
-                ? ` · ${t.pct_sold.toFixed(0)}% of holding`
-                : ""}
-              {t.kind === "transfer" ? " · transfer out" : ""}
-            </span>
-            <span className="num text-xs text-faint">
-              {t.label || short(t.wallet)}
-            </span>
-            <span className="num ml-auto text-xs text-muted">
-              {ago(t.at, now)}
-            </span>
-            <TxLink sig={t.tx} />
-          </li>
-        ))}
-      </ul>
-    </section>
+    <Panel title="Copied wallet activity" meta="latest buys and sells of the wallets being copied" flush>
+      <div className="overflow-x-auto">
+        <table className="data-table compact min-w-[640px]">
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.id}>
+                <td className="w-16"><Badge tone={t.side === "buy" ? "mint" : "bear"}>{t.side === "buy" ? "BUY" : "SELL"}</Badge></td>
+                <td>
+                  <a href={`/token/solana/${t.token_address}`} className="font-semibold hover:text-mint">
+                    ${t.symbol || short(t.token_address)}
+                  </a>
+                </td>
+                <td className="num text-muted">
+                  {t.usd != null ? money(t.usd) : "—"}
+                  {t.side === "sell" && t.pct_sold != null ? ` · ${t.pct_sold.toFixed(0)}% of holding` : ""}
+                  {t.kind === "transfer" ? " · transfer out" : ""}
+                </td>
+                <td className="num text-xs text-faint">{t.label || short(t.wallet)}</td>
+                <td className="num text-right text-xs text-muted">{ago(t.at, now)}</td>
+                <td className="w-12 text-right"><TxLink sig={t.tx} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
   );
 }

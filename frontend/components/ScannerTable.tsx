@@ -201,7 +201,7 @@ export function ScannerTable({ data, query, onQuery, loading, error, onRetry, on
       <div className="relative max-h-[calc(100dvh-260px)] min-h-[320px] overflow-auto">
         {loading && data && <div className="absolute inset-x-0 top-0 z-20 h-px animate-pulse bg-bull/60" aria-hidden />}
         <table className="w-full min-w-[1040px] border-collapse text-sm">
-          <thead className="sticky top-0 z-10 bg-surface text-[10.5px] font-medium tracking-[0.12em] text-muted uppercase">
+          <thead className="sticky top-0 z-10 bg-surface-2 text-[11px] font-semibold tracking-[0.08em] text-muted uppercase">
             <tr className="border-b border-line">
               <th scope="col" className="px-4 py-2.5 text-left">Token</th>
               <th scope="col" className="px-3 py-2.5 text-right">Age</th>

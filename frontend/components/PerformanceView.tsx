@@ -23,7 +23,7 @@ function share(v: number | null) {
 
 function Stat({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
   return (
-    <div className="card px-4 py-3.5">
+    <div className="card p-5 transition hover:border-line-strong">
       <div className="text-[11px] font-medium tracking-[0.14em] text-muted uppercase">{label}</div>
       <div className={`num mt-2 text-2xl font-semibold ${tone ?? ""}`}>{value}</div>
       {sub && <div className="mt-1 text-xs text-faint">{sub}</div>}
@@ -33,39 +33,41 @@ function Stat({ label, value, sub, tone }: { label: string; value: string; sub?:
 
 function StatsTable({ title, rows }: { title: string; rows: (PerfStats & { key: string; label: React.ReactNode })[] }) {
   return (
-    <section className="card overflow-x-auto">
-      <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">{title}</h2>
-      <table className="w-full min-w-[640px] text-sm">
-        <thead className="text-[10.5px] tracking-[0.12em] text-muted uppercase">
-          <tr className="border-b border-line">
-            <th className="px-4 py-2 text-left">Group</th>
-            <th className="px-3 py-2 text-right">Signals</th>
-            <th className="px-3 py-2 text-right">Median 1h</th>
-            <th className="px-3 py-2 text-right">Median 6h</th>
-            <th className="px-3 py-2 text-right">Median 24h</th>
-            <th className="px-3 py-2 text-right">Up at 24h</th>
-            <th className="px-3 py-2 text-right">Hit +50%</th>
-            <th className="px-3 py-2 text-right">Median drawdown</th>
+    <section className="card overflow-hidden">
+      <h2 className="border-b border-line px-5 py-4 text-[15px] font-semibold tracking-tight">{title}</h2>
+      <div className="overflow-x-auto">
+      <table className="data-table min-w-[640px]">
+        <thead>
+          <tr>
+            <th className="text-left">Group</th>
+            <th className="text-right">Signals</th>
+            <th className="text-right">Median 1h</th>
+            <th className="text-right">Median 6h</th>
+            <th className="text-right">Median 24h</th>
+            <th className="text-right">Up at 24h</th>
+            <th className="text-right">Hit +50%</th>
+            <th className="text-right">Median drawdown</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.key} className="border-b border-line/60">
-              <td className="px-4 py-2.5 font-medium">{r.label}</td>
-              <td className="num px-3 py-2.5 text-right text-muted">
+            <tr key={r.key}>
+              <td className=".5 font-medium">{r.label}</td>
+              <td className="num .5 text-right text-muted">
                 {r.n}
                 {r.n_24h < r.n && <span className="text-faint"> ({r.n_24h} at 24h)</span>}
               </td>
               <td className={`num px-3 py-2.5 text-right ${pctClass(r.median_1h)}`}>{pct(r.median_1h)}</td>
               <td className={`num px-3 py-2.5 text-right ${pctClass(r.median_6h)}`}>{pct(r.median_6h)}</td>
               <td className={`num px-3 py-2.5 text-right ${pctClass(r.median_24h)}`}>{pct(r.median_24h)}</td>
-              <td className="num px-3 py-2.5 text-right">{share(r.positive_24h_pct)}</td>
-              <td className="num px-3 py-2.5 text-right text-bull">{share(r.hit_50_pct)}</td>
-              <td className="num px-3 py-2.5 text-right text-bear">{pct(r.median_trough)}</td>
+              <td className="num .5 text-right">{share(r.positive_24h_pct)}</td>
+              <td className="num .5 text-right text-bull">{share(r.hit_50_pct)}</td>
+              <td className="num .5 text-right text-bear">{pct(r.median_trough)}</td>
             </tr>
           ))}
         </tbody>
       </table>
+      </div>
     </section>
   );
 }
@@ -95,10 +97,10 @@ export function PerformanceView() {
   return (
     <>
     <AppNav kind="public" />
-    <main className="mx-auto max-w-[1400px] px-4 pt-5 pb-12 sm:px-6">
-      <header className="flex flex-wrap items-center gap-3">
+    <main className="mx-auto max-w-[1400px] px-4 pt-6 pb-14 sm:px-6">
+      <header className="mb-2 flex flex-wrap items-center gap-3">
         <BarChart3 className="size-5 text-accent" />
-        <h1 className="text-lg font-semibold tracking-tight">Signal performance</h1>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Signal performance</h1>
         <div role="radiogroup" aria-label="Window" className="ml-auto flex rounded-lg border border-line bg-carbon/60 p-0.5">
           {WINDOWS.map((w) => (
             <button
@@ -161,40 +163,41 @@ export function PerformanceView() {
               rows={data.by_chain.map((c) => ({ ...c, key: c.chain, label: <ChainPill chain={c.chain} /> }))}
             />
 
-            <section className="card overflow-x-auto">
-              <h2 className="border-b border-line px-4 py-3 text-sm font-semibold">Recent signals</h2>
-              <table className="w-full min-w-[820px] text-sm">
-                <thead className="text-[10.5px] tracking-[0.12em] text-muted uppercase">
-                  <tr className="border-b border-line">
-                    <th className="px-4 py-2 text-left">Token</th>
-                    <th className="px-3 py-2 text-right">Signalled</th>
-                    <th className="px-3 py-2 text-center">Score</th>
-                    <th className="px-3 py-2 text-right">Entry</th>
-                    <th className="px-3 py-2 text-right">1h</th>
-                    <th className="px-3 py-2 text-right">6h</th>
-                    <th className="px-3 py-2 text-right">24h</th>
-                    <th className="px-3 py-2 text-right">Peak</th>
-                    <th className="px-3 py-2 text-right">Drawdown</th>
+            <section className="card overflow-hidden">
+              <h2 className="border-b border-line px-5 py-4 text-[15px] font-semibold tracking-tight">Recent signals</h2>
+              <div className="overflow-x-auto">
+              <table className="data-table min-w-[820px]">
+                <thead>
+                  <tr>
+                    <th className="text-left">Token</th>
+                    <th className="text-right">Signalled</th>
+                    <th className="text-center">Score</th>
+                    <th className="text-right">Entry</th>
+                    <th className="text-right">1h</th>
+                    <th className="text-right">6h</th>
+                    <th className="text-right">24h</th>
+                    <th className="text-right">Peak</th>
+                    <th className="text-right">Drawdown</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.recent.map((r, i) => (
                     <tr key={`${r.token_address}-${i}`} className="border-b border-line/60 hover:bg-white/[0.025]">
-                      <td className="px-4 py-2">
+                      <td>
                         <a href={`/token/${r.chain}/${r.token_address}`} className="flex items-center gap-1.5 hover:underline">
                           <span className="font-semibold">${r.symbol}</span>
                           <ChainPill chain={r.chain} />
                         </a>
                       </td>
-                      <td className="num px-3 py-2 text-right text-muted">{ago(r.signal_time, now)}</td>
+                      <td className="num text-right text-muted">{ago(r.signal_time, now)}</td>
                       <td className="px-3 py-1 text-center">
                         <ScoreGauge score={r.score} size={30} />
                       </td>
-                      <td className="num px-3 py-2 text-right">{price(r.entry_price)}</td>
-                      <td className={`num px-3 py-2 text-right ${pctClass(r.r_1h)}`}>{pct(r.r_1h)}</td>
-                      <td className={`num px-3 py-2 text-right ${pctClass(r.r_6h)}`}>{pct(r.r_6h)}</td>
-                      <td className={`num px-3 py-2 text-right ${pctClass(r.r_24h)}`}>{pct(r.r_24h)}</td>
-                      <td className="num px-3 py-2 text-right text-bull">
+                      <td className="num text-right">{price(r.entry_price)}</td>
+                      <td className={`num text-right ${pctClass(r.r_1h)}`}>{pct(r.r_1h)}</td>
+                      <td className={`num text-right ${pctClass(r.r_6h)}`}>{pct(r.r_6h)}</td>
+                      <td className={`num text-right ${pctClass(r.r_24h)}`}>{pct(r.r_24h)}</td>
+                      <td className="num text-right text-bull">
                         {pct(r.peak_pct)}
                         {r.peak_minutes != null && (
                           <span className="block text-[10px] text-faint">
@@ -202,11 +205,12 @@ export function PerformanceView() {
                           </span>
                         )}
                       </td>
-                      <td className="num px-3 py-2 text-right text-bear">{pct(r.trough_pct)}</td>
+                      <td className="num text-right text-bear">{pct(r.trough_pct)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              </div>
             </section>
           </div>
         </>
