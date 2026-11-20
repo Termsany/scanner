@@ -274,6 +274,9 @@ function Leaders({ d, set, openBy, onToggle }: {
               <th className="text-left">Wallet</th>
               <th className="text-left">Label</th>
               <th className="text-left">Entry</th>
+              <th className="text-left" title="Never buy more than this % above the wallet's own price. Empty = default (+10%, or +50% for no-checks wallets)">
+                Max chase %
+              </th>
               <th className="text-center" title="Copy with no liquidity, chase or scanner checks">
                 No checks
               </th>
@@ -307,6 +310,12 @@ function Leaders({ d, set, openBy, onToggle }: {
                     value={l.size_usd ?? ""}
                     onChange={(e) => upd(i, { size_usd: e.target.value ? Number(e.target.value) : null })} />
                 </td>
+                <td>
+                  <input className={`${input} num w-24`} inputMode="decimal"
+                    placeholder={l.unconditional ? "50" : "10"}
+                    value={l.max_chase_pct ?? ""}
+                    onChange={(e) => upd(i, { max_chase_pct: e.target.value === "" ? null : Number(e.target.value) })} />
+                </td>
                 <td className="text-center">
                   <input type="checkbox" checked={l.unconditional}
                     onChange={(e) => upd(i, { unconditional: e.target.checked })} />
@@ -325,7 +334,7 @@ function Leaders({ d, set, openBy, onToggle }: {
             ))}
             {d.leaders.length === 0 && (
               <tr>
-                <td colSpan={7} className="text-xs text-faint">
+                <td colSpan={8} className="text-xs text-faint">
                   No smart wallets yet: this account will not buy anything.
                 </td>
               </tr>

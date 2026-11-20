@@ -577,7 +577,7 @@ def test_unconditional_leader_ignores_liquidity_chase_and_scanner():
 
     x = FakeExec()
     x.pay_price = 5.0            # +400% over the leader's price
-    s = _s(live_unconditional_wallets=[LEADER], live_max_chase_pct=10)
+    s = _s(live_unconditional_wallets=[LEADER], live_max_chase_pct=10, live_max_chase_pct_no_checks=None)
 
     async def body(sess):
         eng = CopyEngine(x, s, screener=NoScreen())
@@ -1347,3 +1347,70 @@ def test_before_capital_is_out_trims_are_still_mirrored():
         [_trade(side="sell", pct_sold=30, remaining=1)],     # capital not back yet: copy the trim
     ], x)
     assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 300_000)]
+
+
+
+def test_no_checks_leader_still_has_a_chase_limit_and_per_wallet_override():
+    from app.live import Account, Leader
+
+    x = FakeExec()
+    free = Leader(LEADER, unconditional=True)                     # no checks: default +50% limit
+    strict = Leader(OTHER, max_chase_pct=20)                       # its own +20%
+    acct = Account("main", 30, 500, 50, [LEADER, OTHER], leaders={LEADER: free, OTHER: strict})
+    notes = []
+
+    async def note(t):
+        notes.append(t)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), account=acct, notify=note)
+        await eng.step(sess)
+        x.pay_price = 2.5                                          # SI-like: +150% over the leader: skip
+        sess.add(_trade(mint="SI"))
+        await sess.commit()
+        await eng.step(sess)
+        x.pay_price = 1.4                                          # +40%: fine for the no-checks leader
+        sess.add(_trade(mint="OK1"))
+        await sess.commit()
+        await eng.step(sess)
+        sess.add(_trade(wallet=OTHER, mint="OK2", liq=900_000))    # +40% > its own +20%: skip
+        await sess.commit()
+        await eng.step(sess)
+
+    _db(body)
+    assert [c[1] for c in x.calls if c[0] == "buy"] == ["OK1"]
+    assert any("+150% above" in n for n in notes) and any("limit +20%" in n for n in notes)
+
+
+class FastExec(PricedExec):
+    """DexScreener price lags; Jupiter (fast) has the real one."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.fast, self.fast_calls = {}, 0
+
+    async def token_prices_fast(self, mints):
+        self.fast_calls += 1
+        return {m: {"usd": self.fast[m], "decimals": 6} for m in mints if m in self.fast}
+
+
+def test_take_capital_uses_the_fast_price_near_target_and_one_strong_reading_sells():
+    x = FastExec()
+    pos, x, _ = _run_priced([
+        [_trade()],                                             # $30 for 1 token
+        lambda: x.price.update(M1=31.0),                         # far from target: Jupiter not asked
+        lambda: (x.price.update(M1=50.0), x.fast.update(M1=75.0)),  # Dex 1.67x (near) -> Jupiter says 2.5x: sell now
+    ], x)
+    sells = [c for c in x.calls if c[0] == "sell"]
+    assert sells == [("sell", "M1", 400_000)]                    # $30 of $75 = 40%
+    assert x.fast_calls == 2      # right after the buy (no DexScreener price yet) and near the target
+
+
+def test_just_past_the_target_still_needs_two_readings():
+    x = FastExec()
+    pos, x, _ = _run_priced([
+        [_trade()],
+        lambda: (x.price.update(M1=61.0), x.fast.update(M1=61.0)),   # 2.03x: one reading only
+        lambda: (x.price.update(M1=50.0), x.fast.update(M1=50.0)),   # gone
+    ], x)
+    assert [c for c in x.calls if c[0] == "sell"] == []

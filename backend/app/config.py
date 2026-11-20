@@ -97,6 +97,8 @@ class Settings(BaseSettings):
     # Skip a copy buy when the live quote's price per token is more than this % above the price recorded with
     # the leader's buy (we would be buying the leader's pump). None = no limit.
     live_max_chase_pct: float | None = 10.0
+    live_max_chase_pct_no_checks: float | None = 50.0   # same guard for "no checks" leaders: never buy
+                                                 # more than this % above the leader's price
     # When the leader sells, also sell the same share of tokens the owner bought by hand in the trading wallet
     live_sell_manual_with_leader: bool = True
     # Watch the copied wallets over LIVE_RPC_URL's WebSocket (~1 s) instead of waiting for the tracker's poll
@@ -125,7 +127,10 @@ class Settings(BaseSettings):
     live_adopt_hand_buys: bool = True            # tokens bought by hand that the bot doesn't hold: tracked as a
                                                  # "manual" position (capital out at the take-capital target)
     live_adopt_lookback_hours: float = 24.0      # how far back a hand buy can be to be adopted
-    live_take_capital_check_seconds: float = 5.0
+    live_take_capital_check_seconds: float = 2.0    # how often open positions are priced for take-capital
+    live_take_capital_fast_from: float = 0.5       # within this share of the target (1.5x for +100%):
+                                                   # price from Jupiter too (faster than DexScreener)
+    live_take_capital_strong: float = 1.15         # this far past the target, one reading is enough
     # Hold-only tokens (by mint, never by name: fake "SOL"/"ETH" tokens are everywhere). The bot copies their buys
     # but never sells them by itself: not when the leader sells, not to take the capital, not at max hold.
     # Selling by hand (page / Telegram) still works.

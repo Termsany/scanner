@@ -601,3 +601,32 @@ def test_leader_toggle_endpoint_and_close_positions(monkeypatch):
         r = c.post("/api/live/accounts/togl/leaders/toggle", headers=h, json={"wallet": leader, "enabled": True})
         assert r.json()["account"]["leaders"][0]["enabled"] is True
     live_api._fails.clear()
+
+
+def test_leader_max_chase_is_saved_and_checked(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from app.api import live as live_api
+
+    s = get_settings()
+    live_api._fails.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "s3cret-pass")
+    monkeypatch.setattr(s, "live_key_encryption_key", Fernet.generate_key().decode())
+    h = {"X-Live-Password": "s3cret-pass"}
+    leader = "BCyNgSB1njYWrjHubBc56UXqDqzc4ixk8UHPhGbTQ5aQ"
+    body = {"name": "chs", "size_usd": 10, "max_open_usd": 100, "max_daily_loss_usd": 50,
+            "leaders": [{"wallet": leader, "max_chase_pct": -5}]}
+    with TestClient(app) as c:
+        assert c.post("/api/live/accounts", headers=h, json=body).status_code == 400
+        body["leaders"][0]["max_chase_pct"] = 30
+        r = c.post("/api/live/accounts", headers=h, json=body)
+        assert r.status_code == 200 and r.json()["account"]["leaders"][0]["max_chase_pct"] == 30
+        r = c.patch("/api/live/accounts/chs", headers=h, json={"leaders": [{"wallet": leader}]})
+        assert r.json()["account"]["leaders"][0]["max_chase_pct"] is None        # empty = account default
+        # saving the account keeps a wallet that was switched off, off
+        c.post("/api/live/accounts/chs/leaders/toggle", headers=h, json={"wallet": leader, "enabled": False})
+        saved = c.get("/api/live/accounts", headers=h).json()["accounts"]
+        leaders = [a for a in saved if a["name"] == "chs"][0]["leaders"]
+        r = c.patch("/api/live/accounts/chs", headers=h, json={"size_usd": 12, "leaders": leaders})
+        assert r.json()["account"]["leaders"][0]["enabled"] is False
+    live_api._fails.clear()

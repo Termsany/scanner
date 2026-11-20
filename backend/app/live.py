@@ -114,6 +114,7 @@ class Leader:
     new_tokens_only: bool = False    # copy only tokens it did not hold before
     size_usd: float | None = None    # entry size for this leader; None = the account's
     enabled: bool = True             # off: no new buys from it; its open positions still follow its sells
+    max_chase_pct: float | None = None   # never pay more than this % above its price; None = account default
 
 
 _FROM_SETTINGS = object()
@@ -321,6 +322,18 @@ class JupiterExecutor:
             info = acc["account"]["data"]["parsed"]["info"]
             total += int(info["tokenAmount"]["amount"])
         return total
+
+    async def token_prices_fast(self, mints: list[str]) -> dict[str, dict[str, float]]:
+        """{mint: {"usd", "decimals"}} straight from Jupiter's price API (fresher than DexScreener on new
+        pump.fun tokens). Goes through the shared Jupiter gate, so use it only for positions near a target."""
+        r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/price/v3",
+                                  params={"ids": ",".join(mints[:50])}, timeout=8)
+        out: dict[str, dict[str, float]] = {}
+        if r.status_code == 200:
+            for mint, d in (r.json() or {}).items():
+                if d and d.get("usdPrice") and d.get("decimals") is not None:
+                    out[mint] = {"usd": float(d["usdPrice"]), "decimals": int(d["decimals"])}
+        return out
 
     async def wallet_tokens(self) -> dict[str, int]:
         """{mint: raw balance} of every token this wallet holds (SPL Token and Token-2022)."""
@@ -686,6 +699,7 @@ class CopyEngine:
         self._extra_seen: dict[str, int] = {}   # mint -> reconciles in a row where the wallet held more
         self._extra_done: dict[str, int] = {}   # mint -> surplus already looked up (don't re-read history for it)
         self._priced = 0.0                  # monotonic time of the last take-capital price check
+        self._fast_at = -1e9                # monotonic time of the last Jupiter price call for take-capital
         self._adopted = 0.0                 # monotonic time of the last look for the owner's own hand-bought tokens
         self._adopt_done: dict[str, int] = {}   # mint -> balance already looked up (no buy found / dust)
         self._said: dict[str, float] = {}    # repeating skip notices -> last time sent
@@ -704,6 +718,14 @@ class CopyEngine:
     def _new_only(self, wallet: str) -> bool:
         ld = self.a.leaders.get(wallet)
         return ld.new_tokens_only if ld else wallet in self.s.live_new_tokens_only_wallets
+
+    def _chase(self, wallet: str, free: bool) -> float | None:
+        """Most we pay above the leader's own price, in %: its own limit, else the account default
+        (a looser one for "no checks" leaders, which buy fresh launches that move fast)."""
+        ld = self.a.leaders.get(wallet)
+        if ld is not None and ld.max_chase_pct is not None:
+            return ld.max_chase_pct
+        return self.s.live_max_chase_pct_no_checks if free else self.s.live_max_chase_pct
 
     def _size(self, wallet: str) -> float:
         ld = self.a.leaders.get(wallet)
@@ -837,8 +859,8 @@ class CopyEngine:
                 await self.notify(f"{self._tag()} 🛡 Skipped ${sym}: scanner says {res.reason}")
                 return
             log.info("live: %s passed the scanner (%s)", sym, res.reason)
-        chase = self.s.live_max_chase_pct
-        max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None and not free) else None
+        chase = self._chase(t.wallet, free)
+        max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None) else None
         try:
             f = await self.x.buy(t.token_address, self._size(t.wallet), max_price=max_price,
                                  slippage_bps=self.s.live_slippage_bps_unconditional if free else None)
@@ -1209,20 +1231,44 @@ class CopyEngine:
         if not todo:
             return
         try:
-            prices = await self.x.token_prices(sorted({p.token_address for p in todo}))
+            prices = dict(await self.x.token_prices(sorted({p.token_address for p in todo})) or {})
         except Exception as exc:
             log.warning("live: take-capital prices failed: %s", exc)
-            return
-        for p in todo:
-            px = (prices or {}).get(p.token_address)
+            prices = {}
+
+        def worth(p: LivePosition, px: dict[str, float] | None) -> float | None:
             if not px or not px.get("usd"):
+                return None
+            return int(p.tokens_raw) / 10 ** int(px["decimals"]) * float(px["usd"]) + (p.proceeds_usd or 0)
+
+        goal = 1 + target / 100
+        unpriced = {p.token_address for p in todo if worth(p, prices.get(p.token_address)) is None}
+        close = {p.token_address for p in todo if p.token_address not in unpriced
+                 and worth(p, prices.get(p.token_address)) >= p.cost_usd * (1 + (goal - 1) * self.s.live_take_capital_fast_from)}
+        near = sorted(unpriced | close)
+        # the Jupiter gate is shared with swaps: every check only when a position is close to its target,
+        # otherwise (no DexScreener price yet) at most every 10 s
+        wait = self.s.live_take_capital_check_seconds if close else 10.0
+        if near and time.monotonic() - self._fast_at < wait:
+            near = []
+        if near and hasattr(self.x, "token_prices_fast"):
+            self._fast_at = time.monotonic()
+            try:
+                prices.update(await self.x.token_prices_fast(near))     # fresher where it matters
+            except Exception as exc:
+                log.warning("live: take-capital fast prices failed: %s", exc)
+        for p in todo:
+            px = prices.get(p.token_address)
+            total = worth(p, px)
+            if total is None:
                 continue
-            value = int(p.tokens_raw) / 10 ** int(px["decimals"]) * float(px["usd"])
-            if value <= 0 or (value + (p.proceeds_usd or 0)) < p.cost_usd * (1 + target / 100):
+            value = total - (p.proceeds_usd or 0)
+            if value <= 0 or total < p.cost_usd * goal:
                 self._up_seen.pop(p.id, None)
                 continue
             self._up_seen[p.id] = self._up_seen.get(p.id, 0) + 1
-            if self._up_seen[p.id] < 2:          # two checks in a row: one odd price never sells
+            strong = total >= p.cost_usd * goal * self.s.live_take_capital_strong
+            if self._up_seen[p.id] < 2 and not strong:   # two checks in a row, unless far past the target
                 continue
             self._up_seen.pop(p.id, None)
             share = min((p.cost_usd - (p.proceeds_usd or 0)) / value, 1.0)

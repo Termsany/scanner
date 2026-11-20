@@ -469,6 +469,7 @@ export interface LeaderCfg {
   unconditional: boolean;
   new_tokens_only: boolean;
   size_usd: number | null;
+  max_chase_pct?: number | null;   // most paid above its price, %; null = account default
   enabled?: boolean;   // false: no new buys from it (its open positions still follow its sells)
 }
 
