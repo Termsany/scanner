@@ -84,6 +84,8 @@ async def check_password(request: Request, session: Session,
         return
     if await _has_admin(session):
         raise HTTPException(401, "Sign in with your admin email and password")
+    if not get_settings().live_dashboard_password:
+        raise HTTPException(404, "Live dashboard is not configured")
     if not x_live_password:
         raise HTTPException(401, "Sign in first")
     _legacy_password_ok(request, x_live_password)

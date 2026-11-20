@@ -72,5 +72,18 @@ def test_admin_email_login_replaces_the_shared_password(monkeypatch):
         assert c.post("/api/me/login", json={"email": "boss@example.com", "password": "a-new-long-pass"}).status_code == 401
         assert c.post("/api/me/login", json={"email": "boss@example.com", "password": "another-long-pass"}).status_code == 200
         assert c.get("/api/live/admin/me").json()["email"] == "boss@example.com"
+
+        # the test modules share one database: remove the admin so later tests use the shared password again
+        async def drop():
+            from sqlalchemy import delete
+
+            from app.db import SessionLocal
+            from app.models import User
+
+            async with SessionLocal() as ses:
+                await ses.execute(delete(User).where(User.role == "admin"))
+                await ses.commit()
+        c.portal.call(drop)
+        assert c.get("/api/live/admin/status").json() == {"has_admin": False}
     users._fails.clear()
     live_api._fails.clear()
