@@ -1019,6 +1019,7 @@ async def _main(once: bool) -> None:
             await scanner.run_cycle()
         else:
             from app.billing import BillingLoop
+            from app.sniper import PaperSniper
             from app.live import LiveTrader
             from app.paper import PaperEngine
             from app.performance import PerformanceTracker
@@ -1027,7 +1028,8 @@ async def _main(once: bool) -> None:
                                  PerformanceTracker(scanner.gecko, scanner.settings).run_forever(),
                                  PaperEngine(scanner.dex, scanner.settings).run_forever(),
                                  LiveTrader(scanner.settings).run_forever(),
-                                 BillingLoop(scanner.settings).run_forever())
+                                 BillingLoop(scanner.settings).run_forever(),
+                                 PaperSniper(scanner.settings).run_forever())
     finally:
         await tracker.close()
         await scanner.close()

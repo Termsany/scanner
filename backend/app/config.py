@@ -79,6 +79,23 @@ class Settings(BaseSettings):
     paper_mirror_wallets: list[str] = Field(default_factory=list)
     paper_mirror_max_hold_hours: int = 24 * 7
 
+    # Paper sniper (app/sniper.py): new pump.fun tokens, simulated only. Off until turned on.
+    sniper_paper_enabled: bool = False
+    sniper_size_usd: float = 30.0
+    sniper_latency_s: float = 2.0                # our assumed delay from decision to a landed buy
+    sniper_fee_pct: float = 1.0                  # pump.fun fee, each way
+    sniper_slippage_pct: float = 2.0             # each way
+    sniper_tp_pct: float = 50.0
+    sniper_sl_pct: float = -30.0
+    sniper_max_hold_s: float = 300.0
+    sniper_sample_every: int = 10                # snipe_all: every Nth new token
+    sniper_max_dev_buy_sol: float = 3.0          # creator bought more than this at launch: skip
+    sniper_skip_mayhem: bool = True              # pump.fun "mayhem mode" tokens (agent-driven price): skip
+    sniper_window_s: float = 20.0                # snipe_momentum: decide within this many seconds of launch
+    sniper_min_buyers: int = 5
+    sniper_min_net_sol: float = 3.0
+    sniper_max_open: int = 60
+
     # Live copy trading (REAL money, Solana via Jupiter). Off unless LIVE_MODE=live AND a key is set.
     #   off     nothing runs
     #   dry     quotes real Jupiter routes and logs what it would do; never signs or sends

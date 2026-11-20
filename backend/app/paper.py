@@ -56,6 +56,10 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              tp_pct=0.0, sl_pct=0.0, mirror=True),
     Strategy("signal_80", "Scanner signal, score >= 80", min_score=80),
     Strategy("signal_85", "Scanner signal, score >= 85", min_score=85),
+    # run by app/sniper.py (own live feed and exits); listed here so /paper shows them
+    Strategy("snipe_all", "Sniper: sample of every new pump.fun token", tp_pct=50.0, sl_pct=-30.0, max_hold_minutes=5),
+    Strategy("snipe_momentum", "Sniper: new pump.fun token with early buying", tp_pct=50.0, sl_pct=-30.0,
+             max_hold_minutes=5),
 )}
 
 # (chain, [addresses]) -> {address: price}
@@ -222,8 +226,9 @@ def _close(pos: PaperPosition, price: float, reason: str, at: datetime, s: Setti
 
 async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings | None = None) -> int:
     s = s or get_settings()
-    open_pos = (await session.execute(select(PaperPosition).where(PaperPosition.status == "open"))).scalars().all()
-    if not open_pos:
+    open_pos = (await session.execute(select(PaperPosition).where(
+        PaperPosition.status == "open", PaperPosition.strategy.notin_(("snipe_all", "snipe_momentum"))))).scalars().all()
+    if not open_pos:            # (sniper positions are priced and closed by app/sniper.py, second by second)
         return 0
     now = _now()
 
