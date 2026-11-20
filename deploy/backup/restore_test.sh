@@ -28,7 +28,7 @@ Q="select 'trading_accounts', count(*) from trading_accounts union all select 'u
 echo "table              backup   live"
 FAIL=0
 while IFS='|' read -r t n; do
-  live=$(cd "$APP" && docker compose exec -T postgres psql -U alpha -d alpha -tA -c "select count(*) from $t")
+  live=$(cd "$APP" && docker compose exec -T postgres psql -U alpha -d alpha -tA -c "select count(*) from $t" </dev/null)
   printf '%-18s %6s %6s\n' "$t" "$n" "$live"
   [ "$n" -le "$live" ] || FAIL=1
 done < <(docker exec "$NAME" psql -U alpha -d alpha -tA -F'|' -c "$Q")
