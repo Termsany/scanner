@@ -317,12 +317,21 @@ async def _row(session: AsyncSession, name: str):
 
 @router.get("/accounts")
 async def list_accounts(session: Session, _: Auth) -> dict[str, Any]:
+    from sqlalchemy import func, select
+
     from app.accounts import public, rows
 
     s = get_settings()
     counts = await _open_counts(session)
+    by_leader: dict[str, dict[str, int]] = {}
+    for acct, wallet, n in (await session.execute(
+            select(LivePosition.account, LivePosition.leader_wallet, func.count(LivePosition.id)).where(
+                LivePosition.status == "open", LivePosition.mode == s.live_mode)
+            .group_by(LivePosition.account, LivePosition.leader_wallet))).all():
+        by_leader.setdefault(acct or "main", {})[wallet] = n
     return {
-        "accounts": [public(r, counts.get(r.name, 0)) for r in await rows(session, s)],
+        "accounts": [{**public(r, counts.get(r.name, 0)), "open_by_leader": by_leader.get(r.name, {})}
+                     for r in await rows(session, s)],
         "can_store_keys": bool(s.live_key_encryption_key),
         "defaults": {"max_hold_hours": s.live_max_hold_hours, "reload_seconds": s.live_accounts_reload_seconds},
     }
@@ -422,6 +431,47 @@ async def edit_account(name: str, body: AccountPatch, request: Request, session:
     await audit(session, "admin", "account_edit", row.name, body.model_dump(exclude_none=True), _ip(request))
     await session.commit()
     return {"account": public(row, counts.get(row.name, 0))}
+
+
+class LeaderToggleIn(BaseModel):
+    wallet: str
+    enabled: bool
+    close_positions: bool = False   # with enabled=false: also sell what this account holds from it
+
+
+@router.post("/accounts/{name}/leaders/toggle")
+async def toggle_leader(name: str, body: LeaderToggleIn, request: Request, session: Session,
+                        _: Auth) -> dict[str, Any]:
+    """Follow / stop following one smart wallet on one account, right away (the worker picks it up within
+    LIVE_ACCOUNTS_RELOAD_SECONDS). Stopped: no new buys from it; its open positions keep following its sells,
+    unless close_positions sells them now."""
+    from sqlalchemy import select
+
+    from app.accounts import public
+    from app.live import _acct
+    from app.users import audit
+
+    row = await _row(session, name)
+    leaders = [dict(d) for d in (row.leaders or [])]
+    hit = next((d for d in leaders if d.get("wallet") == body.wallet), None)
+    if hit is None:
+        raise HTTPException(404, "This account does not copy that wallet")
+    hit["enabled"] = body.enabled
+    row.leaders = leaders                       # new list: the JSON column sees the change
+    closing = 0
+    if not body.enabled and body.close_positions:
+        opened = (await session.execute(select(LivePosition).where(
+            _acct(row.name), LivePosition.leader_wallet == body.wallet, LivePosition.status == "open",
+            LivePosition.mode == get_settings().live_mode))).scalars().all()
+        for p in opened:
+            if not p.manual_sell_frac:
+                p.manual_sell_frac = 1.0        # the worker sells it on its next step
+                closing += 1
+    await audit(session, "admin", "leader_on" if body.enabled else "leader_off", row.name,
+                {"wallet": body.wallet, "close_positions": body.close_positions, "closing": closing}, _ip(request))
+    await session.commit()
+    counts = await _open_counts(session)
+    return {"account": public(row, counts.get(row.name, 0)), "closing": closing}
 
 
 # ---- registered users (admin) -------------------------------------------------------

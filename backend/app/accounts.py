@@ -80,7 +80,7 @@ def clean_leaders(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 raise AccountError(f"entry size for {w[:6]} must be above $0")
         out.append({"wallet": w, "label": str(d.get("label") or "")[:40],
                     "unconditional": bool(d.get("unconditional")), "new_tokens_only": bool(d.get("new_tokens_only")),
-                    "size_usd": size})
+                    "size_usd": size, "enabled": d.get("enabled") is not False})
     if len(out) > MAX_LEADERS:
         raise AccountError(f"at most {MAX_LEADERS} smart wallets per account")
     return out
@@ -102,7 +102,7 @@ def check_limits(size: float, max_open: float, max_loss: float, take_capital: fl
 
 def to_account(row: TradingAccount, s: Settings, private_key: str | None) -> Account:
     leaders = {d["wallet"]: Leader(d["wallet"], d.get("label") or "", bool(d.get("unconditional")),
-                                   bool(d.get("new_tokens_only")), d.get("size_usd"))
+                                   bool(d.get("new_tokens_only")), d.get("size_usd"), d.get("enabled") is not False)
                for d in row.leaders or []}
     return Account(row.name, row.size_usd, row.max_open_usd, row.max_daily_loss_usd, list(leaders), private_key,
                    leaders=leaders, paused=bool(row.paused or row.billing_hold), take_capital_at_pct=row.take_capital_at_pct,

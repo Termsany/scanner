@@ -469,6 +469,7 @@ export interface LeaderCfg {
   unconditional: boolean;
   new_tokens_only: boolean;
   size_usd: number | null;
+  enabled?: boolean;   // false: no new buys from it (its open positions still follow its sells)
 }
 
 export interface TradingAccountCfg {
@@ -476,6 +477,7 @@ export interface TradingAccountCfg {
   enabled: boolean;
   paused: boolean;
   billing_hold?: boolean;
+  open_by_leader?: Record<string, number>;
   key_source: "env" | "db";
   pubkey: string | null;
   size_usd: number;

@@ -112,6 +112,7 @@ class Leader:
     unconditional: bool = False      # no liquidity / chase / scanner checks
     new_tokens_only: bool = False    # copy only tokens it did not hold before
     size_usd: float | None = None    # entry size for this leader; None = the account's
+    enabled: bool = True             # off: no new buys from it; its open positions still follow its sells
 
 
 _FROM_SETTINGS = object()
@@ -737,6 +738,9 @@ class CopyEngine:
             return "paused (/live on to resume)"
         if self.a.paused:
             return f"account {self.a.name} paused"
+        ld = self.a.leaders.get(t.wallet)
+        if ld is not None and not ld.enabled:
+            return "leader off on this account"
         if self._new_only(t.wallet):
             if t.remaining_amount is not None:
                 before = t.remaining_amount - t.amount          # leader's balance before this buy
@@ -778,7 +782,7 @@ class CopyEngine:
         why = await self._skip_reason(session, t)
         if why:
             log.info("live: skip buy %s (%s)", sym, why)
-            quiet = "already holding" in why
+            quiet = "already holding" in why or why.startswith("leader off")
             if why.startswith("not enough SOL") or why.startswith("account ") or why.startswith("limit:"):
                 # an unfunded, paused or full account would repeat this on every leader buy: say it every 6 h
                 key = why.split(" ")[0]

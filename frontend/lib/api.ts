@@ -134,6 +134,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  toggleLeader: (password: string, name: string, wallet: string, enabled: boolean, close_positions = false) =>
+    request<{ account: TradingAccountCfg; closing: number }>(`/api/live/accounts/${encodeURIComponent(name)}/leaders/toggle`, {
+      method: "POST", headers: { "X-Live-Password": password },
+      body: JSON.stringify({ wallet, enabled, close_positions }),
+    }),
+
   editAccount: (password: string, name: string, body: Record<string, unknown>) =>
     request<{ account: TradingAccountCfg }>(`/api/live/accounts/${encodeURIComponent(name)}`, {
       method: "PATCH",

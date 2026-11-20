@@ -552,3 +552,52 @@ def test_accounts_page_create_edit_and_guards(monkeypatch):
         assert c.patch("/api/live/accounts/alpha", headers=h, json={"enabled": False}).json()["account"]["enabled"] is False
         assert c.patch("/api/live/accounts/nope", headers=h, json={}).status_code == 404
     live_api._fails.clear()
+
+
+def test_leader_toggle_endpoint_and_close_positions(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from app.api import live as live_api
+    from app.models import LivePosition
+
+    s = get_settings()
+    live_api._fails.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "s3cret-pass")
+    monkeypatch.setattr(s, "live_key_encryption_key", Fernet.generate_key().decode())
+    h = {"X-Live-Password": "s3cret-pass"}
+    leader = "BCyNgSB1njYWrjHubBc56UXqDqzc4ixk8UHPhGbTQ5aQ"
+    with TestClient(app) as c:
+        r = c.post("/api/live/accounts", headers=h, json={"name": "togl", "size_usd": 10, "max_open_usd": 100,
+                                                          "max_daily_loss_usd": 50, "leaders": [{"wallet": leader}]})
+        assert r.status_code == 200, r.text
+        assert r.json()["account"]["leaders"][0]["enabled"] is True
+
+        async def add():
+            async with SessionLocal() as ses:
+                for mint in ("TG1", "TG2"):
+                    ses.add(LivePosition(mode=s.live_mode, account="togl", token_address=mint, symbol=mint,
+                                         leader_wallet=leader, leader_trade_id=1, status="open", cost_usd=10))
+                await ses.commit()
+        c.portal.call(add)
+        acct = [a for a in c.get("/api/live/accounts", headers=h).json()["accounts"] if a["name"] == "togl"][0]
+        assert acct["open_by_leader"] == {leader: 2}
+
+        assert c.post("/api/live/accounts/togl/leaders/toggle", json={"wallet": leader, "enabled": False}).status_code == 401
+        assert c.post("/api/live/accounts/togl/leaders/toggle", headers=h,
+                      json={"wallet": "Nope1111111111111111111111111111111111111", "enabled": False}).status_code == 404
+        r = c.post("/api/live/accounts/togl/leaders/toggle", headers=h, json={"wallet": leader, "enabled": False})
+        assert r.status_code == 200 and r.json()["closing"] == 0
+        assert r.json()["account"]["leaders"][0]["enabled"] is False
+        r = c.post("/api/live/accounts/togl/leaders/toggle", headers=h,
+                   json={"wallet": leader, "enabled": False, "close_positions": True})
+        assert r.json()["closing"] == 2
+
+        async def fracs():
+            from sqlalchemy import select
+            async with SessionLocal() as ses:
+                return [p.manual_sell_frac for p in (await ses.execute(
+                    select(LivePosition).where(LivePosition.account == "togl"))).scalars().all()]
+        assert c.portal.call(fracs) == [1.0, 1.0]
+        r = c.post("/api/live/accounts/togl/leaders/toggle", headers=h, json={"wallet": leader, "enabled": True})
+        assert r.json()["account"]["leaders"][0]["enabled"] is True
+    live_api._fails.clear()

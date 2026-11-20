@@ -1238,3 +1238,29 @@ def test_tokens_sent_in_without_a_purchase_stay_the_owners():
     p = pos[0]
     assert p.cost_usd == 30.0 and p.tokens_raw == "1000000"
     assert x.buy_calls == 1                                        # looked up once, not on every check
+
+
+def test_leader_turned_off_buys_nothing_but_its_positions_still_follow_its_sells():
+    from app.live import Account, Leader
+
+    s = _s()
+    on = Leader(LEADER, enabled=True)
+    acct = Account("main", 30, 100, 50, [LEADER, OTHER], leaders={LEADER: on, OTHER: Leader(OTHER, enabled=False)})
+    x = FakeExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=acct)
+        await eng.step(sess)
+        sess.add_all([_trade(mint="A"), _trade(wallet=OTHER, mint="B")])
+        await sess.commit()
+        await eng.step(sess)
+        bought = [c for c in x.calls if c[0] == "buy"]
+        assert [c[1] for c in bought] == ["A"]                         # the switched-off leader's buy is skipped
+        on.enabled = False                                             # switch the first one off too
+        sess.add(_trade(side="sell", mint="A", pct_sold=100, remaining=0))
+        await sess.commit()
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().all()
+
+    pos = _db(body)
+    assert len(pos) == 1 and pos[0].status == "closed" and pos[0].exit_reason == "leader_sold"

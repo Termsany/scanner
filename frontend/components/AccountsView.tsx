@@ -197,7 +197,65 @@ function Settings({
   );
 }
 
-function Leaders({ d, set }: { d: Draft; set: (d: Draft) => void }) {
+/** On/off switch. */
+function Switch({ on, busy, onClick, label }: { on: boolean; busy?: boolean; onClick: () => void; label: string }) {
+  return (
+    <button type="button" role="switch" aria-checked={on} aria-label={label} disabled={busy} onClick={onClick}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:opacity-50 ${
+        on ? "bg-mint" : "bg-raised ring-1 ring-line-strong"}`}>
+      <span className={`inline-block size-4 rounded-full bg-ink shadow transition ${on ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+    </button>
+  );
+}
+
+type Toggle = (wallet: string, enabled: boolean, close: boolean) => Promise<void>;
+
+/** Follow switch for a saved account: turning it off asks what to do with that wallet's open positions. */
+function FollowCell({ l, open, onToggle }: { l: LeaderCfg; open: number; onToggle?: Toggle }) {
+  const [ask, setAsk] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const on = l.enabled !== false;
+  const run = async (enabled: boolean, close: boolean) => {
+    if (!onToggle) return;
+    setBusy(true);
+    try {
+      await onToggle(l.wallet, enabled, close);
+    } finally {
+      setBusy(false);
+      setAsk(false);
+    }
+  };
+  if (ask) {
+    return (
+      <span className="flex items-center gap-1.5">
+        <button type="button" disabled={busy} onClick={() => run(false, false)}
+          className="rounded-md border border-line bg-raised px-2 py-0.5 text-xs hover:border-line-strong">
+          Stop buys only
+        </button>
+        <button type="button" disabled={busy} onClick={() => run(false, true)}
+          className="rounded-md border border-bear/50 px-2 py-0.5 text-xs text-bear hover:bg-bear-soft">
+          Stop + sell {open} open
+        </button>
+        <button type="button" onClick={() => setAsk(false)} className="px-1 text-xs text-muted hover:text-ink">Cancel</button>
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-center gap-2">
+      <Switch on={on} busy={busy} label={on ? "Stop following" : "Follow"}
+        onClick={() => (on ? (open > 0 ? setAsk(true) : run(false, false)) : run(true, false))} />
+      <span className={`text-xs ${on ? "text-mint" : "text-muted"}`}>{on ? "Following" : "Off"}</span>
+      {open > 0 && <span className="text-xs text-faint">· {open} open</span>}
+    </span>
+  );
+}
+
+function Leaders({ d, set, openBy, onToggle }: {
+  d: Draft;
+  set: (d: Draft) => void;
+  openBy?: Record<string, number>;
+  onToggle?: Toggle;           // saved accounts: the switch applies right away
+}) {
   const [add, setAdd] = useState("");
   const upd = (i: number, patch: Partial<LeaderCfg>) =>
     set({ ...d, leaders: d.leaders.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
@@ -210,6 +268,7 @@ function Leaders({ d, set }: { d: Draft; set: (d: Draft) => void }) {
         <table className="data-table min-w-[640px] text-sm">
           <thead>
             <tr>
+              <th className="text-left">Follow</th>
               <th className="text-left">Wallet</th>
               <th className="text-left">Label</th>
               <th className="text-left">Entry</th>
@@ -222,7 +281,15 @@ function Leaders({ d, set }: { d: Draft; set: (d: Draft) => void }) {
           </thead>
           <tbody>
             {d.leaders.map((l, i) => (
-              <tr key={l.wallet}>
+              <tr key={l.wallet} className={l.enabled === false ? "opacity-60" : ""}>
+                <td>
+                  {onToggle ? (
+                    <FollowCell l={l} open={openBy?.[l.wallet] ?? 0} onToggle={onToggle} />
+                  ) : (
+                    <Switch on={l.enabled !== false} label="Follow"
+                      onClick={() => upd(i, { enabled: l.enabled === false })} />
+                  )}
+                </td>
                 <td className="num ">
                   <a className="inline-flex items-center gap-1 hover:underline" target="_blank" rel="noreferrer"
                     href={`https://solscan.io/account/${l.wallet}`}>
@@ -256,7 +323,7 @@ function Leaders({ d, set }: { d: Draft; set: (d: Draft) => void }) {
             ))}
             {d.leaders.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-3 py-3 text-xs text-faint">
+                <td colSpan={7} className="text-xs text-faint">
                   No smart wallets yet: this account will not buy anything.
                 </td>
               </tr>
@@ -273,7 +340,7 @@ function Leaders({ d, set }: { d: Draft; set: (d: Draft) => void }) {
             const w = add.trim();
             if (!w || d.leaders.some((l) => l.wallet === w)) return;
             set({ ...d, leaders: [...d.leaders, { wallet: w, label: "", unconditional: false,
-              new_tokens_only: false, size_usd: null }] });
+              new_tokens_only: false, size_usd: null, enabled: true }] });
             setAdd("");
           }}>
           <Plus className="size-4" /> Add
@@ -359,7 +426,23 @@ function AccountCard({
       </header>
       <div className="p-5">
       <Settings d={d} set={setD} defaultHold={defaultHold} />
-      <Leaders d={d} set={setD} />
+      <Leaders d={d} set={setD} openBy={a.open_by_leader}
+        onToggle={async (wallet, enabled, close) => {
+          if (dirty) {
+            setMsg({ ok: false, text: "Save or discard your other changes first" });
+            return;
+          }
+          setMsg(null);
+          try {
+            const r = await api.toggleLeader(password, a.name, wallet, enabled, close);
+            onSaved({ ...r.account, open_by_leader: a.open_by_leader });
+            setMsg({ ok: true, text: enabled ? `Following ${short(wallet)} again (within 30 s)`
+              : close ? `Stopped ${short(wallet)}; selling ${r.closing} open position${r.closing === 1 ? "" : "s"} now`
+                : `Stopped following ${short(wallet)}: no new buys; its open positions still follow its sells` });
+          } catch (e) {
+            setMsg({ ok: false, text: e instanceof ApiError ? e.message : "Could not change it" });
+          }
+        }} />
       {a.user_id != null && <Caps d={d} set={setD} />}
       </div>
       <footer className="flex flex-wrap items-center gap-3 border-t border-line bg-surface-2/50 px-5 py-3">
