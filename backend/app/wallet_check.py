@@ -13,6 +13,8 @@ Network trouble returns ok=True with reason "unchecked": a flaky RPC must not bl
 
 from __future__ import annotations
 
+import asyncio
+
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -40,6 +42,12 @@ class CheckResult:
     info: dict[str, Any]
 
 
+# Solana checks run on the trading RPC (LIVE_RPC_URL) when set: at most 2 at a time, spaced out, so the scanner
+# never crowds out the trading engine on the same plan.
+_SOL_GATE = asyncio.Semaphore(2)
+SOL_SPACING = 0.15
+
+
 class WalletChecker:
     def __init__(self, settings: Settings, http: httpx.AsyncClient | None = None) -> None:
         self.s = settings
@@ -58,6 +66,13 @@ class WalletChecker:
             raise RuntimeError(str(body["error"])[:200])
         return body.get("result")
 
+    async def _sol(self, url: str, method: str, params: list[Any]) -> Any:
+        async with _SOL_GATE:
+            try:
+                return await self._rpc(url, method, params)
+            finally:
+                await asyncio.sleep(SOL_SPACING)
+
     async def check(self, chain: Chain, address: str) -> CheckResult:
         if not self.s.smart_activity_check_enabled:
             return CheckResult(True, "check disabled", {})
@@ -73,14 +88,14 @@ class WalletChecker:
         # Off the ed25519 curve = program-derived address: no private key exists, it can never sign.
         if not is_on_curve(pubkey_bytes(address)):
             return CheckResult(False, "program-derived address (cannot sign)", {})
-        url = self.s.solana_rpc_url
-        acct = await self._rpc(url, "getAccountInfo", [address, {"encoding": "base64"}])
+        url = self.s.live_rpc_url or self.s.solana_rpc_url
+        acct = await self._sol(url, "getAccountInfo", [address, {"encoding": "base64"}])
         value = (acct or {}).get("value")
         # No account = 0 SOL. Still a normal keypair: another account can pay its fees, so not a rejection.
         owner = value.get("owner") if value else None
         if value is not None and owner != SYSTEM_PROGRAM:
             return CheckResult(False, f"not a user wallet (account owned by program {owner[:8]}…)", {"owner": owner})
-        sigs = await self._rpc(url, "getSignaturesForAddress", [address, {"limit": SIG_SAMPLE}]) or []
+        sigs = await self._sol(url, "getSignaturesForAddress", [address, {"limit": SIG_SAMPLE}]) or []
         times = [s["blockTime"] for s in sigs if s.get("blockTime")]
         failed = sum(1 for s in sigs if s.get("err") is not None)
         span_min = (max(times) - min(times)) / 60 if len(times) >= 2 else None

@@ -62,3 +62,21 @@ def test_evm_rules_and_rpc_failure_is_not_a_rejection():
     assert "bot-like nonce" in run(evm(nonce=120_000), Chain.ethereum, "0x1").reason
     flaky = run(lambda req: httpx.Response(503), Chain.ethereum, "0x1")
     assert flaky.ok and flaky.reason == "unchecked"
+
+
+def test_solana_check_uses_the_trading_rpc_when_set():
+    hosts = []
+
+    def handler(req):
+        hosts.append(req.url.host)
+        return sol()(req)
+
+    s = Settings(solana_rpc_url="https://sol.test", live_rpc_url="https://trade.test", smart_activity_check_enabled=True)
+
+    async def go():
+        c = WalletChecker(s, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        try:
+            return await c.check(Chain.solana, W)
+        finally:
+            await c.http.aclose()
+    assert asyncio.run(go()).ok and set(hosts) == {"trade.test"}
