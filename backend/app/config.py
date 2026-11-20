@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     # LIVE_ACCOUNTS=[{"name": "big", "size_usd": 50, "max_open_usd": 500, "max_daily_loss_usd": 250}]
     # Each one's key goes in LIVE_PRIVATE_KEY_<NAME> (LIVE_PRIVATE_KEY_BIG); without it the account stays idle.
     live_accounts: list[dict[str, Any]] = Field(default_factory=list)
+    # Fernet key that encrypts private keys of accounts made on the /accounts page (generate one with
+    # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"). Keep a copy:
+    # without it those wallets can't be used. Unset = new accounts can't be created from the page
+    live_key_encryption_key: str | None = None
+    live_accounts_reload_seconds: float = 30.0   # how often the worker picks up account edits
     live_dashboard_password: str | None = None   # unlocks /live on the dashboard; unset = page disabled
 
     # Signal performance (GeckoTerminal candles; free API: 30 calls/min shared with the scanner)

@@ -412,6 +412,12 @@ export function LiveView() {
         >
           <ArrowLeft className="size-3.5" /> Scanner
         </a>
+        <a
+          href="/accounts"
+          className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-raised hover:text-ink"
+        >
+          Accounts
+        </a>
         <Wallet className="size-5 text-accent" />
         <h1 className="text-lg font-semibold tracking-tight">
           Live copy trading

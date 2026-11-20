@@ -508,3 +508,47 @@ def test_live_values_open_positions_at_live_prices(monkeypatch):
     assert "leader_activity" in d and "updated_at" in d
     live_api._fails.clear()
     live_api._cache.clear()
+
+
+def test_accounts_page_create_edit_and_guards(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from app.api import live as live_api
+
+    s = get_settings()
+    live_api._fails.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "s3cret-pass")
+    h = {"X-Live-Password": "s3cret-pass"}
+    leader = "BCyNgSB1njYWrjHubBc56UXqDqzc4ixk8UHPhGbTQ5aQ"
+    new = {"name": "Alpha", "size_usd": 25, "max_open_usd": 200, "max_daily_loss_usd": 80,
+           "take_capital_at_pct": 100, "leaders": [{"wallet": leader, "unconditional": True}]}
+    with TestClient(app) as c:
+        assert c.get("/api/live/accounts").status_code == 401
+        r = c.get("/api/live/accounts", headers=h)
+        assert r.status_code == 200 and r.json()["can_store_keys"] is False
+        assert any(a["name"] == "main" for a in r.json()["accounts"])
+        monkeypatch.setattr(s, "live_key_encryption_key", None)
+        assert c.post("/api/live/accounts", json=new, headers=h).status_code == 400       # nowhere to keep keys
+        monkeypatch.setattr(s, "live_key_encryption_key", Fernet.generate_key().decode())
+        r = c.post("/api/live/accounts", json=new, headers=h)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["account"]["name"] == "alpha" and body["secret"] and body["account"]["pubkey"]
+        assert "key_enc" not in body["account"]
+        listed = [a for a in c.get("/api/live/accounts", headers=h).json()["accounts"] if a["name"] == "alpha"][0]
+        assert body["secret"] not in str(listed)
+        assert c.post("/api/live/accounts", json=new, headers=h).status_code == 400       # duplicate name
+        bad = {**new, "name": "beta", "max_open_usd": 10}
+        assert c.post("/api/live/accounts", json=bad, headers=h).status_code == 400       # budget < one entry
+        bad = {**new, "name": "beta", "leaders": [{"wallet": "nope"}]}
+        assert c.post("/api/live/accounts", json=bad, headers=h).status_code == 400
+        r = c.patch("/api/live/accounts/alpha", headers=h, json={
+            "paused": True, "size_usd": 30, "take_capital_off": True,
+            "leaders": [{"wallet": leader, "size_usd": 40}]})
+        assert r.status_code == 200, r.text
+        a = r.json()["account"]
+        assert a["paused"] and a["size_usd"] == 30 and a["take_capital_at_pct"] is None
+        assert a["leaders"][0]["size_usd"] == 40 and a["leaders"][0]["unconditional"] is False
+        assert c.patch("/api/live/accounts/alpha", headers=h, json={"enabled": False}).json()["account"]["enabled"] is False
+        assert c.patch("/api/live/accounts/nope", headers=h, json={}).status_code == 404
+    live_api._fails.clear()

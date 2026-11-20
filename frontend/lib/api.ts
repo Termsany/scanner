@@ -5,6 +5,8 @@ import type {
   ChartInterval,
   PaginatedTokens,
   LiveStatus,
+  AccountsList,
+  TradingAccountCfg,
   PaperSummary,
   Performance,
   ScannerStatus,
@@ -107,6 +109,23 @@ export const api = {
       method: "POST",
       headers: { "X-Live-Password": password },
       body: JSON.stringify({ share }),
+    }),
+
+  accounts: (password: string, signal?: AbortSignal) =>
+    request<AccountsList>("/api/live/accounts", { headers: { "X-Live-Password": password }, signal }),
+
+  createAccount: (password: string, body: Record<string, unknown>) =>
+    request<{ account: TradingAccountCfg; secret: string | null; note?: string }>("/api/live/accounts", {
+      method: "POST",
+      headers: { "X-Live-Password": password },
+      body: JSON.stringify(body),
+    }),
+
+  editAccount: (password: string, name: string, body: Record<string, unknown>) =>
+    request<{ account: TradingAccountCfg }>(`/api/live/accounts/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      headers: { "X-Live-Password": password },
+      body: JSON.stringify(body),
     }),
 
   signals: (minScore: number, limit = 30, signal?: AbortSignal) =>

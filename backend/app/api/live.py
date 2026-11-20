@@ -213,3 +213,158 @@ async def sell(position_id: int, body: SellIn, session: Session, _: Auth) -> dic
     if not ok:
         raise HTTPException(409, note)
     return {"queued": True, "message": note}
+
+
+# ---- accounts (/accounts page) ---------------------------------------------------
+class LeaderIn(BaseModel):
+    wallet: str
+    label: str = ""
+    unconditional: bool = False
+    new_tokens_only: bool = False
+    size_usd: float | None = None
+
+
+class AccountIn(BaseModel):
+    name: str
+    size_usd: float
+    max_open_usd: float
+    max_daily_loss_usd: float
+    take_capital_at_pct: float | None = 100.0
+    max_hold_hours: int | None = None
+    leaders: list[LeaderIn] = []
+    key_mode: str = "generate"          # generate | import
+    private_key: str | None = None      # key_mode=import
+
+
+class AccountPatch(BaseModel):
+    enabled: bool | None = None
+    paused: bool | None = None
+    size_usd: float | None = None
+    max_open_usd: float | None = None
+    max_daily_loss_usd: float | None = None
+    take_capital_at_pct: float | None = None
+    take_capital_off: bool = False      # explicit off (null alone means "unchanged")
+    max_hold_hours: int | None = None
+    max_hold_default: bool = False      # back to LIVE_MAX_HOLD_HOURS
+    leaders: list[LeaderIn] | None = None
+
+
+async def _open_counts(session: AsyncSession) -> dict[str, int]:
+    from sqlalchemy import func, select
+
+    s = get_settings()
+    rows = (await session.execute(select(LivePosition.account, func.count(LivePosition.id)).where(
+        LivePosition.status == "open", LivePosition.mode == s.live_mode).group_by(LivePosition.account))).all()
+    return {(a or "main"): n for a, n in rows}
+
+
+async def _row(session: AsyncSession, name: str):
+    from sqlalchemy import select
+
+    from app.models import TradingAccount
+
+    row = (await session.execute(select(TradingAccount).where(TradingAccount.name == name))).scalars().first()
+    if row is None:
+        raise HTTPException(404, "No such account")
+    return row
+
+
+@router.get("/accounts")
+async def list_accounts(session: Session, _: Auth) -> dict[str, Any]:
+    from app.accounts import public, rows
+
+    s = get_settings()
+    counts = await _open_counts(session)
+    return {
+        "accounts": [public(r, counts.get(r.name, 0)) for r in await rows(session, s)],
+        "can_store_keys": bool(s.live_key_encryption_key),
+        "defaults": {"max_hold_hours": s.live_max_hold_hours, "reload_seconds": s.live_accounts_reload_seconds},
+    }
+
+
+@router.post("/accounts")
+async def create_account(body: AccountIn, session: Session, _: Auth) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.accounts import (NAME_RE, AccountError, check_limits, clean_leaders, encrypt_key, ensure_tracked,
+                              new_wallet, public, rows)
+    from app.live import PUBKEY, _get, _key, load_keypair
+    from app.models import TradingAccount
+
+    s = get_settings()
+    name = body.name.strip().lower()
+    try:
+        if not NAME_RE.fullmatch(name):
+            raise AccountError("name: 1-24 characters, a-z 0-9 _")
+        existing = await rows(session, s)
+        if any(r.name == name for r in existing):
+            raise AccountError("an account with this name already exists")
+        check_limits(body.size_usd, body.max_open_usd, body.max_daily_loss_usd, body.take_capital_at_pct,
+                     body.max_hold_hours)
+        leaders = clean_leaders([ld.model_dump() for ld in body.leaders])
+        secret = None
+        if body.key_mode == "generate":
+            pubkey, secret = new_wallet()
+            key = secret
+        elif body.key_mode == "import":
+            if not body.private_key:
+                raise AccountError("paste the wallet's private key")
+            try:
+                pubkey = str(load_keypair(body.private_key).pubkey())
+            except Exception:
+                raise AccountError("that is not a valid Solana private key") from None
+            key = body.private_key.strip()
+        else:
+            raise AccountError("key_mode must be generate or import")
+        used = {r.pubkey for r in existing} | {await _get(session, _key(PUBKEY, r.name)) for r in existing}
+        if pubkey in used:
+            raise AccountError("another account already trades with this wallet")
+        enc = encrypt_key(s, key)
+    except AccountError as exc:
+        raise HTTPException(400, str(exc)) from None
+    row = TradingAccount(name=name, key_source="db", key_enc=enc, pubkey=pubkey, size_usd=body.size_usd,
+                         max_open_usd=body.max_open_usd, max_daily_loss_usd=body.max_daily_loss_usd,
+                         take_capital_at_pct=body.take_capital_at_pct, max_hold_hours=body.max_hold_hours,
+                         leaders=leaders)
+    session.add(row)
+    await ensure_tracked(session, [ld["wallet"] for ld in leaders])
+    await session.commit()
+    out = {"account": public(row), "secret": secret}
+    if secret:
+        out["note"] = ("New wallet. Save this private key now (it is shown only once) and import it in Phantom "
+                       f"to see or sell its tokens. Send SOL to {pubkey} to start trading.")
+    return out
+
+
+@router.patch("/accounts/{name}")
+async def edit_account(name: str, body: AccountPatch, session: Session, _: Auth) -> dict[str, Any]:
+    from app.accounts import AccountError, check_limits, clean_leaders, ensure_tracked, public
+
+    row = await _row(session, name)
+    counts = await _open_counts(session)
+    size = body.size_usd if body.size_usd is not None else row.size_usd
+    max_open = body.max_open_usd if body.max_open_usd is not None else row.max_open_usd
+    max_loss = body.max_daily_loss_usd if body.max_daily_loss_usd is not None else row.max_daily_loss_usd
+    take = None if body.take_capital_off else (body.take_capital_at_pct if body.take_capital_at_pct is not None
+                                               else row.take_capital_at_pct)
+    hold = None if body.max_hold_default else (body.max_hold_hours if body.max_hold_hours is not None
+                                               else row.max_hold_hours)
+    try:
+        check_limits(size, max_open, max_loss, take, hold)
+        leaders = clean_leaders([ld.model_dump() for ld in body.leaders]) if body.leaders is not None else None
+        if body.enabled is False and counts.get(row.name, 0):
+            raise AccountError(f"{counts[row.name]} positions are still open: pause the account instead "
+                               "(sells keep working), and disable it once they are closed")
+    except AccountError as exc:
+        raise HTTPException(400, str(exc)) from None
+    row.size_usd, row.max_open_usd, row.max_daily_loss_usd = size, max_open, max_loss
+    row.take_capital_at_pct, row.max_hold_hours = take, hold
+    if body.paused is not None:
+        row.paused = body.paused
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    if leaders is not None:
+        row.leaders = leaders
+        await ensure_tracked(session, [ld["wallet"] for ld in leaders])
+    await session.commit()
+    return {"account": public(row, counts.get(row.name, 0))}

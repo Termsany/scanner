@@ -444,6 +444,8 @@ export interface LiveStatus {
 export interface LiveAccount {
   name: string;
   active: boolean;
+  paused?: boolean;
+  enabled?: boolean;
   pubkey: string | null;
   sol_balance: number | null;
   sol_balance_usd: number | null;
@@ -459,4 +461,34 @@ export interface LiveAccount {
   open: LivePositionOut[];
   closed: LivePositionOut[];
   failed: LivePositionOut[];
+}
+
+export interface LeaderCfg {
+  wallet: string;
+  label: string;
+  unconditional: boolean;
+  new_tokens_only: boolean;
+  size_usd: number | null;
+}
+
+export interface TradingAccountCfg {
+  name: string;
+  enabled: boolean;
+  paused: boolean;
+  key_source: "env" | "db";
+  pubkey: string | null;
+  size_usd: number;
+  max_open_usd: number;
+  max_daily_loss_usd: number;
+  take_capital_at_pct: number | null;
+  max_hold_hours: number | null;
+  leaders: LeaderCfg[];
+  open_positions: number;
+  updated_at: string | null;
+}
+
+export interface AccountsList {
+  accounts: TradingAccountCfg[];
+  can_store_keys: boolean;
+  defaults: { max_hold_hours: number; reload_seconds: number };
 }

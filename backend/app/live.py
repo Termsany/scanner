@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
@@ -104,6 +104,19 @@ def load_keypair(secret: str):
 
 
 @dataclass
+class Leader:
+    """A smart wallet an account copies, with its own options."""
+    wallet: str
+    label: str = ""
+    unconditional: bool = False      # no liquidity / chase / scanner checks
+    new_tokens_only: bool = False    # copy only tokens it did not hold before
+    size_usd: float | None = None    # entry size for this leader; None = the account's
+
+
+_FROM_SETTINGS = object()
+
+
+@dataclass
 class Account:
     """One trading wallet with its own budget. "main" uses the LIVE_* settings."""
     name: str
@@ -112,6 +125,11 @@ class Account:
     max_daily_loss_usd: float
     wallets: list[str]
     private_key: str | None = None
+    # Per-leader options. Empty (accounts from the environment): LIVE_UNCONDITIONAL_WALLETS etc. apply
+    leaders: dict[str, Leader] = field(default_factory=dict)
+    paused: bool = False                       # no new buys for this account; sells keep working
+    take_capital_at_pct: Any = _FROM_SETTINGS  # None = off
+    max_hold_hours: int | None = None          # None = LIVE_MAX_HOLD_HOURS
 
 
 def accounts_from_settings(s: Settings) -> list[Account]:
@@ -553,6 +571,27 @@ class CopyEngine:
         self._priced = 0.0                  # monotonic time of the last take-capital price check
         self._up_seen: dict[int, int] = {}  # position id -> checks in a row at or above the target
 
+    def update(self, account: Account) -> None:
+        """New settings from the /accounts page; takes effect on the next step."""
+        self.a = account
+        self.wallets = set(account.wallets)
+
+    def _free(self, wallet: str) -> bool:
+        ld = self.a.leaders.get(wallet)
+        return ld.unconditional if ld else wallet in self.s.live_unconditional_wallets
+
+    def _new_only(self, wallet: str) -> bool:
+        ld = self.a.leaders.get(wallet)
+        return ld.new_tokens_only if ld else wallet in self.s.live_new_tokens_only_wallets
+
+    def _size(self, wallet: str) -> float:
+        ld = self.a.leaders.get(wallet)
+        return ld.size_usd if ld and ld.size_usd else self.a.size_usd
+
+    def _take_capital_target(self) -> float | None:
+        t = self.a.take_capital_at_pct
+        return self.s.live_take_capital_at_pct if t is _FROM_SETTINGS else t
+
     def _tag(self) -> str:
         tag = "🟢 LIVE" if self.x.mode == "live" else "🧪 DRY-RUN"
         return tag if self.a.name == "main" else f"{tag} [{self.a.name}]"
@@ -588,7 +627,9 @@ class CopyEngine:
     async def _skip_reason(self, session: AsyncSession, t: WalletTrade) -> str | None:
         if await is_paused(session):
             return "paused (/live on to resume)"
-        if t.wallet in self.s.live_new_tokens_only_wallets:
+        if self.a.paused:
+            return f"account {self.a.name} paused"
+        if self._new_only(t.wallet):
             if t.remaining_amount is not None:
                 before = t.remaining_amount - t.amount          # leader's balance before this buy
                 if before > max(t.amount, 1.0) * 1e-6:
@@ -598,7 +639,8 @@ class CopyEngine:
         seen = utc(t.block_time) or utc(t.detected_at)
         if seen and (_now() - seen).total_seconds() > MAX_TRADE_AGE_SECONDS:
             return f"leader buy is {(_now() - seen).total_seconds() / 60:.0f} min old"
-        free = t.wallet in self.s.live_unconditional_wallets   # copy as-is: no liquidity / chase / scanner check
+        free = self._free(t.wallet)            # copy as-is: no liquidity / chase / scanner check
+        size = self._size(t.wallet)
         if not free and (t.liquidity_usd or 0) < self.s.live_min_liquidity_usd:
             return f"liquidity ${t.liquidity_usd or 0:,.0f} < ${self.s.live_min_liquidity_usd:,.0f}"
         exists = (await session.execute(select(LivePosition.id).where(
@@ -608,7 +650,7 @@ class CopyEngine:
             return "already holding"
         open_cost = (await session.execute(select(func.sum(LivePosition.cost_usd)).where(
             LivePosition.status == "open", *self._mine()))).scalar() or 0.0
-        if open_cost + self.a.size_usd > self.a.max_open_usd + 1e-6:
+        if open_cost + size > self.a.max_open_usd + 1e-6:
             return f"limit: ${open_cost:,.0f} already open (max ${self.a.max_open_usd:,.0f})"
         loss = await realized_24h(session, self.x.mode, self.a.name)
         if loss <= -self.a.max_daily_loss_usd:
@@ -619,7 +661,7 @@ class CopyEngine:
                 px = await self.x.sol_price()
             except Exception:
                 px = None
-            if px and bal - self.s.live_sol_reserve < self.a.size_usd / px:
+            if px and bal - self.s.live_sol_reserve < size / px:
                 return f"not enough SOL ({bal:.3f})"
         return None
 
@@ -631,7 +673,7 @@ class CopyEngine:
             if "already holding" not in why:
                 await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
             return
-        free = t.wallet in self.s.live_unconditional_wallets
+        free = self._free(t.wallet)
         if self.screener is not None and not free:
             res = await self.screener.check(t.token_address, t.wallet_label or t.wallet[:6])
             if not res.ok:
@@ -642,7 +684,7 @@ class CopyEngine:
         chase = self.s.live_max_chase_pct
         max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None and not free) else None
         try:
-            f = await self.x.buy(t.token_address, self.a.size_usd, max_price=max_price,
+            f = await self.x.buy(t.token_address, self._size(t.wallet), max_price=max_price,
                                  slippage_bps=self.s.live_slippage_bps_unconditional if free else None)
         except ChaseError as exc:
             over = (exc.pay / t.price_usd - 1) * 100
@@ -848,7 +890,7 @@ class CopyEngine:
     async def _take_capital(self, session: AsyncSession) -> None:
         """Position up LIVE_TAKE_CAPITAL_AT_PCT (value now + already sold vs cost): sell tokens worth what is still
         missing to get the cost back, once per position. The rest keeps following the leader's sells."""
-        target = self.s.live_take_capital_at_pct
+        target = self._take_capital_target()
         if target is None or not hasattr(self.x, "token_prices"):
             return
         if time.monotonic() - self._priced < self.s.live_take_capital_check_seconds:
@@ -903,7 +945,7 @@ class CopyEngine:
                 await self._sell(session, pos, float(last.get("share", 1.0)), last.get("reason", "retry"))
                 await session.commit()
                 continue
-            if _now() - utc(pos.opened_at) >= timedelta(hours=self.s.live_max_hold_hours) and not failed:
+            if _now() - utc(pos.opened_at) >= timedelta(hours=self.a.max_hold_hours or self.s.live_max_hold_hours) and not failed:
                 await self._sell(session, pos, 1.0, "max_hold")
                 await session.commit()
 
@@ -916,15 +958,20 @@ async def live_status(session: AsyncSession, settings: Settings | None = None) -
     """Status of every trading account. Pausing applies to all accounts."""
     s = settings or get_settings()
     mode = s.live_mode if s.live_mode in ("dry", "live") else "off"
+    from app.accounts import rows as account_rows, to_account
+
     accounts = []
-    for a in accounts_from_settings(s):
+    for r in await account_rows(session, s):
+        a = to_account(r, s, None)
         rows = (await session.execute(select(LivePosition).where(LivePosition.mode == mode, _acct(a.name))
                                       .order_by(LivePosition.opened_at.desc()).limit(200))).scalars().all()
         closed = [r for r in rows if r.status == "closed"]
         opened = [r for r in rows if r.status == "open"]
         accounts.append({
-            "name": a.name, "active": mode == "dry" or bool(a.private_key),
-            "pubkey": await _get(session, _key(PUBKEY, a.name)), "wallets": a.wallets,
+            "name": a.name, "active": r.enabled and (mode == "dry" or bool(r.key_enc) or (r.key_source == "env" and any(
+                e.name == a.name and e.private_key for e in accounts_from_settings(s)))),
+            "paused": a.paused, "enabled": r.enabled,
+            "pubkey": await _get(session, _key(PUBKEY, a.name)) or r.pubkey, "wallets": a.wallets,
             "size_usd": a.size_usd, "max_open_usd": a.max_open_usd, "max_daily_loss_usd": a.max_daily_loss_usd,
             "open": opened, "closed": closed, "failed": [r for r in rows if r.status == "failed"],
             "open_cost_usd": sum(r.cost_usd for r in opened),
@@ -950,47 +997,97 @@ class LiveTrader:
             log.warning("live: telegram notify failed", exc_info=True)
 
     async def run_forever(self) -> None:
+        """Run one engine per enabled account from the trading_accounts table and pick up edits made on the
+        /accounts page every LIVE_ACCOUNTS_RELOAD_SECONDS, without a restart."""
+        from app.accounts import ensure_tracked, load_accounts
         from app.db import SessionLocal
 
         mode = self.s.live_mode
         if mode not in ("dry", "live"):
             log.info("Live copy trading off (LIVE_MODE=%s)", mode)
             return
-        loops = []
         self._screener = None
         if self.s.live_screen_enabled:
             from app.screen import TokenScreener
 
             self._screener = TokenScreener(self.s)
-        for a in accounts_from_settings(self.s):
-            env = "LIVE_PRIVATE_KEY" if a.name == "main" else f"LIVE_PRIVATE_KEY_{a.name.upper()}"
+        running: dict[str, tuple[asyncio.Task, str | None, CopyEngine]] = {}
+        said: set[str] = set()                 # idle notices already sent
+        fast: tuple[asyncio.Task, frozenset[str]] | None = None
+        try:
+            while True:
+                try:
+                    async with SessionLocal() as session:
+                        accounts = await load_accounts(session, self.s)
+                        await ensure_tracked(session, sorted({w for a in accounts for w in a.wallets}))
+                        await session.commit()
+                except Exception:
+                    log.exception("live: loading accounts failed")
+                    accounts = None
+                if accounts is not None:
+                    fast = await self._sync(accounts, mode, running, said, fast)
+                await asyncio.sleep(self.s.live_accounts_reload_seconds)
+        finally:
+            for task, _, _ in running.values():
+                task.cancel()
+            if fast:
+                fast[0].cancel()
+
+    async def _sync(self, accounts: list[Account], mode: str, running: dict, said: set, fast):
+        want = {a.name: a for a in accounts}
+        for name in list(running):
+            task, key, eng = running[name]
+            a = want.get(name)
+            if a is None or not a.wallets or a.private_key != key or task.done():
+                task.cancel()
+                running.pop(name)
+                if a is None:
+                    log.info("live[%s]: account disabled, engine stopped", name)
+                    await self._telegram(f"⏹ Copy account [{name}] stopped (disabled on the accounts page).")
+            else:
+                eng.update(a)
+        for name, a in want.items():
+            if name in running:
+                continue
+            env = "LIVE_PRIVATE_KEY" if name == "main" else f"LIVE_PRIVATE_KEY_{name.upper()}"
             if not a.wallets:
-                log.warning("live[%s]: no wallets to copy", a.name)
+                if name not in said:
+                    log.warning("live[%s]: no wallets to copy", name)
+                    said.add(name)
                 continue
             if mode == "live" and not a.private_key:
-                log.warning("live[%s]: %s is not set, account idle", a.name, env)
-                await self._telegram(f"⏸ Copy account [{a.name}] is idle: add {env} on the server to start it "
-                                     f"(${a.size_usd:.0f} per buy, max ${a.max_open_usd:.0f} open).")
+                if name not in said:
+                    log.warning("live[%s]: no private key, account idle", name)
+                    await self._telegram(f"⏸ Copy account [{name}] is idle: no private key ({env} on the server, "
+                                         f"or the account's stored key can't be decrypted).")
+                    said.add(name)
                 continue
             try:
                 x = JupiterExecutor(self.s, live=(mode == "live"), private_key=a.private_key)
             except Exception as exc:
-                log.error("live[%s]: bad %s (%s)", a.name, env, type(exc).__name__)
-                await self._telegram(f"❌ Copy account [{a.name}]: {env} is not a valid Solana key.")
+                if name not in said:
+                    log.error("live[%s]: bad private key (%s)", name, type(exc).__name__)
+                    await self._telegram(f"❌ Copy account [{name}]: the private key is not a valid Solana key.")
+                    said.add(name)
                 continue
-            loops.append(self._run_account(a, x, mode))
-        if loops:
-            if self.s.live_fast_detection and self.s.live_rpc_url:
+            said.discard(name)
+            eng = CopyEngine(x, self.s, notify=self._telegram, account=a, screener=self._screener)
+            running[name] = (asyncio.create_task(self._run_account(a, x, mode, eng)), a.private_key, eng)
+        wallets = frozenset(w for name in running for w in want[name].wallets)
+        if self.s.live_fast_detection and self.s.live_rpc_url and (fast is None or fast[1] != wallets
+                                                                   or fast[0].done()):
+            if fast:
+                fast[0].cancel()
+            fast = None
+            if wallets:
                 from app.fast_watch import FastWatcher
 
-                wallets = sorted({w for a in accounts_from_settings(self.s) for w in a.wallets})
-                loops.append(FastWatcher(wallets, self.s).run_forever())
-            await asyncio.gather(*loops)
+                fast = (asyncio.create_task(FastWatcher(sorted(wallets), self.s).run_forever()), wallets)
+        return fast
 
-    async def _run_account(self, a: Account, x: JupiterExecutor, mode: str) -> None:
+    async def _run_account(self, a: Account, x: JupiterExecutor, mode: str, engine: CopyEngine) -> None:
         from app.db import SessionLocal
 
-        engine = CopyEngine(x, self.s, notify=self._telegram, account=a, screener=self._screener)
         async with SessionLocal() as session:
             if x.pubkey:
                 await _put(session, _key(PUBKEY, a.name), x.pubkey)

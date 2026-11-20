@@ -925,3 +925,139 @@ def test_take_capital_off_when_disabled():
         await eng.step(sess); await eng.step(sess)
     _db(body)
     assert [c for c in x.calls if c[0] == "sell"] == []
+
+
+# ---- accounts from the database (/accounts page) ---------------------------------
+W2 = "BCyNgSB1njYWrjHubBc56UXqDqzc4ixk8UHPhGbTQ5aQ"
+
+
+def test_seed_copies_environment_accounts_with_leader_flags():
+    from app.accounts import load_accounts, rows
+
+    s = _s(live_unconditional_wallets=[LEADER], live_new_tokens_only_wallets=[W2],
+           live_accounts=[{"name": "big", "size_usd": 50, "max_open_usd": 500, "wallets": [LEADER]}],
+           live_take_capital_at_pct=100.0)
+    s.live_wallets = [LEADER, W2]
+
+    async def body(sess):
+        rs = await rows(sess, s)
+        await rows(sess, s)                                  # seeding happens once
+        accts = await load_accounts(sess, s)
+        return rs, accts
+    rs, accts = _db(body)
+    assert [r.name for r in rs] == ["main", "big"] and all(r.key_source == "env" for r in rs)
+    main = {d["wallet"]: d for d in rs[0].leaders}
+    assert main[LEADER]["unconditional"] and not main[LEADER]["new_tokens_only"]
+    assert main[W2]["new_tokens_only"] and not main[W2]["unconditional"]
+    assert accts[1].size_usd == 50 and accts[1].wallets == [LEADER] and accts[1].take_capital_at_pct == 100.0
+
+
+def test_db_key_roundtrip_and_wrong_key():
+    import pytest
+    from cryptography.fernet import Fernet
+
+    from app.accounts import AccountError, decrypt_key, encrypt_key, new_wallet
+
+    s = _s(live_key_encryption_key=Fernet.generate_key().decode())
+    pub, secret = new_wallet()
+    assert str(load_keypair(secret).pubkey()) == pub
+    tok = encrypt_key(s, secret)
+    assert secret not in tok and decrypt_key(s, tok) == secret
+    with pytest.raises(AccountError):
+        encrypt_key(_s(), secret)                           # no encryption key on the server
+
+
+def _engine_with(account_kw, steps):
+    from app.live import Account, Leader
+
+    x = FakeExec()
+    leaders = account_kw.pop("leaders")
+    acct = Account("main", 30, 100, 50, list(leaders), leaders=leaders, **account_kw)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), account=acct)
+        await eng.step(sess)
+        for batch in steps:
+            sess.add_all(batch)
+            await sess.commit()
+            await eng.step(sess)
+        return (await sess.execute(select(LivePosition).order_by(LivePosition.id))).scalars().all(), eng
+    return _db(body), x
+
+
+def test_per_leader_entry_size_and_unconditional():
+    from app.live import Leader
+
+    (pos, _), x = _engine_with({"leaders": {LEADER: Leader(LEADER, size_usd=10),
+                                            W2: Leader(W2, unconditional=True)}},
+                               [[_trade(mint="A")], [_trade(wallet=W2, mint="B", liq=100)]])
+    assert [c for c in x.calls if c[0] == "buy"] == [("buy", "A", 10), ("buy", "B", 30)]   # B: low liq but free
+
+
+def test_paused_account_skips_buys_but_still_sells():
+    from app.live import Leader
+
+    (pos, eng), x = _engine_with({"leaders": {LEADER: Leader(LEADER)}}, [[_trade(mint="A")]])
+    assert x.calls == [("buy", "A", 30)]
+
+    from app.live import Account
+    x2 = FakeExec()
+    acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER)})
+
+    async def body(sess):
+        eng = CopyEngine(x2, _s(), account=acct)
+        await eng.step(sess)
+        sess.add(_trade(mint="A")); await sess.commit(); await eng.step(sess)
+        eng.update(Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER)}, paused=True))
+        sess.add(_trade(mint="B")); await sess.commit(); await eng.step(sess)
+        sess.add(_trade(side="sell", mint="A", pct_sold=100, remaining=0)); await sess.commit(); await eng.step(sess)
+    _db(body)
+    assert x2.calls == [("buy", "A", 30), ("sell", "A", 1_000_000)]
+
+
+def test_removed_leader_is_no_longer_copied():
+    from app.live import Account, Leader
+
+    x = FakeExec()
+    acct = Account("main", 30, 100, 50, [LEADER, W2], leaders={LEADER: Leader(LEADER), W2: Leader(W2)})
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), account=acct)
+        await eng.step(sess)
+        eng.update(Account("main", 30, 100, 50, [W2], leaders={W2: Leader(W2)}))
+        sess.add_all([_trade(mint="A"), _trade(wallet=W2, mint="B")]); await sess.commit(); await eng.step(sess)
+    _db(body)
+    assert x.calls == [("buy", "B", 30)]
+
+
+def test_supervisor_starts_updates_and_stops_engines_without_restart():
+    from app.live import Account, Leader, LiveTrader
+
+    t = LiveTrader(_s(live_fast_detection=False))
+    t._screener = None
+    started, notes = [], []
+
+    async def fake_run(a, x, mode, eng):
+        started.append(a.name)
+        await asyncio.sleep(3600)
+
+    async def tg(text):
+        notes.append(text)
+    t._run_account, t._telegram = fake_run, tg
+
+    def acct(name, size=30, wallets=(LEADER,)):
+        return Account(name, size, 100, 50, list(wallets), leaders={w: Leader(w) for w in wallets})
+
+    async def go():
+        running, said = {}, set()
+        await t._sync([acct("main"), acct("big", wallets=())], "dry", running, said, None)
+        await asyncio.sleep(0)
+        assert sorted(running) == ["main"] and started == ["main"]          # big has no leaders yet
+        await t._sync([acct("main", size=12), acct("big")], "dry", running, said, None)
+        await asyncio.sleep(0)
+        assert running["main"][2].a.size_usd == 12 and started == ["main", "big"]   # edit applied in place
+        await t._sync([acct("big")], "dry", running, said, None)
+        assert sorted(running) == ["big"] and any("[main] stopped" in n for n in notes)
+        for task, _, _ in running.values():
+            task.cancel()
+    asyncio.run(go())

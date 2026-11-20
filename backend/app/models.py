@@ -16,6 +16,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -460,3 +461,30 @@ class ScannerRun(Base):
     signals_emitted: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[list[Any]] = mapped_column(JSON, default=list)
     ok: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class TradingAccount(Base):
+    """One copy-trading wallet with its own budget and leaders, edited from the /accounts page.
+
+    The private key is either in the server environment (key_source "env": LIVE_PRIVATE_KEY for main,
+    LIVE_PRIVATE_KEY_<NAME> otherwise) or stored here encrypted with LIVE_KEY_ENCRYPTION_KEY (key_source "db").
+    """
+
+    __tablename__ = "trading_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(32), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    paused: Mapped[bool] = mapped_column(Boolean, default=False)        # no new buys; sells keep working
+    key_source: Mapped[str] = mapped_column(String(8), default="env")   # env | db
+    key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pubkey: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    size_usd: Mapped[float] = mapped_column(Float)
+    max_open_usd: Mapped[float] = mapped_column(Float)
+    max_daily_loss_usd: Mapped[float] = mapped_column(Float)
+    take_capital_at_pct: Mapped[float | None] = mapped_column(Float, nullable=True)   # None = off
+    max_hold_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)        # None = LIVE_MAX_HOLD_HOURS
+    # [{"wallet", "label", "unconditional", "new_tokens_only", "size_usd"}]
+    leaders: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
