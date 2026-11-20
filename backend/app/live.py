@@ -709,6 +709,11 @@ class CopyEngine:
         ld = self.a.leaders.get(wallet)
         return ld.size_usd if ld and ld.size_usd else self.a.size_usd
 
+    @staticmethod
+    def _capital_back(pos: LivePosition) -> bool:
+        """The position already returned its cost (take-capital, trims or hand sales)."""
+        return (pos.proceeds_usd or 0) >= (pos.cost_usd or 0) * 0.98 > 0
+
     def _hold(self, mint: str) -> bool:
         """Hold-only token: the bot never sells it by itself."""
         return mint in self.s.live_hold_mints
@@ -879,8 +884,17 @@ class CopyEngine:
             return
         if pos is not None:
             pos.leader_trade_id = t.id
-            await self._sell(session, pos, share, "leader_sold" if share >= 0.99 else "leader_trim")
-            await session.commit()
+            if share < 0.99 and self.s.live_bag_waits_for_full_exit and self._capital_back(pos):
+                # the capital is already out: the profit bag ignores partial sells and leaves only when the
+                # leader sells everything
+                await session.commit()
+                sym = pos.symbol or pos.token_address[:6]
+                log.info("live: %s capital already out: ignoring leader trim %.0f%%", sym, share * 100)
+                await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of ${sym}; "
+                                  "your capital is already out, so the rest waits for its full exit")
+            else:
+                await self._sell(session, pos, share, "leader_sold" if share >= 0.99 else "leader_trim")
+                await session.commit()
         if self.s.live_sell_manual_with_leader and self.x.mode == "live":
             await self._sell_manual(session, t, share)
 

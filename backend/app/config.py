@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     # Once a position is up this much (100 = 2x), sell just enough to get its cost back; the rest (pure profit)
     # stays until the leader sells. None = off
     live_take_capital_at_pct: float | None = 100.0
+    live_bag_waits_for_full_exit: bool = True    # once the capital is back, leader trims are ignored: the rest
+                                                 # is sold only when the leader sells everything
     live_book_hand_buys: bool = True             # buys made by hand of a token the bot holds join its position
     live_adopt_hand_buys: bool = True            # tokens bought by hand that the bot doesn't hold: tracked as a
                                                  # "manual" position (capital out at the take-capital target)

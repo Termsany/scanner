@@ -1323,3 +1323,27 @@ def test_own_hand_bought_token_is_adopted_and_capital_comes_out_at_2x():
     assert p.status == "open"                                  # 3h old, max hold 1h: never sold for max hold
     assert [c for c in x.calls if c[0] == "sell"] == [("sell", "H1", 500_000)]
     assert any("bought by hand" in n for n in notes)
+
+
+def test_after_capital_is_out_the_bag_ignores_trims_and_leaves_on_full_exit():
+    x = PricedExec()
+    pos, x, notes = _run_priced([
+        [_trade()],                                          # $30 for 1M
+        lambda: x.price.update(M1=60.0), [],                 # 2x twice: capital out (sell 500k)
+        [_trade(side="sell", pct_sold=30, remaining=1)],     # leader trims 30%: ignored
+        [_trade(side="sell", pct_sold=50, remaining=1)],     # trims again: ignored
+        [_trade(side="sell", pct_sold=100, remaining=0)],    # sells all: the bag goes
+    ], x)
+    sells = [c for c in x.calls if c[0] == "sell"]
+    assert sells == [("sell", "M1", 500_000), ("sell", "M1", 500_000)]
+    assert pos[0].status == "closed" and pos[0].exit_reason == "leader_sold"
+    assert any("waits for its full exit" in n for n in notes)
+
+
+def test_before_capital_is_out_trims_are_still_mirrored():
+    x = PricedExec()
+    pos, x, _ = _run_priced([
+        [_trade()],
+        [_trade(side="sell", pct_sold=30, remaining=1)],     # capital not back yet: copy the trim
+    ], x)
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 300_000)]
