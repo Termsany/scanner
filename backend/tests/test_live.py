@@ -1168,7 +1168,7 @@ def test_user_notes_in_arabic_by_default():
 
 
 # ---- hold-only tokens -------------------------------------------------------------------
-HOLD = "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo"
+HOLD = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs"     # ETH (hold-only; TTWO is now blocked from buys)
 
 
 def test_hold_only_token_is_bought_but_never_sold_by_the_bot():
@@ -1574,3 +1574,19 @@ def test_rule_is_the_default():
 
     s = Settings()
     assert (s.live_trim_cap_pct, s.live_copy_trims, s.live_follow_after_trim) == (50.0, False, True)
+
+
+def test_blocked_tokens_are_never_bought():
+    s = _s(live_blocked_mints="B, C")
+    x = FakeExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, s)
+        await eng.step(sess)
+        sess.add_all([_trade(mint="A"), _trade(mint="B")])
+        await sess.commit()
+        await eng.step(sess)
+        return [c[1] for c in x.calls if c[0] == "buy"]
+
+    assert _db(body) == ["A"]
+    assert {"pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn"} <= Settings().blocked_mints()

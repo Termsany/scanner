@@ -819,6 +819,8 @@ class CopyEngine:
         ld = self.a.leaders.get(t.wallet)
         if ld is not None and not ld.enabled:
             return "leader off on this account"
+        if t.token_address in self.s.blocked_mints():
+            return "token blocked (never buy)"
         if self._new_only(t.wallet):
             if t.remaining_amount is not None:
                 before = t.remaining_amount - t.amount          # leader's balance before this buy
@@ -860,7 +862,7 @@ class CopyEngine:
         why = await self._skip_reason(session, t)
         if why:
             log.info("live: skip buy %s (%s)", sym, why)
-            quiet = "already holding" in why or why.startswith("leader off")
+            quiet = "already holding" in why or why.startswith(("leader off", "token blocked"))
             if why.startswith("not enough SOL") or why.startswith("account ") or why.startswith("limit:"):
                 # an unfunded, paused or full account would repeat this on every leader buy: say it every 6 h
                 key = why.split(" ")[0]
