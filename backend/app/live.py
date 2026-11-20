@@ -929,7 +929,19 @@ class CopyEngine:
             return
         if pos is not None:
             pos.leader_trade_id = t.id
-            if share < 0.99 and self.s.live_bag_waits_for_full_exit and self._capital_back(pos):
+            if share < 0.99 and self.s.live_follow_after_trim:
+                sym = pos.symbol or pos.token_address[:6]
+                if self._took_half(pos) and not self._following(pos):
+                    # 50% already sold at 2x: the rest leaves only on the leader's full exit
+                    await session.commit()
+                    log.info("live: %s 50%% already out at 2x: ignoring leader trim %.0f%%", sym, share * 100)
+                    await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
+                                      f"${sym}; half was already sold at 2x, the rest waits for its full exit")
+                else:
+                    # the leader trims before 2x: copy it, and from now on follow every sell of this token
+                    await self._sell(session, pos, share, "leader_trim")
+                    await session.commit()
+            elif share < 0.99 and self.s.live_bag_waits_for_full_exit and self._capital_back(pos):
                 # the capital is already out: the profit bag ignores partial sells and leaves only when the
                 # leader sells everything
                 await session.commit()
@@ -951,6 +963,15 @@ class CopyEngine:
                 await session.commit()
         if self.s.live_sell_manual_with_leader and self.x.mode == "live":
             await self._sell_manual(session, t, share)
+
+    @staticmethod
+    def _following(pos: LivePosition) -> bool:
+        """The leader trimmed this token and we copied it: the position follows its sells, no 50% at 2x."""
+        return any(f.get("reason") == "leader_trim" for f in (pos.fills or []))
+
+    @staticmethod
+    def _took_half(pos: LivePosition) -> bool:
+        return any(f.get("reason") == "take_capital" for f in (pos.fills or []))
 
     def _cap_room(self, pos: LivePosition) -> int:
         """Tokens that may still be sold before LIVE_TRIM_CAP_PCT of the position is sold in all."""
@@ -1288,6 +1309,7 @@ class CopyEngine:
         todo = [p for p in opened
                 if not self._hold(p.token_address)
                 and not taken(p)
+                and not (self.s.live_follow_after_trim and self._following(p))   # following the leader instead
                 # with the cap: until that share of the coins is sold; without: until the cost is back
                 and (self._cap_room(p) > int(p.tokens_bought_raw or 0) // 100 if capped
                      else (p.proceeds_usd or 0) < p.cost_usd)

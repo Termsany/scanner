@@ -67,6 +67,7 @@ def _db(body):
 def _s(**kw):
     kw.setdefault("live_trim_cap_pct", None)      # most tests check plain copying; the cap has its own test
     kw.setdefault("live_copy_trims", True)
+    kw.setdefault("live_follow_after_trim", False)
     return Settings(live_mode="live", live_wallets=[LEADER], live_size_usd=30, live_max_open_usd=100,
                     live_min_liquidity_usd=10_000, **kw)
 
@@ -1536,3 +1537,40 @@ def test_users_rule_is_the_default():
 
     s = Settings()
     assert s.live_trim_cap_pct == 50.0 and s.live_copy_trims is False
+
+
+
+RULE = dict(live_trim_cap_pct=50.0, live_copy_trims=False, live_follow_after_trim=True)
+
+
+def test_rule_no_partial_sell_first_half_at_2x_then_full_exit():
+    x = PricedExec()
+    pos, x, notes = _run_priced([
+        [_trade()],                                          # 1M for $30
+        lambda: x.price.update(M1=60.0), [],                 # 2x: sell 500k
+        [_trade(side="sell", pct_sold=30, remaining=1)],     # after the half: ignored
+        [_trade(side="sell", pct_sold=100, remaining=0)],    # full exit: the other 500k
+    ], x, **RULE)
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 500_000), ("sell", "M1", 500_000)]
+    assert any("half was already sold at 2x" in n for n in notes)
+
+
+def test_rule_partial_sell_first_then_follow_the_leader_all_the_way():
+    x = PricedExec()
+    pos, x, _ = _run_priced([
+        [_trade()],                                          # 1M
+        [_trade(side="sell", pct_sold=30, remaining=1)],     # leader trims first: copy 300k -> following
+        lambda: x.price.update(M1=200.0), [], [],            # way past 2x: no 50% sale while following
+        [_trade(side="sell", pct_sold=50, remaining=1)],     # copy: 50% of 700k = 350k
+        [_trade(side="sell", pct_sold=100, remaining=0)],    # full exit: the last 350k
+    ], x, **RULE)
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 300_000), ("sell", "M1", 350_000),
+                                                       ("sell", "M1", 350_000)]
+    assert pos[0].status == "closed" and pos[0].exit_reason == "leader_sold"
+
+
+def test_rule_is_the_default():
+    from app.config import Settings
+
+    s = Settings()
+    assert (s.live_trim_cap_pct, s.live_copy_trims, s.live_follow_after_trim) == (50.0, False, True)

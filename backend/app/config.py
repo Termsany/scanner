@@ -125,6 +125,9 @@ class Settings(BaseSettings):
                                                  # (the user's rule: 50% at 2x); None = sell what repays the cost
     live_copy_trims: bool = False                # copy the leader's partial sells (up to live_trim_cap_pct)?
                                                  # off: only its full exit sells the rest
+    live_follow_after_trim: bool = True          # the user's rule: a partial sell by the leader before 2x is
+                                                 # copied and the position then follows all its sells (no 50% at
+                                                 # 2x); with no partial sell first: 50% at 2x, rest on full exit
     live_bag_waits_for_full_exit: bool = True    # once the capital is back, leader trims are ignored: the rest
                                                  # is sold only when the leader sells everything
     live_book_hand_buys: bool = True             # buys made by hand of a token the bot holds join its position
