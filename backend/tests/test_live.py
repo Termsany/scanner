@@ -533,6 +533,8 @@ def test_dropped_buy_is_rebroadcast_then_retried_with_fresh_quote(monkeypatch):
             return httpx.Response(200, json={"result": {"value": [None]}})
         if m == "getBlockHeight":
             return httpx.Response(200, json={"result": 200})          # past lastValidBlockHeight=100 -> expired
+        if m == "getTokenSupply":
+            return httpx.Response(200, json={"result": {"value": {"decimals": 0, "amount": "1"}}})
         if m == "getBalance":
             return httpx.Response(200, json={"result": {"value": 2_000_000_000 - state["tokens"] * 10}})
         if m == "getTokenAccountsByOwner":
@@ -547,7 +549,7 @@ def test_dropped_buy_is_rebroadcast_then_retried_with_fresh_quote(monkeypatch):
 
     with respx.mock:
         respx.post("https://rpc.test/").mock(side_effect=rpc)
-        respx.get(url__regex=r"https://jup\.test/price/v3.*").mock(return_value=httpx.Response(200, json={
+        price_route = respx.get(url__regex=r"https://jup\.test/price/v3.*").mock(return_value=httpx.Response(200, json={
             SOL_MINT: {"usdPrice": 100.0, "decimals": 9}, MINT: {"usdPrice": 0.004, "decimals": 0}}))
         respx.get(url__regex=r"https://jup\.test/swap/v1/quote.*").mock(side_effect=quote)
         respx.post("https://jup.test/swap/v1/swap").mock(return_value=httpx.Response(200, json={
@@ -565,6 +567,7 @@ def test_dropped_buy_is_rebroadcast_then_retried_with_fresh_quote(monkeypatch):
 
     assert f.signature == "SIG2" and f.tokens_raw == 5000
     assert state["quotes"] == 2                       # fresh quote for the retry
+    assert price_route.call_count == 1                # SOL's price once; decimals from the RPC, not Jupiter
     assert state["sends"] > 3                         # first attempt was re-broadcast before it expired
 
 

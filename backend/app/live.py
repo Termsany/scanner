@@ -243,7 +243,8 @@ class JupiterGate:
 
 JUPITER = JupiterGate()
 _sol_px: tuple[float, float] = (0.0, 0.0)   # (monotonic time, USD per SOL), shared by all accounts
-SOL_PRICE_TTL = 20.0
+SOL_PRICE_TTL = 60.0        # SOL's price only sizes a buy: a minute old is fine and spares a Jupiter call
+_DECIMALS: dict[str, int] = {}   # mint -> decimals (never change), read from the RPC, not Jupiter
 STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,   # USDC
            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCeUBenwNYB": 6}   # USDT
 HISTORY_PAGES = 10          # getSignaturesForAddress pages (1000 each) walked back at most
@@ -286,6 +287,13 @@ class JupiterExecutor:
             global _sol_px
             _sol_px = (time.monotonic(), float(sol))
         return data
+
+    async def decimals(self, mint: str) -> int:
+        """Token decimals from the RPC (getTokenSupply), cached forever: keeps the Jupiter queue for swaps."""
+        if mint not in _DECIMALS:
+            res = await self._rpc("getTokenSupply", [mint])
+            _DECIMALS[mint] = int(((res or {}).get("value") or {})["decimals"])
+        return _DECIMALS[mint]
 
     async def sol_price(self) -> float:
         if time.monotonic() - _sol_px[0] < SOL_PRICE_TTL:
@@ -542,27 +550,40 @@ class JupiterExecutor:
 
     async def _buy_once(self, mint: str, usd: float, max_price: float | None = None,
                         bps: int | None = None) -> Fill:
-        decimals = None
-        if max_price:   # one price call gives SOL's price and the token's decimals
-            d = ((await self._prices([SOL_MINT, mint])).get(mint) or {}).get("decimals")
-            if d is None:
-                raise SwapError("token decimals unknown")
-            decimals = int(d)
-        px = await self.sol_price()
-        lamports = int(usd / px * LAMPORTS)
-        q = await self.quote(SOL_MINT, mint, lamports, bps)
-        if decimals is not None:
-            # price we would actually pay per token, from the live quote (includes price impact)
-            pay = usd / (int(q["outAmount"]) / 10 ** decimals)
-            if pay > max_price:
-                raise ChaseError(pay, max_price)
-        if self.mode == "dry":
-            self._dry_n += 1
-            return Fill(f"dry-{self._dry_n}", lamports / LAMPORTS, int(q["outAmount"]), px)
-        tok0, sol0 = await self.token_balance(mint), await self.sol_balance()
+        # Speed: the wallet's balances and the token's decimals are read from the RPC while Jupiter quotes;
+        # only the quote and the swap go through the (shared, spaced) Jupiter queue.
+        live = self.mode != "dry"
+        before = asyncio.ensure_future(asyncio.gather(self.token_balance(mint), self.sol_balance())) if live else None
+        dec = asyncio.ensure_future(self.decimals(mint)) if max_price else None
+        try:
+            px = await self.sol_price()
+            lamports = int(usd / px * LAMPORTS)
+            q = await self.quote(SOL_MINT, mint, lamports, bps)
+            if dec is not None:
+                try:
+                    decimals = await dec
+                except Exception:
+                    raise SwapError("token decimals unknown") from None
+                # price we would actually pay per token, from the live quote (includes price impact)
+                pay = usd / (int(q["outAmount"]) / 10 ** decimals)
+                if pay > max_price:
+                    raise ChaseError(pay, max_price)
+            if not live:
+                self._dry_n += 1
+                return Fill(f"dry-{self._dry_n}", lamports / LAMPORTS, int(q["outAmount"]), px)
+            tok0, sol0 = await before
+        finally:
+            for t in (before, dec):
+                if t is not None and not t.done():
+                    t.cancel()
         sig, ok = await self._send(q)
-        await asyncio.sleep(1)
-        got, sol1 = await self.token_balance(mint) - tok0, await self.sol_balance()
+        got = 0
+        for _ in range(8):            # the RPC shows the new balance a moment after confirmation
+            await asyncio.sleep(0.4)
+            got = await self.token_balance(mint) - tok0
+            if got > 0:
+                break
+        sol1 = await self.sol_balance()
         if got <= 0:
             raise SwapError(f"buy {sig} {'not confirmed' if not ok else 'returned no tokens'}")
         return Fill(sig, max(sol0 - sol1, 0.0), got, px)
