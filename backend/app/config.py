@@ -70,7 +70,12 @@ class Settings(BaseSettings):
 
     # Paper trading (simulation only, no real money)
     paper_enabled: bool = True
-    paper_interval_seconds: int = 60
+    paper_interval_seconds: int = 60            # signals and anything not handled faster below
+    # Closer to live (2026-11-21): wallet buys are entered a few seconds after the trade at the market price then
+    # (Jupiter, never below the wallet's own price), and open positions are re-priced every few seconds.
+    paper_entry_seconds: float = 3.0
+    paper_exit_seconds: float = 10.0
+    paper_live_prices: bool = True
     paper_size_usd: float = 100.0
     paper_slippage_pct: float = 1.5             # charged on entry AND exit (pump.fun fee + slippage)
     paper_no_price_minutes: int = 60            # no market price this long: close at last known price

@@ -243,17 +243,29 @@ class JupiterGate:
         self.interval, self.retries = interval, retries
         self._lock = asyncio.Lock()
         self._last = 0.0
+        self._waiting = 0           # calls queued for a slot right now
 
     async def _slot(self) -> None:
         t0 = time.monotonic()
-        async with self._lock:
+        self._waiting += 1
+        try:
+            await self._lock.acquire()
+        finally:
+            self._waiting -= 1
+        try:
             wait = self._last + self.interval - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last = time.monotonic()
+        finally:
+            self._lock.release()
         _took("jup_queue", time.monotonic() - t0)     # waiting for our turn in the shared Jupiter gate
 
-    async def request(self, http: httpx.AsyncClient, method: str, url: str, **kw) -> httpx.Response:
+    async def request(self, http: httpx.AsyncClient, method: str, url: str, background: bool = False,
+                      **kw) -> httpx.Response | None:
+        """background: only if nobody else is queued (paper prices never delay a trade); None = skipped."""
+        if background and (self._waiting or self._lock.locked()):
+            return None
         r: httpx.Response | None = None
         for attempt in range(self.retries + 1):
             await self._slot()

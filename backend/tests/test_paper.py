@@ -219,3 +219,44 @@ def test_dulx_paper_size_filter_and_live_exit_rule():
         return True
 
     assert _db(body)
+
+
+def test_entries_use_the_market_price_now_and_never_below_the_wallet():
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)
+        await sess.commit()
+        sess.add(_trade(1, LEADER, price=1.0))
+        sess.add(_trade(2, OTHER, price=1.0, mint="Cheap111"))
+        await sess.commit()
+        # a few seconds later: MINT already ran +40%, Cheap111 dipped below the wallet's price
+        await process_entries(sess, s, prices=_prices({MINT: 1.4, "Cheap111": 0.8}))
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy == "wallet_follow"))).scalars().all()
+        return {r.token_address: r.entry_price for r in rows}
+
+    got = _db(body)
+    assert got[MINT] == 1.4 and got["Cheap111"] == 1.0
+
+
+def test_follow_sees_a_leader_sell_made_before_the_paper_entry():
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)
+        await sess.commit()
+        sess.add(_trade(1, LEADER, price=1.0))
+        await sess.commit()
+        sess.add(_trade(2, LEADER, side="sell", price=1.1, pct_sold=100.0, remaining=0))   # sold right away
+        await sess.commit()
+        await process_entries(sess, s)            # the paper engine only now opens the buy
+        await sess.commit()
+        await process_exits(sess, _prices({MINT: 3.0}), s)
+        await sess.commit()
+        p = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy == "wallet_follow"))).scalars().one()
+        return p
+
+    p = _db(body)
+    assert p.status == "closed" and p.exit_reason == "leader_sold"     # not a +200% take profit
+    assert -4 < p.pnl_pct < 0                                          # in and straight out: fees only

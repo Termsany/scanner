@@ -151,7 +151,10 @@ def _open(session: AsyncSession, keys: set, strategy: Strategy, *, chain: Chain,
     return pos
 
 
-async def process_entries(session: AsyncSession, s: Settings | None = None) -> int:
+async def process_entries(session: AsyncSession, s: Settings | None = None,
+                          prices: PriceFetcher | None = None) -> int:
+    """`prices`: the market price when this runs (a few seconds after the trade, like the live bot), so a wallet
+    buy is entered where we could really buy, not at the wallet's own price."""
     s = s or get_settings()
     opened = 0
     keys = await _open_keys(session)
@@ -165,18 +168,35 @@ async def process_entries(session: AsyncSession, s: Settings | None = None) -> i
         trades = (await session.execute(
             select(WalletTrade).where(WalletTrade.id > since).order_by(WalletTrade.id)
         )).scalars().all()
+        now_px: dict[tuple[Chain, str], float] = {}
+        if prices is not None:
+            by_chain: dict[Chain, set[str]] = defaultdict(set)
+            for t in trades:
+                if _is_buy(t) and t.price_usd:
+                    by_chain[t.chain].add(t.token_address)
+            for chain, addrs in by_chain.items():
+                lst = sorted(addrs)
+                for i in range(0, len(lst), 30):
+                    try:
+                        got = await prices(chain, lst[i:i + 30])
+                    except Exception:
+                        log.warning("paper: entry prices failed", exc_info=True)
+                        got = {}
+                    now_px.update({(chain, a): p for a, p in got.items() if p and p > 0})
         for t in trades:
             if not _is_buy(t) or not t.price_usd:
                 continue
+            # where we could buy now (never better than the wallet itself)
+            entry_px = max(now_px.get((t.chain, t.token_address)) or t.price_usd, t.price_usd)
             label = t.wallet_label or t.wallet[:6]
             usd = f" ${t.usd_value:,.0f}" if t.usd_value else ""
             if _open(session, keys, STRATEGIES["wallet_follow"], chain=t.chain, token=t.token_address,
-                     symbol=t.symbol, price=t.price_usd, trigger=f"{label} bought{usd}", at=now, s=s,
-                     wallet=t.wallet):
+                     symbol=t.symbol, price=entry_px, trigger=f"{label} bought{usd}", at=now, s=s,
+                     wallet=t.wallet, leader_trade_id=t.id):
                 opened += 1
             if (not mirror_set or t.wallet in mirror_set) and _open(
                     session, keys, STRATEGIES["wallet_mirror"], chain=t.chain, token=t.token_address,
-                    symbol=t.symbol, price=t.price_usd, trigger=f"copy {label}{usd}", at=now, s=s,
+                    symbol=t.symbol, price=entry_px, trigger=f"copy {label}{usd}", at=now, s=s,
                     wallet=t.wallet, leader_trade_id=t.id):
                 opened += 1
             for strat in STRATEGIES.values():          # one leader's first buys, maybe sized
@@ -187,7 +207,7 @@ async def process_entries(session: AsyncSession, s: Settings | None = None) -> i
                 if strat.max_usd is not None and (t.usd_value or 0) > strat.max_usd:
                     continue
                 if _open(session, keys, strat, chain=t.chain, token=t.token_address, symbol=t.symbol,
-                         price=t.price_usd, trigger=f"copy {label}{usd}", at=now, s=s, wallet=t.wallet,
+                         price=entry_px, trigger=f"copy {label}{usd}", at=now, s=s, wallet=t.wallet,
                          leader_trade_id=t.id):
                     opened += 1
             # cluster: distinct tracked wallets buying this token in the last CLUSTER_MINUTES
@@ -207,7 +227,7 @@ async def process_entries(session: AsyncSession, s: Settings | None = None) -> i
             if len(buyers) >= CLUSTER_MIN_WALLETS:
                 names = ", ".join(list(buyers.values())[:4])
                 if _open(session, keys, STRATEGIES["wallet_cluster"], chain=t.chain, token=t.token_address,
-                         symbol=t.symbol, price=t.price_usd, trigger=f"{len(buyers)} wallets: {names}", at=now, s=s):
+                         symbol=t.symbol, price=entry_px, trigger=f"{len(buyers)} wallets: {names}", at=now, s=s):
                     opened += 1
         await _set_cursor(session, CURSOR_TRADES, max_trade)
 
@@ -327,15 +347,20 @@ async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings
 
         # leader sold (wallet_follow): exit with the wallet
         if p.trigger_wallet and not mirror:
+            after = (WalletTrade.id > p.leader_trade_id) if p.leader_trade_id else (WalletTrade.detected_at >= entry_time)
             sold = (await session.execute(
-                select(WalletTrade.price_usd).where(
+                select(WalletTrade.price_usd, WalletTrade.detected_at).where(
                     WalletTrade.chain == p.chain, WalletTrade.token_address == p.token_address,
                     WalletTrade.wallet == p.trigger_wallet, WalletTrade.side == "sell",
-                    WalletTrade.kind == "sell", WalletTrade.detected_at >= entry_time,
+                    WalletTrade.kind == "sell", after,
                 ).order_by(WalletTrade.id).limit(1)
             )).first()
             if sold is not None:
-                _close(p, px or sold[0] or p.last_price or p.entry_price, "leader_sold", now, s)
+                if utc(sold[1]) and utc(sold[1]) <= entry_time:
+                    at_px = p.entry_price       # it sold before we were even in: in and straight out (fees only)
+                else:
+                    at_px = px or sold[0] or p.last_price or p.entry_price
+                _close(p, at_px, "leader_sold", now, s)
                 closed += 1
                 continue
 
@@ -380,6 +405,8 @@ async def _live_rule_step(session: AsyncSession, p: PaperPosition, px: float | N
     for sell in sells:
         p.leader_trade_id = sell.id
         at_px = px or sell.price_usd or p.last_price or p.entry_price
+        if utc(sell.detected_at) and utc(sell.detected_at) <= utc(p.entry_time):
+            at_px = p.entry_price               # it sold before we were in: that share goes out at our entry
         full = (sell.remaining_amount is not None and sell.remaining_amount <= 0) or (sell.pct_sold or 0) >= 99
         if full:
             _close(p, at_px, "leader_sold", now, s)
@@ -491,19 +518,62 @@ def dexscreener_prices(dex) -> PriceFetcher:
     return fetch
 
 
+def jupiter_first_prices(dex) -> PriceFetcher:
+    """Solana: Jupiter's price (fresh; through the live bot's shared Jupiter gate), DexScreener for the rest."""
+    import httpx
+
+    from app.live import JUPITER
+
+    slow = dexscreener_prices(dex)
+    http = httpx.AsyncClient(timeout=10)
+
+    async def fetch(chain: Chain, addrs: list[str]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        if chain == Chain.solana and addrs:
+            try:
+                s = get_settings()
+                r = await JUPITER.request(http, "GET", f"{s.jupiter_api_url}/price/v3", background=True,
+                                          params={"ids": ",".join(addrs[:50])})
+                if r is not None and r.status_code == 200:
+                    for a, d in (r.json() or {}).items():
+                        if d and d.get("usdPrice"):
+                            out[a] = float(d["usdPrice"])
+            except Exception:
+                log.debug("paper: jupiter prices failed", exc_info=True)
+        missing = [a for a in addrs if a not in out]
+        if missing:
+            out.update(await slow(chain, missing))
+        return out
+
+    return fetch
+
+
 class PaperEngine:
     def __init__(self, dex, settings: Settings | None = None) -> None:
-        self.prices = dexscreener_prices(dex)
         self.s = settings or get_settings()
+        self.prices = jupiter_first_prices(dex) if self.s.paper_live_prices else dexscreener_prices(dex)
+        self._exits_at = self._full_at = -1e9
 
     async def run_once(self) -> tuple[int, int]:
         from app.db import SessionLocal
 
         async with SessionLocal() as session:
             closed = await process_exits(session, self.prices, self.s)
-            opened = await process_entries(session, self.s)
+            opened = await process_entries(session, self.s, self.prices if self.s.paper_live_prices else None)
             await session.commit()
         return opened, closed
+
+    async def _tick(self) -> None:
+        """Entries every PAPER_ENTRY_SECONDS, exits every PAPER_EXIT_SECONDS (with fresh prices)."""
+        from app.db import SessionLocal
+
+        now = time.monotonic()
+        async with SessionLocal() as session:
+            if now - self._exits_at >= self.s.paper_exit_seconds:
+                self._exits_at = now
+                await process_exits(session, self.prices, self.s)
+            await process_entries(session, self.s, self.prices)
+            await session.commit()
 
     async def run_forever(self) -> None:
         if not self.s.paper_enabled:
@@ -514,9 +584,13 @@ class PaperEngine:
         while True:
             t0 = time.monotonic()
             try:
-                await self.run_once()
+                if self.s.paper_live_prices:
+                    await self._tick()
+                else:
+                    await self.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("paper trading step failed")
-            await asyncio.sleep(max(self.s.paper_interval_seconds - (time.monotonic() - t0), 5))
+            gap = self.s.paper_entry_seconds if self.s.paper_live_prices else self.s.paper_interval_seconds
+            await asyncio.sleep(max(gap - (time.monotonic() - t0), 1 if self.s.paper_live_prices else 5))
