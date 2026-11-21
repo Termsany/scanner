@@ -58,6 +58,10 @@ def curve_state(data_b64: str) -> dict[str, float] | None:
         return None
     if not v_tok:
         return None
+    # a classic pump.fun curve runs from 30 SOL / 1.073B tokens to ~115 SOL / ~280M tokens; anything else is
+    # another layout, a closed or migrated account, or a misread (2026-11-21: one read as +179,000%)
+    if complete or not 25 <= v_sol / 1e9 <= 130 or not 2e8 <= v_tok / 1e6 <= 1.1e9:
+        return None
     return {"vSolInBondingCurve": v_sol / 1e9, "vTokensInBondingCurve": v_tok / 1e6,
             "real_sol": r_sol / 1e9, "complete": complete}
 
@@ -210,6 +214,9 @@ class PaperSniper:
         st = curve_state(data_b64)
         if w is None or st is None:
             return
+        new_px = st["vSolInBondingCurve"] / st["vTokensInBondingCurve"]
+        if w.price and not w.price / 20 <= new_px <= w.price * 20:
+            return              # a 20x jump in one update is a bad reading, not a trade
         prev, w.real_sol = w.real_sol, st["real_sol"]
         delta = 0.0 if prev is None else st["real_sol"] - prev
         side = "buy" if delta > 0 else "sell" if delta < 0 else "update"

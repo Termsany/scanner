@@ -181,3 +181,15 @@ def test_open_rows_show_live_pnl():
     exp = 30.0 / (30e-9 * 1.03) * (39e-9 * 0.97) - 30.0
     assert r.status == "open" and abs(r.pnl_usd - exp) < 1e-6 and r.pnl_usd > 0
     assert abs(r.last_price - 39e-9 * 100) < 1e-12 and abs(r.peak_pct - 30.0) < 1e-6
+
+
+def test_bad_curve_readings_are_ignored():
+    from app.sniper import curve_state
+    assert curve_state(_curve(1_000_000_000, 30.0, 0.0, complete=True)) is None      # migrated
+    assert curve_state(_curve(500, 30.0, 0.0)) is None                               # nonsense reserves
+    assert curve_state(_curve(1_000_000_000, 5.0, 0.0)) is None
+    sn = PaperSniper(S(sniper_min_buyers=99))
+    sn.on_message({**create(), "bondingCurveKey": "C"}, 0.0)
+    sn.tick(2.0)                                                     # held at 30 vSol / 1.073B
+    sn.on_curve("M", _curve(205_000_000, 128.0, 1.0), 3.0)           # in range but a 20x+ jump: ignored
+    assert "snipe_all" in sn.watch["M"].held and not sn.closed
