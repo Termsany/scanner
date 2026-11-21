@@ -285,6 +285,10 @@ function Leaders({ d, set, openBy, onToggle }: {
                 title="On: sell the whole position at +50%, at -25%, after 6 hours, or on the wallet's first sell. Off: your rule (50% at 2x, the rest on its full exit)">
                 Quick exit
               </th>
+              <th className="text-center"
+                title="On: when this wallet sells, the bot does not sell with it (for fast wallets). Use it with Quick exit, so positions still leave at +50% / -25% / 6 hours">
+                Ignore its sells
+              </th>
               <th />
             </tr>
           </thead>
@@ -332,6 +336,10 @@ function Leaders({ d, set, openBy, onToggle }: {
                   <input type="checkbox" checked={!!l.quick_exit} aria-label="Quick exit"
                     onChange={(e) => upd(i, { quick_exit: e.target.checked })} />
                 </td>
+                <td className="text-center">
+                  <input type="checkbox" checked={!!l.ignore_sells} aria-label="Ignore its sells"
+                    onChange={(e) => upd(i, { ignore_sells: e.target.checked })} />
+                </td>
                 <td className="text-right">
                   <button type="button" aria-label="Remove" className="text-muted hover:text-bear"
                     onClick={() => set({ ...d, leaders: d.leaders.filter((_, j) => j !== i) })}>
@@ -342,7 +350,7 @@ function Leaders({ d, set, openBy, onToggle }: {
             ))}
             {d.leaders.length === 0 && (
               <tr>
-                <td colSpan={9} className="text-xs text-faint">
+                <td colSpan={10} className="text-xs text-faint">
                   No smart wallets yet: this account will not buy anything.
                 </td>
               </tr>

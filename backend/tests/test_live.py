@@ -1880,3 +1880,30 @@ def test_no_buy_when_the_leader_already_sold_it():
 
     _db(body)
     assert x.calls == []
+
+
+def test_ignore_sells_keeps_the_position_and_quick_exit_still_takes_profit():
+    from app.live import Account, Leader
+
+    x = PricedExec()
+    acct = Account("main", 30, 100, 50, [LEADER],
+                   leaders={LEADER: Leader(LEADER, unconditional=True, quick_exit=True, ignore_sells=True)})
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0),
+                         account=acct)
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)
+        sess.add(_trade(side="sell", pct_sold=100, remaining=0))     # it sells everything: we stay in
+        await sess.commit()
+        await eng.step(sess)
+        before = [c for c in x.calls if c[0] == "sell"]
+        x.price.update(M1=60.0)                                       # +100%: far past +50%
+        await eng.step(sess)
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        return before, p
+
+    before, p = _db(body)
+    assert before == [] and p.status == "closed" and p.exit_reason == "take_profit"

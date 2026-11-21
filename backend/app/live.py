@@ -138,6 +138,7 @@ class Leader:
     enabled: bool = True             # off: no new buys from it; its open positions still follow its sells
     max_chase_pct: float | None = None   # never pay more than this % above its price; None = account default
     quick_exit: bool = False         # its positions sell all at +TP / -SL / time / its first sell (no 2x rule)
+    ignore_sells: bool = False       # never sell because it sells (too fast to follow); exits come from the rules
 
 
 _FROM_SETTINGS = object()
@@ -1036,7 +1037,7 @@ class CopyEngine:
         sold = (await session.execute(select(WalletTrade.id).where(
             WalletTrade.wallet == t.wallet, WalletTrade.token_address == t.token_address,
             WalletTrade.side == "sell", WalletTrade.id > t.id).limit(1))).first()
-        if sold:
+        if sold and not (ld is not None and ld.ignore_sells):
             # it already sold again (DULX3e often flips in 3-4 s): buying now only pays the fees both ways
             return "leader already sold it"
         seen = utc(t.block_time) or utc(t.detected_at)
@@ -1151,6 +1152,14 @@ class CopyEngine:
                 log.info("live: %s is hold-only: leader sold %.0f%%, keeping it", sym, share * 100)
                 await self.notify(f"{self._tag()} 🔒 {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
                                   f"${sym}, but ${sym} is hold-only: keeping it (sell by hand if you want)")
+            return
+        ld = self.a.leaders.get(t.wallet)
+        if pos is not None and ld is not None and ld.ignore_sells:
+            # the user's rule for fast wallets: its sells are not followed; quick exit / max hold take it out
+            pos.leader_trade_id = t.id
+            await session.commit()
+            log.info("live: %s ignoring %s's sell (%.0f%%): its sells are not followed",
+                     t.symbol or t.token_address[:6], t.wallet_label or t.wallet[:6], share * 100)
             return
         if pos is not None and self._quick(pos):
             # quick exit: the wallet's first sell (any size) takes the whole position out
