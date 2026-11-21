@@ -1923,3 +1923,25 @@ def test_full_exit_of_a_held_token_sends_an_alert_partial_does_not():
 def test_exit_alert_kind_is_its_own_switch():
     from app.tg_prefs import live_kind
     assert live_kind("🟢 LIVE 🚪 DODY sold ALL its $X") == "leader_exits"
+
+
+def test_background_jupiter_calls_never_retry_and_back_off_after_a_429():
+    import httpx as hx
+
+    from app.live import JupiterGate
+
+    calls = []
+
+    def handler(req):
+        calls.append(req.url.path)
+        return hx.Response(429)
+
+    async def go():
+        gate = JupiterGate(interval=0.0)
+        async with hx.AsyncClient(transport=hx.MockTransport(handler)) as c:
+            r1 = await gate.request(c, "GET", "https://jup.test/price/v3", background=True)
+            r2 = await gate.request(c, "GET", "https://jup.test/price/v3", background=True)   # cooling down: skipped
+        return r1, r2
+
+    r1, r2 = asyncio.run(go())
+    assert r1.status_code == 429 and r2 is None and len(calls) == 1

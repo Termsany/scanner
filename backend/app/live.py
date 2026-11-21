@@ -245,6 +245,7 @@ class JupiterGate:
         self._lock = asyncio.Lock()
         self._last = 0.0
         self._waiting = 0           # calls queued for a slot right now
+        self._cool_until = 0.0      # after a 429, background calls stay away for a while
 
     async def _slot(self) -> None:
         t0 = time.monotonic()
@@ -263,15 +264,19 @@ class JupiterGate:
         _took("jup_queue", time.monotonic() - t0)     # waiting for our turn in the shared Jupiter gate
 
     async def request(self, http: httpx.AsyncClient, method: str, url: str, background: bool = False,
-                      **kw) -> httpx.Response | None:
-        """background: only if nobody else is queued (paper prices never delay a trade); None = skipped."""
-        if background and (self._waiting or self._lock.locked()):
+                      retries: int | None = None, **kw) -> httpx.Response | None:
+        """background: price checks and paper (never trades): skipped (None) while a trade is queued or for a while
+        after a 429, and never retried, so they can't hold up a buy or sell."""
+        if background and (self._waiting or self._lock.locked() or time.monotonic() < self._cool_until):
             return None
+        tries = (0 if background else self.retries) if retries is None else retries
         r: httpx.Response | None = None
-        for attempt in range(self.retries + 1):
+        for attempt in range(tries + 1):
             await self._slot()
             r = await http.request(method, url, **kw)
-            if r.status_code != 429 or attempt == self.retries:
+            if r.status_code == 429:
+                self._cool_until = time.monotonic() + 15.0
+            if r.status_code != 429 or attempt == tries:
                 return r
             try:
                 pause = min(float(r.headers.get("retry-after") or 0), 10.0)
@@ -376,10 +381,10 @@ class JupiterExecutor:
     async def token_prices_fast(self, mints: list[str]) -> dict[str, dict[str, float]]:
         """{mint: {"usd", "decimals"}} straight from Jupiter's price API (fresher than DexScreener on new
         pump.fun tokens). Goes through the shared Jupiter gate, so use it only for positions near a target."""
-        r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/price/v3",
+        r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/price/v3", background=True,
                                   params={"ids": ",".join(mints[:50])}, timeout=8)
         out: dict[str, dict[str, float]] = {}
-        if r.status_code == 200:
+        if r is not None and r.status_code == 200:
             for mint, d in (r.json() or {}).items():
                 if d and d.get("usdPrice") and d.get("decimals") is not None:
                     out[mint] = {"usd": float(d["usdPrice"]), "decimals": int(d["decimals"])}
