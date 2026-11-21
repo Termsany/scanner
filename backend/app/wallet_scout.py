@@ -157,15 +157,23 @@ class WalletScout:
             return r.json() if r.status_code == 200 else None
         return None
 
-    async def _history(self, c: httpx.AsyncClient, wallet: str, pages: int = 4) -> list[dict[str, Any]]:
+    async def _history(self, c: httpx.AsyncClient, wallet: str) -> list[dict[str, Any]]:
+        """Swaps back until they cover SCOUT_MIN_DAYS (+ a margin), up to SCOUT_HISTORY_PAGES pages of 100: a busy
+        but human wallet needs more pages than a slow one; a bot stops early on the pace check."""
         txs, before = [], None
-        for _ in range(pages):
+        want = self.s.scout_min_days * 86400 * 1.1
+        for _ in range(self.s.scout_history_pages):
             page = await self._get(c, f"/addresses/{wallet}/transactions", type="SWAP", limit=100,
                                    **({"before": before} if before else {}))
             if not isinstance(page, list) or not page:
                 break
             txs += page
             before = page[-1]["signature"]
+            span = (txs[0].get("timestamp", 0) - txs[-1].get("timestamp", 0))
+            if span >= want:
+                break
+            if span > 0 and len(txs) / (span / 86400) > self.s.scout_max_swaps_per_day * 2:
+                break                            # far past the bot line: more pages would not change the verdict
         return txs
 
     async def judge_trials(self, session) -> int:
@@ -235,7 +243,13 @@ class WalletScout:
             if a.pubkey:
                 ours.add(a.pubkey)
             leaders |= {d.get("wallet") for d in a.leaders or []}
-        known = {c.address for c in (await session.execute(select(WalletCandidate))).scalars().all()}
+        retry = []                               # rejected only for a short history: look again with more pages
+        known = set()
+        for c in (await session.execute(select(WalletCandidate))).scalars().all():
+            if c.status == "rejected" and "days of history" in (c.reason or ""):
+                retry.append(c)
+            else:
+                known.add(c.address)
 
         def real(w: str) -> bool:
             try:
@@ -251,16 +265,22 @@ class WalletScout:
             except Exception:
                 return out
             hits = await self.discover(session, c)
-            fresh = [(w, n) for w, n in hits.most_common()
+            old = {c.address: c for c in retry}
+            fresh = [(w, max(n, old[w].hits if w in old else 0)) for w, n in hits.most_common()
                      if n >= self.s.scout_min_hits and w not in ours | leaders | known and real(w)]
+            fresh += [(c.address, c.hits) for c in retry if c.address not in {w for w, _ in fresh}]
             out["found"] = len(fresh)
             trials = (await session.execute(select(WalletCandidate).where(WalletCandidate.status == "trial"))).scalars().all()
             room = self.s.scout_max_trials - len(trials)
             for w, n in fresh:
                 if self.calls >= self.s.scout_max_calls:
                     break
-                cand = WalletCandidate(address=w, source="early buyer of winners", hits=n)
-                session.add(cand)
+                cand = old.get(w)
+                if cand is None:
+                    cand = WalletCandidate(address=w, source="early buyer of winners", hits=n)
+                    session.add(cand)
+                else:
+                    cand.hits, cand.status = n, "new"
                 txs = await self._history(c, w)
                 if len(txs) < 10:
                     cand.status, cand.reason = "rejected", "too few swaps to judge"

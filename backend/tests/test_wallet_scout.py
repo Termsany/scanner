@@ -177,3 +177,20 @@ def test_trial_copies_on_paper_and_is_judged():
 
     c = _db(body)
     assert c.status == "passed" and c.trial["trades"] == 2 and c.trial["net_usd"] + c.trial["open_usd"] > 0
+
+
+def test_history_reads_more_pages_until_it_covers_the_days():
+    s = S(scout_history_pages=8, scout_min_days=3.0)
+    scout = WalletScout(s)
+    pages = []
+
+    async def fake_get(c, path, **params):
+        i = len(pages)
+        pages.append(i)
+        # 100 swaps per page, each page one day older: page k spans days k..k+1
+        start = T0 + 10 * 86400 - i * 86400
+        return [{"timestamp": start - j * 864, "signature": f"p{i}-{j}"} for j in range(100)]
+
+    scout._get = fake_get
+    txs = asyncio.run(scout._history(None, W))
+    assert len(pages) == 4 and len(txs) == 400          # 3.3 days covered after 4 pages, then it stops

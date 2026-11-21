@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     scout_enabled: bool = False
     scout_hour_utc: int = 6
     scout_max_calls: int = 400                 # Helius calls per daily run
+    scout_history_pages: int = 8               # up to 800 swaps per wallet, stopping once SCOUT_MIN_DAYS is covered
     scout_lookback_days: int = 3               # winners from this many days back
     scout_min_hits: int = 2                    # bought early in at least this many winners
     scout_max_trials: int = 4                  # wallets on paper trial at once (each is polled by the tracker)
