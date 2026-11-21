@@ -116,8 +116,9 @@ class Settings(BaseSettings):
     live_max_chase_pct: float | None = 10.0
     # Tokens the bot never buys, on any account (comma-separated mints). User's list, 2026-11-21:
     # PUMP (pump.fun's own token) and TTWO: leaders trade them all day, we only lose on fees.
-    live_blocked_mints: str = ("pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn,"
-                               "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo")
+    live_blocked_mints: str = ("pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn,"   # PUMP
+                               "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo,"   # TTWO
+                               "SQQQAa3gUxgnqcEsdjPA4RQNQBgB97TnG2hJhk2WaGE")   # SQQQ (added 2026-11-21)
     live_max_chase_pct_no_checks: float | None = 300.0   # same guard for "no checks" leaders: never buy
                                                  # more than this % above the leader's price
     # When the leader sells, also sell the same share of tokens the owner bought by hand in the trading wallet
