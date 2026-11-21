@@ -1394,7 +1394,7 @@ class CopyEngine:
         or after the time limit."""
         if not any(ld.quick_exit for ld in self.a.leaders.values()):
             return
-        if time.monotonic() - self._quick_at < self.s.live_take_capital_check_seconds:
+        if time.monotonic() - self._quick_at < self.s.live_quick_check_seconds:
             return
         self._quick_at = time.monotonic()
         opened = [p for p in (await session.execute(select(LivePosition).where(
@@ -1411,11 +1411,6 @@ class CopyEngine:
         opened = [p for p in opened if p.status == "open" and now - utc(p.opened_at) < limit]
         if not opened or not hasattr(self.x, "token_prices"):
             return
-        try:
-            prices = dict(await self.x.token_prices(sorted({p.token_address for p in opened})) or {})
-        except Exception as exc:
-            log.warning("live: quick-exit prices failed: %s", exc)
-            prices = {}
         tp, sl = 1 + self.s.live_quick_tp_pct / 100, 1 + self.s.live_quick_sl_pct / 100
 
         def ratio(p: LivePosition, px: dict[str, float] | None) -> float | None:
@@ -1424,18 +1419,21 @@ class CopyEngine:
             held = int(p.tokens_raw) / 10 ** int(px["decimals"]) * float(px["usd"])
             return (held + (p.proceeds_usd or 0)) / p.cost_usd
 
-        near = []
-        for p in opened:
-            r = ratio(p, prices.get(p.token_address))
-            if r is None or r >= 1 + (tp - 1) * 0.7 or r <= 1 - (1 - sl) * 0.7:
-                near.append(p.token_address)
-        if (near and hasattr(self.x, "token_prices_fast")
-                and time.monotonic() - self._fast_at >= self.s.live_take_capital_check_seconds):
-            self._fast_at = time.monotonic()
+        # Jupiter's price first: DexScreener can lag minutes behind on a fast pump.fun token (2026-11-21: dca was
+        # +90% while DexScreener still showed +15%). One call covers every quick position.
+        mints = sorted({p.token_address for p in opened})
+        prices: dict[str, dict[str, float]] = {}
+        if hasattr(self.x, "token_prices_fast"):
             try:
-                prices.update(await self.x.token_prices_fast(sorted(set(near))))   # fresher near a target
+                prices = dict(await self.x.token_prices_fast(mints) or {})
             except Exception as exc:
-                log.warning("live: quick-exit fast prices failed: %s", exc)
+                log.warning("live: quick-exit prices failed: %s", exc)
+        missing = [m for m in mints if m not in prices]
+        if missing:
+            try:
+                prices.update(await self.x.token_prices(missing) or {})
+            except Exception as exc:
+                log.warning("live: quick-exit backup prices failed: %s", exc)
         for p in opened:
             r = ratio(p, prices.get(p.token_address))
             if r is None or sl < r < tp:

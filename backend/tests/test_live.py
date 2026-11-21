@@ -1598,7 +1598,8 @@ def _run_quick(steps, x, quick=True, **settings):
     acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, unconditional=True, quick_exit=quick)})
 
     async def body(sess):
-        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, **settings), account=acct)
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0, **settings),
+                       account=acct)
         await eng.step(sess)
         for batch in steps:
             if callable(batch):
@@ -1658,7 +1659,8 @@ def test_quick_exit_time_limit():
     async def body(sess):
         from app.live import Account, Leader
         acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, unconditional=True, quick_exit=True)})
-        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0), account=acct)
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0),
+                        account=acct)
         await eng.step(sess)
         sess.add(_trade())
         await sess.commit()
@@ -1679,3 +1681,20 @@ def test_quick_exit_switch_is_saved_with_the_leaders():
 
     out = clean_leaders([{"wallet": LEADER, "quick_exit": True}, {"wallet": "5hqZDJQidTDmjCrLLYi1NiwNUuCZYFc4vo9bPPMr3w85"}])
     assert [d["quick_exit"] for d in out] == [True, False]
+
+
+def test_quick_exit_uses_jupiter_price_when_dexscreener_lags():
+    class LaggingExec(PricedExec):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.fast = {}
+
+        async def token_prices_fast(self, mints):
+            return {m: {"usd": self.fast[m], "decimals": 6} for m in mints if m in self.fast}
+
+    x = LaggingExec()
+    pos = _run_quick([
+        [_trade()],
+        lambda: (x.price.update(M1=34.0), x.fast.update(M1=60.0)),   # DexScreener +13%, Jupiter +100%: far past
+    ], x)
+    assert pos[0].status == "closed" and pos[0].exit_reason == "take_profit"

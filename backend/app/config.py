@@ -188,6 +188,7 @@ class Settings(BaseSettings):
     live_quick_tp_pct: float = 50.0
     live_quick_sl_pct: float = -25.0
     live_quick_max_hold_minutes: float = 360.0
+    live_quick_check_seconds: float = 3.0        # quick-exit price check (one Jupiter call for all of them)
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
     live_time_stop_minutes: float | None = None  # off (user's choice). Set N to sell positions whose capital
                                                  # is not back N minutes after the buy
