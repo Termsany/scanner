@@ -1846,3 +1846,23 @@ def test_direct_buy_chase_skips_and_failures_fall_back_to_jupiter():
 
     f, calls = asyncio.run(failing_sim())
     assert f.signature == "SIGJ" and f.timing["route"] == "jupiter" and calls["sent"] == 0
+
+
+def test_housekeeping_yields_to_a_new_copied_trade():
+    x = PricedExec()
+    seen = []
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0))
+        eng.wake = asyncio.Event()
+
+        async def spy(session):
+            seen.append("take_capital")
+        eng._take_capital = spy
+        await eng.step(sess)                      # first run: only sets the cursor
+        await eng.step(sess)                      # nothing pending: housekeeping runs
+        eng.wake.set()                            # a copied wallet just traded
+        await eng.step(sess)                      # housekeeping is skipped this time
+        return seen
+
+    assert _db(body) == ["take_capital"]

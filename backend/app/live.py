@@ -927,6 +927,7 @@ class CopyEngine:
         self._up_seen: dict[int, int] = {}  # position id -> checks in a row at or above the target
         self._quick_at = 0.0                # monotonic time of the last quick-exit check
         self._quick_seen: dict[int, int] = {}   # position id -> quick-exit readings in a row past TP / SL
+        self.wake: asyncio.Event | None = None  # set by the WebSocket watcher when a copied wallet trades
 
     def update(self, account: Account) -> None:
         """New settings from the /accounts page; takes effect on the next step."""
@@ -1655,10 +1656,13 @@ class CopyEngine:
 
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
-        await self._reconcile(session)
-        await self._adopt_hand_buys(session)
-        await self._take_capital(session)
-        await self._quick_exits(session)
+        # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
+        for part in (self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits):
+            if self.wake is not None and self.wake.is_set():
+                return
+            await part(session)
+        if self.wake is not None and self.wake.is_set():
+            return
         opened = (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine()))).scalars().all()
         for pos in opened:
@@ -1857,6 +1861,7 @@ class LiveTrader:
         from app.fast_watch import WAKE
 
         wake = asyncio.Event()
+        engine.wake = wake
         WAKE.append(wake)
         try:
             while True:
