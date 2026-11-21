@@ -95,6 +95,8 @@ def clean_leaders(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return v
 
         q_tp = num("quick_tp_pct", 1, 10_000, "quick exit take profit %")
+        if isinstance(d.get("quick_sl_pct"), (int, float)) and d["quick_sl_pct"] > 0:
+            d = {**d, "quick_sl_pct": -d["quick_sl_pct"]}     # "15" on the page means a 15% stop loss
         q_sl = num("quick_sl_pct", -99, -1, "quick exit stop loss %")
         q_h = num("quick_hours", 0.05, 24 * 30, "quick exit time limit (hours)")
         out.append({"wallet": w, "label": str(d.get("label") or "")[:40],

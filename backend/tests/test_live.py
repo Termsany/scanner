@@ -2012,7 +2012,13 @@ def test_quick_exit_uses_the_wallets_own_targets():
     out = clean_leaders([{"wallet": LEADER, "quick_exit": True, "quick_tp_pct": "30", "quick_sl_pct": -15, "quick_hours": 2}])
     assert (out[0]["quick_tp_pct"], out[0]["quick_sl_pct"], out[0]["quick_hours"]) == (30.0, -15.0, 2.0)
     try:
-        clean_leaders([{"wallet": LEADER, "quick_sl_pct": 10}])     # a stop loss must be negative
+        clean_leaders([{"wallet": LEADER, "quick_sl_pct": -150}])   # a stop loss can't lose more than everything
         raise AssertionError("expected AccountError")
     except AccountError:
         pass
+
+
+def test_stop_loss_typed_as_a_plain_number_is_saved_negative():
+    from app.accounts import clean_leaders
+    out = clean_leaders([{"wallet": LEADER, "quick_exit": True, "quick_sl_pct": 15}])
+    assert out[0]["quick_sl_pct"] == -15.0

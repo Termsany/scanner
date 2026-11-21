@@ -344,9 +344,14 @@ function Leaders({ d, set, openBy, onToggle }: {
                         title="Take profit: sell everything at +this %" value={l.quick_tp_pct ?? ""}
                         onChange={(e) => upd(i, { quick_tp_pct: e.target.value === "" ? null : Number(e.target.value) })} />
                       <span>%/</span>
-                      <input className={`${tiny} w-14`} inputMode="decimal" placeholder="-25"
-                        title="Stop loss: sell everything at this % (negative)" value={l.quick_sl_pct ?? ""}
-                        onChange={(e) => upd(i, { quick_sl_pct: e.target.value === "" ? null : Number(e.target.value) })} />
+                      <span className="text-bear">−</span>
+                      <input className={`${tiny} w-12`} inputMode="decimal" placeholder="25"
+                        title="Stop loss: sell everything when it is down this % (type 15 for -15%)"
+                        value={l.quick_sl_pct == null ? "" : Math.abs(l.quick_sl_pct)}
+                        onChange={(e) => {
+                          const v = Number(e.target.value.replace("-", ""));
+                          upd(i, { quick_sl_pct: e.target.value === "" || !Number.isFinite(v) ? null : -Math.abs(v) });
+                        }} />
                       <span>%/</span>
                       <input className={`${tiny} w-12`} inputMode="decimal" placeholder="6"
                         title="Time limit: sell everything after this many hours" value={l.quick_hours ?? ""}
