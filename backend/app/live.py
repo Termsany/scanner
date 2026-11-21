@@ -144,6 +144,9 @@ class Leader:
     max_chase_pct: float | None = None   # never pay more than this % above its price; None = account default
     quick_exit: bool = False         # its positions sell all at +TP / -SL / time / its first sell (no 2x rule)
     ignore_sells: bool = False       # never sell because it sells (too fast to follow); exits come from the rules
+    quick_tp_pct: float | None = None    # quick exit for this wallet: take profit at +%  (None = LIVE_QUICK_TP_PCT)
+    quick_sl_pct: float | None = None    # stop loss at -% (a negative number; None = LIVE_QUICK_SL_PCT)
+    quick_hours: float | None = None     # time limit in hours (None = LIVE_QUICK_MAX_HOLD_MINUTES)
 
 
 _FROM_SETTINGS = object()
@@ -993,6 +996,14 @@ class CopyEngine:
         """Hold-only token: the bot never sells it by itself."""
         return mint in self.s.live_hold_mints
 
+    def _quick_rule(self, pos: LivePosition) -> tuple[float, float, timedelta]:
+        """(take-profit ratio, stop-loss ratio, time limit) for this position's wallet: its own, else the defaults."""
+        ld = self.a.leaders.get(pos.leader_wallet or "")
+        tp = ld.quick_tp_pct if ld and ld.quick_tp_pct is not None else self.s.live_quick_tp_pct
+        sl = ld.quick_sl_pct if ld and ld.quick_sl_pct is not None else self.s.live_quick_sl_pct
+        hours = ld.quick_hours if ld and ld.quick_hours is not None else self.s.live_quick_max_hold_minutes / 60
+        return 1 + tp / 100, 1 + sl / 100, timedelta(hours=hours)
+
     def _quick(self, pos: LivePosition) -> bool:
         """This position's wallet has the quick-exit switch on (and the token is not hold-only)."""
         ld = self.a.leaders.get(pos.leader_wallet or "")
@@ -1685,14 +1696,12 @@ class CopyEngine:
         if not opened:
             return
         now = _now()
-        limit = timedelta(minutes=self.s.live_quick_max_hold_minutes)
-        for p in [p for p in opened if now - utc(p.opened_at) >= limit]:
+        for p in [p for p in opened if now - utc(p.opened_at) >= self._quick_rule(p)[2]]:
             await self._sell(session, p, 1.0, "quick_time")
             await session.commit()
-        opened = [p for p in opened if p.status == "open" and now - utc(p.opened_at) < limit]
+        opened = [p for p in opened if p.status == "open" and now - utc(p.opened_at) < self._quick_rule(p)[2]]
         if not opened or not hasattr(self.x, "token_prices"):
             return
-        tp, sl = 1 + self.s.live_quick_tp_pct / 100, 1 + self.s.live_quick_sl_pct / 100
 
         def ratio(p: LivePosition, px: dict[str, float] | None) -> float | None:
             if not px or not px.get("usd") or not p.cost_usd:
@@ -1716,6 +1725,7 @@ class CopyEngine:
             except Exception as exc:
                 log.warning("live: quick-exit backup prices failed: %s", exc)
         for p in opened:
+            tp, sl, _ = self._quick_rule(p)
             r = ratio(p, prices.get(p.token_address))
             if r is None or sl < r < tp:
                 self._quick_seen.pop(p.id, None)

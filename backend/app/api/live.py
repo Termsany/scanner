@@ -368,6 +368,9 @@ class LeaderIn(BaseModel):
     max_chase_pct: float | None = None   # most paid above its price, %; None = account default
     quick_exit: bool = False             # sell all at +TP / -SL / time limit / its first sell, instead of the 2x rule
     ignore_sells: bool = False           # do not sell when it sells (fast wallets); pair it with quick_exit
+    quick_tp_pct: float | None = None    # quick exit for this wallet: +% take profit (None = default)
+    quick_sl_pct: float | None = None    # -% stop loss, negative (None = default)
+    quick_hours: float | None = None     # time limit in hours (None = default)
 
 
 class AccountIn(BaseModel):

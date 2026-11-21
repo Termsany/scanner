@@ -504,6 +504,9 @@ export interface LeaderCfg {
   max_chase_pct?: number | null;   // most paid above its price, %; null = account default
   quick_exit?: boolean;   // sell all at +50% / -25% / 6 h / its first sell instead of the 2x rule
   ignore_sells?: boolean; // never sell because it sells (fast wallets): exits only from quick exit / max hold
+  quick_tp_pct?: number | null;   // quick exit take profit +% (null = default 50)
+  quick_sl_pct?: number | null;   // quick exit stop loss, negative % (null = default -25)
+  quick_hours?: number | null;    // quick exit time limit in hours (null = default 6)
   enabled?: boolean;   // false: no new buys from it (its open positions still follow its sells)
 }
 

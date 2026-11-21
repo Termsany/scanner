@@ -1986,3 +1986,33 @@ def test_direct_buy_retries_once_with_more_slippage_on_6004_and_skips_unsupporte
     calls = asyncio.run(unsupported())
     assert calls["pp"] == 1 and calls["quote"] == 2
     L._NO_DIRECT.clear()
+
+
+def test_quick_exit_uses_the_wallets_own_targets():
+    from app.accounts import AccountError, clean_leaders
+    from app.live import Account, Leader
+
+    x = PricedExec()
+    acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(
+        LEADER, unconditional=True, quick_exit=True, quick_tp_pct=20.0, quick_sl_pct=-10.0, quick_hours=1.0)})
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0),
+                         account=acct)
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)
+        x.price.update(M1=40.0)                     # +33%: past its own +20% (default 50% would hold)
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().one()
+
+    p = _db(body)
+    assert p.status == "closed" and p.exit_reason == "take_profit"
+    out = clean_leaders([{"wallet": LEADER, "quick_exit": True, "quick_tp_pct": "30", "quick_sl_pct": -15, "quick_hours": 2}])
+    assert (out[0]["quick_tp_pct"], out[0]["quick_sl_pct"], out[0]["quick_hours"]) == (30.0, -15.0, 2.0)
+    try:
+        clean_leaders([{"wallet": LEADER, "quick_sl_pct": 10}])     # a stop loss must be negative
+        raise AssertionError("expected AccountError")
+    except AccountError:
+        pass
