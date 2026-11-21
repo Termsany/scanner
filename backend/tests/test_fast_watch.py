@@ -83,3 +83,30 @@ def test_notification_records_trade_wakes_engines_and_dedupes():
     rows = asyncio.run(go())
     assert fetched == ["SIG1"]
     assert [(r.tx_hash, r.side, r.symbol, r.usd_value) for r in rows] == [("SIG1", "buy", "GEM", 750.0)]
+
+
+def test_a_busy_wallet_does_not_hold_up_another_and_one_wallet_stays_in_order():
+    order = []
+
+    async def go():
+        fw = FastWatcher([W, "Busy1111111111111111111111111111111111111111"], S, fetch_tx=lambda s: None)
+        fw._subs = {1: "Busy1111111111111111111111111111111111111111", 2: W}
+
+        async def process(wallet, sig):
+            if wallet.startswith("Busy"):
+                await asyncio.sleep(0.3)                 # slow: DEX price, retries...
+            order.append(sig)
+            return 1
+        fw.process = process
+
+        def n(sub, sig):
+            return json.dumps({"jsonrpc": "2.0", "method": "logsNotification",
+                               "params": {"subscription": sub, "result": {"value": {"signature": sig, "err": None}}}})
+        fw.dispatch(n(1, "BUSY-A"))
+        fw.dispatch(n(1, "BUSY-B"))
+        fw.dispatch(n(2, "LEADER"))
+        await asyncio.sleep(1.0)
+        await fw.close()
+
+    asyncio.run(go())
+    assert order == ["LEADER", "BUSY-A", "BUSY-B"]       # the leader isn't queued behind; the busy one keeps its order

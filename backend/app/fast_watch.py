@@ -60,6 +60,11 @@ class FastWatcher:
         self._subs: dict[int, str] = {}      # subscription id -> wallet
         self._pending: dict[int, str] = {}   # request id -> wallet
         self._seen: dict[str, float] = {}    # signature -> time handled (drop duplicates from overlapping subs)
+        # Notifications are handled in parallel across wallets (a busy wallet must not delay another's buy),
+        # one at a time per wallet (its buy is recorded before its sell, as the engine expects).
+        self._wallet_locks: dict[str, asyncio.Lock] = {}
+        self._slots = asyncio.Semaphore(8)
+        self._tasks: set[asyncio.Task] = set()
         self.handled = 0
 
     async def close(self) -> None:
@@ -114,7 +119,20 @@ class FastWatcher:
         if len(self._seen) > 5_000:                     # keep the dedupe window small
             cutoff = now - 600
             self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
-        return await self.process(wallet, sig)
+        lock = self._wallet_locks.setdefault(wallet, asyncio.Lock())
+        async with lock, self._slots:
+            return await self.process(wallet, sig)
+
+    def dispatch(self, raw: str | bytes) -> None:
+        """Handle a notification in the background so the next one is read at once."""
+        async def run() -> None:
+            try:
+                await self.handle_message(raw)
+            except Exception:
+                log.exception("fast: handling a notification failed")
+        task = asyncio.create_task(run())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def process(self, wallet: str, sig: str) -> int:
         t0 = time.monotonic()
@@ -170,10 +188,7 @@ class FastWatcher:
                     log.info("Fast detection connected: watching %d wallets over WebSocket", len(self.wallets))
                     delay = 1.0
                     async for raw in ws:
-                        try:
-                            await self.handle_message(raw)
-                        except Exception:
-                            log.exception("fast: handling a notification failed")
+                        self.dispatch(raw)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
