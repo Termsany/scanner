@@ -1726,3 +1726,19 @@ def test_buy_slippage_never_carries_the_fill_past_the_chase_limit():
 
     asyncio.run(go())
     assert seen == [2_500, 1_000]      # re-quoted with the slippage capped at the 10% left before the limit
+
+
+def test_buy_keeps_its_timing():
+    x = FakeExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, _s())
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().one()
+
+    p = _db(body)
+    t = p.fills[0]["timing"]
+    assert {"pickup", "checks", "buy_call", "block_to_bought"} <= set(t) and t["block_to_bought"] >= 0

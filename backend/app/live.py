@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -70,12 +71,23 @@ class ChaseError(Exception):
         self.pay, self.limit = pay, limit
 
 
+# Seconds spent in each step of the buy being made in this task (see JupiterExecutor.buy); None = not timing.
+_TIMING: ContextVar[dict[str, float] | None] = ContextVar("_TIMING", default=None)
+
+
+def _took(step: str, seconds: float) -> None:
+    d = _TIMING.get()
+    if d is not None:
+        d[step] = round(d.get(step, 0.0) + seconds, 2)
+
+
 @dataclass
 class Fill:
     signature: str
     sol: float           # SOL spent (buy) or received (sell)
     tokens_raw: int      # tokens received (buy) or sold (sell)
     sol_price: float     # USD per SOL at the time
+    timing: dict[str, float] | None = None   # buy: seconds per step (quote, swap build, confirm, ...)
 
     @property
     def usd(self) -> float:
@@ -223,11 +235,13 @@ class JupiterGate:
         self._last = 0.0
 
     async def _slot(self) -> None:
+        t0 = time.monotonic()
         async with self._lock:
             wait = self._last + self.interval - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last = time.monotonic()
+        _took("jup_queue", time.monotonic() - t0)     # waiting for our turn in the shared Jupiter gate
 
     async def request(self, http: httpx.AsyncClient, method: str, url: str, **kw) -> httpx.Response:
         r: httpx.Response | None = None
@@ -487,6 +501,7 @@ class JupiterExecutor:
     async def _send(self, q: dict[str, Any]) -> tuple[str, bool]:
         from solders.transaction import VersionedTransaction
 
+        t_build = time.monotonic()
         r = await JUPITER.request(self.http, "POST", f"{self.s.jupiter_api_url}/swap/v1/swap", json={
             "quoteResponse": q, "userPublicKey": self.pubkey, "wrapAndUnwrapSol": True,
             "dynamicComputeUnitLimit": True,
@@ -497,12 +512,14 @@ class JupiterExecutor:
         if not body.get("swapTransaction"):
             raise SwapError(f"swap build failed ({r.status_code}): {r.text[:150]}")
         last_valid = body.get("lastValidBlockHeight")
+        _took("swap_build", time.monotonic() - t_build)
         tx = VersionedTransaction.from_bytes(base64.b64decode(body["swapTransaction"]))
         signed = VersionedTransaction(tx.message, [self.kp])
         raw = base64.b64encode(bytes(signed)).decode()
         # First send with preflight (a doomed swap fails here, not on-chain). Then re-broadcast the same signed
         # transaction every ~2 s until it confirms or its blockhash expires: under load, nodes drop transactions
         # and a single send often never lands.
+        t_send = time.monotonic()
         try:
             sig = await self._rpc("sendTransaction", [raw, {
                 "encoding": "base64", "skipPreflight": False, "maxRetries": 0, "preflightCommitment": "confirmed"}])
@@ -510,6 +527,8 @@ class JupiterExecutor:
             if _is_slippage(exc):
                 raise SlippageError("price moved past the slippage limit (simulation)") from exc
             raise
+        t_sent = time.monotonic()
+        _took("send", t_sent - t_send)                # includes the RPC's preflight simulation
         deadline = time.monotonic() + 90
         n = 0
         while time.monotonic() < deadline:
@@ -522,6 +541,7 @@ class JupiterExecutor:
                         raise SlippageError("price moved past the slippage limit (on-chain, fee only)")
                     raise SwapError(f"transaction failed: {st['err']}"[:250])
                 if st.get("confirmationStatus") in ("confirmed", "finalized"):
+                    _took("confirm", time.monotonic() - t_sent)
                     return sig, True
                 continue        # processed: landed, waiting for confirmation; no need to resend
             if last_valid and n % 3 == 0:
@@ -542,9 +562,23 @@ class JupiterExecutor:
     async def buy(self, mint: str, usd: float, max_price: float | None = None,
                   slippage_bps: int | None = None) -> Fill:
         bps = slippage_bps or self.s.live_slippage_bps
+        timing: dict[str, float] = {}
+        token = _TIMING.set(timing)
+        t_start = time.monotonic()
+        try:
+            return await self._buy_attempts(mint, usd, max_price, bps, timing, t_start)
+        finally:
+            _TIMING.reset(token)
+
+    async def _buy_attempts(self, mint: str, usd: float, max_price: float | None, bps: int,
+                            timing: dict[str, float], t_start: float) -> Fill:
         for attempt in range(3):   # nothing is spent when a swap is dropped or hits slippage: try again, fresh quote
             try:
-                return await self._buy_once(mint, usd, max_price, bps)
+                f = await self._buy_once(mint, usd, max_price, bps)
+                timing["attempts"] = attempt + 1
+                timing["executor_total"] = round(time.monotonic() - t_start, 2)
+                f.timing = dict(timing)
+                return f
             except Dropped as exc:
                 if attempt == 2:
                     raise
@@ -561,9 +595,13 @@ class JupiterExecutor:
         before = asyncio.ensure_future(asyncio.gather(self.token_balance(mint), self.sol_balance())) if live else None
         dec = asyncio.ensure_future(self.decimals(mint)) if max_price else None
         try:
+            t0 = time.monotonic()
             px = await self.sol_price()
+            _took("sol_price", time.monotonic() - t0)
             lamports = int(usd / px * LAMPORTS)
+            t0 = time.monotonic()
             q = await self.quote(SOL_MINT, mint, lamports, bps)
+            _took("quote", time.monotonic() - t0)
             if dec is not None:
                 try:
                     decimals = await dec
@@ -584,12 +622,15 @@ class JupiterExecutor:
             if not live:
                 self._dry_n += 1
                 return Fill(f"dry-{self._dry_n}", lamports / LAMPORTS, int(q["outAmount"]), px)
+            t0 = time.monotonic()
             tok0, sol0 = await before
+            _took("balances", time.monotonic() - t0)
         finally:
             for t in (before, dec):
                 if t is not None and not t.done():
                     t.cancel()
         sig, ok = await self._send(q)
+        t0 = time.monotonic()
         got = 0
         for _ in range(8):            # the RPC shows the new balance a moment after confirmation
             await asyncio.sleep(0.4)
@@ -597,6 +638,7 @@ class JupiterExecutor:
             if got > 0:
                 break
         sol1 = await self.sol_balance()
+        _took("after_confirm", time.monotonic() - t0)
         if got <= 0:
             raise SwapError(f"buy {sig} {'not confirmed' if not ok else 'returned no tokens'}")
         return Fill(sig, max(sol0 - sol1, 0.0), got, px)
@@ -877,7 +919,11 @@ class CopyEngine:
 
     async def _on_buy(self, session: AsyncSession, t: WalletTrade) -> None:
         sym = t.symbol or t.token_address[:6]
+        t_pick = time.monotonic()
+        seen = utc(t.detected_at)
+        pickup = (_now() - seen).total_seconds() if seen else None      # tracker saw it -> engine took it
         why = await self._skip_reason(session, t)
+        checks = time.monotonic() - t_pick
         if why:
             log.info("live: skip buy %s (%s)", sym, why)
             quiet = "already holding" in why or why.startswith(("leader off", "token blocked"))
@@ -904,6 +950,7 @@ class CopyEngine:
             log.info("live: %s passed the scanner (%s)", sym, res.reason)
         chase = self._chase(t.wallet, free)
         max_price = t.price_usd * (1 + chase / 100) if (t.price_usd and chase is not None) else None
+        t_exec = time.monotonic()
         try:
             f = await self.x.buy(t.token_address, self._size(t.wallet), max_price=max_price,
                                  slippage_bps=self.s.live_slippage_bps_unconditional if free else None)
@@ -920,13 +967,20 @@ class CopyEngine:
                                      cost_usd=0.0, error=str(exc)[:300], closed_at=_now()))
             await self.notify(f"{self._tag()} ❌ Buy ${sym} failed: {str(exc)[:200]}")
             return
+        timing = {"block_to_seen": round((seen - utc(t.block_time)).total_seconds(), 2) if seen and t.block_time else None,
+                  "pickup": round(pickup, 2) if pickup is not None else None, "checks": round(checks, 2),
+                  **(getattr(f, "timing", None) or {}), "buy_call": round(time.monotonic() - t_exec, 2)}
+        if t.block_time:
+            timing["block_to_bought"] = round((_now() - utc(t.block_time)).total_seconds(), 2)
         session.add(LivePosition(
             mode=self.x.mode, account=self.a.name, token_address=t.token_address, symbol=t.symbol or "", leader_wallet=t.wallet,
             leader_trade_id=t.id, status="open", cost_usd=f.usd, sol_spent=f.sol, tokens_raw=str(f.tokens_raw),
             tokens_bought_raw=str(f.tokens_raw), buy_signature=f.signature,
             fills=[{"side": "buy", "sig": f.signature, "sol": f.sol, "tokens_raw": str(f.tokens_raw),
-                    "usd": round(f.usd, 2), "at": _now().isoformat()}],
+                    "usd": round(f.usd, 2), "at": _now().isoformat(), "timing": timing}],
         ))
+        log.info("live: timing BUY %s [%s] %s", sym, self.a.name,
+                 " ".join(f"{k}={v}" for k, v in timing.items() if v is not None))
         log.info("live: BUY %s for %.4f SOL ($%.2f) %s", sym, f.sol, f.usd, f.signature)
         await self.notify(f"{self._tag()} ✅ Bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
                           f"Copying {t.wallet_label or t.wallet[:6]}\n{self._tx(f.signature)}")
