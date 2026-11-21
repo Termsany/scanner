@@ -742,6 +742,80 @@ class BillingConfigIn(BaseModel):
     wallet: str | None = None
 
 
+@router.get("/scout")
+async def scout_list(session: Session, _: Auth) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.models import PaperPosition, WalletCandidate
+    from app.wallet_scout import TRIAL_STRATEGY, trial_result
+
+    s = get_settings()
+    rows = (await session.execute(select(WalletCandidate).order_by(WalletCandidate.id.desc()).limit(150))).scalars().all()
+    out = []
+    for c in rows:
+        trial = c.trial
+        if c.status == "trial" and c.trial_start:          # live numbers while the trial runs
+            pos = (await session.execute(select(PaperPosition).where(
+                PaperPosition.strategy == TRIAL_STRATEGY, PaperPosition.trigger_wallet == c.address,
+                PaperPosition.entry_time >= c.trial_start))).scalars().all()
+            trial = trial_result(pos)
+        out.append({"id": c.id, "address": c.address, "source": c.source, "hits": c.hits, "status": c.status,
+                    "reason": c.reason, "metrics": c.metrics, "trial": trial,
+                    "found_at": c.found_at.isoformat() if c.found_at else None,
+                    "trial_end": c.trial_end.isoformat() if c.trial_end else None})
+    return {"enabled": s.scout_enabled, "hour_utc": s.scout_hour_utc, "candidates": out}
+
+
+class ScoutAddIn(BaseModel):
+    account: str = "main"
+
+
+@router.post("/scout/{cid}/add")
+async def scout_add(cid: int, body: ScoutAddIn, request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    """Add a candidate to an account's smart wallets, switched OFF: the operator turns it on."""
+    from sqlalchemy import select
+
+    from app.accounts import AccountError, clean_leaders, ensure_tracked
+    from app.models import TradingAccount, WalletCandidate
+    from app.users import audit
+
+    c = await session.get(WalletCandidate, cid)
+    a = (await session.execute(select(TradingAccount).where(TradingAccount.name == body.account))).scalars().first()
+    if c is None or a is None:
+        raise HTTPException(404, "not found")
+    leaders = [dict(l) for l in a.leaders or []]
+    if not any(l.get("wallet") == c.address for l in leaders):
+        net = ((c.trial or {}).get("net_usd") or 0) + ((c.trial or {}).get("open_usd") or 0)
+        leaders.append({"wallet": c.address, "label": f"scout {net:+.0f}$ paper"[:40], "enabled": False,
+                        "unconditional": True, "new_tokens_only": False, "size_usd": None, "max_chase_pct": 30.0})
+        try:
+            a.leaders = clean_leaders(leaders)
+        except AccountError as exc:
+            raise HTTPException(400, str(exc)) from None
+        await ensure_tracked(session, [c.address])
+        await session.flush()
+    from app.models import SmartWallet, WalletSource
+    sw = (await session.execute(select(SmartWallet).where(SmartWallet.address == c.address))).scalars().first()
+    if sw is not None and sw.source == WalletSource.scout:       # a copied wallet now: normal alerts and label
+        sw.source, sw.label, sw.track_buys = WalletSource.manual, "copied", True
+    c.status = "added"
+    await audit(session, "admin", "scout_add", a.name, {"wallet": c.address}, _ip(request))
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/scout/{cid}/dismiss")
+async def scout_dismiss(cid: int, session: Session, _: Auth) -> dict[str, Any]:
+    from app.models import WalletCandidate
+
+    c = await session.get(WalletCandidate, cid)
+    if c is None:
+        raise HTTPException(404, "not found")
+    c.status, c.reason = "rejected", "dismissed by the operator"
+    await session.commit()
+    return {"ok": True}
+
+
 @router.get("/telegram")
 async def telegram_prefs(session: Session, _: Auth) -> dict[str, Any]:
     from app.tg_prefs import KINDS, get_prefs

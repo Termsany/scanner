@@ -223,6 +223,7 @@ class WalletSource(str, enum.Enum):
     manual = "manual"   # added by the operator (CLI or data/smart_wallets.json)
     auto = "auto"       # discovered from holders of tokens that rallied after a signal
     birdeye = "birdeye" # profitable traders found and verified with the Birdeye API
+    scout = "scout"     # wallet scout paper trial (app/wallet_scout.py); no alerts, not scored
 
 
 class SmartWallet(Base):
@@ -400,6 +401,27 @@ class TrackerCursor(Base):
 
     key: Mapped[str] = mapped_column(String(160), primary_key=True)
     value: Mapped[str] = mapped_column(String(160))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class WalletCandidate(Base):
+    """Wallet scout (app/wallet_scout.py): found -> scored (strict filter) -> paper trial -> passed / failed.
+    The operator adds passed wallets to an account by hand; nothing is ever copied from here automatically."""
+
+    __tablename__ = "wallet_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    address: Mapped[str] = mapped_column(String(64), unique=True)
+    source: Mapped[str] = mapped_column(String(64), default="")
+    hits: Mapped[int] = mapped_column(Integer, default=0)            # winner tokens it bought early
+    status: Mapped[str] = mapped_column(String(16), default="new")   # new|rejected|trial|passed|failed|added
+    reason: Mapped[str] = mapped_column(String(240), default="")
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    trial: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    found_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    trial_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    trial_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 

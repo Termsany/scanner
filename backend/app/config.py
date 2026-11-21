@@ -76,6 +76,23 @@ class Settings(BaseSettings):
     paper_entry_seconds: float = 3.0
     paper_exit_seconds: float = 10.0
     paper_live_prices: bool = True
+
+    # Wallet scout (app/wallet_scout.py): find -> strict filter -> 3-day realistic paper trial -> suggest.
+    # Off until turned on: it spends Helius credits (one run a day, capped).
+    scout_enabled: bool = False
+    scout_hour_utc: int = 6
+    scout_max_calls: int = 400                 # Helius calls per daily run
+    scout_lookback_days: int = 3               # winners from this many days back
+    scout_min_hits: int = 2                    # bought early in at least this many winners
+    scout_max_trials: int = 4                  # wallets on paper trial at once (each is polled by the tracker)
+    scout_trial_days: float = 3.0
+    scout_min_days: float = 3.0                # history the strict filter needs
+    scout_max_swaps_per_day: float = 150.0
+    scout_min_closed: int = 15
+    scout_min_profit_factor: float = 1.3
+    scout_min_win_rate: float = 40.0
+    scout_min_hold_minutes: float = 5.0
+    scout_trial_min_trades: int = 5
     paper_size_usd: float = 100.0
     paper_slippage_pct: float = 1.5             # charged on entry AND exit (pump.fun fee + slippage)
     paper_no_price_minutes: int = 60            # no market price this long: close at last known price

@@ -22,7 +22,9 @@ import { AppNav } from "@/components/AppNav";
 import { Badge, button, Empty, PageHeader, Panel, StatTile } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
-import type { AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount, TelegramPrefs } from "@/lib/types";
+import type {
+  AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount, ScoutCandidate, ScoutList, TelegramPrefs,
+} from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live and Accounts pages
 const REFRESH_MS = 15_000;
@@ -290,6 +292,130 @@ const STATUS_CLS: Record<Bill["status"], string> = {
   sending: "bg-bear-soft text-bear",
   waived: "bg-raised text-muted",
 };
+
+const SCOUT_TONE: Record<ScoutCandidate["status"], string> = {
+  passed: "text-mint", trial: "text-sky", new: "text-ink", failed: "text-bear", rejected: "text-faint", added: "text-muted",
+};
+
+/** Wallet scout: candidates found, filtered and tried on paper. Passed ones can be added (switched off). */
+function ScoutPanel({ password }: { password: string }) {
+  const [data, setData] = useState<ScoutList | null>(null);
+  const [all, setAll] = useState(false);
+  const [busy, setBusy] = useState<number | null>(null);
+  const [msg, setMsg] = useState("");
+
+  const load = useCallback(() => {
+    api.scout(password).then(setData).catch((e) =>
+      setMsg(e instanceof ApiError ? e.message : "Could not load the wallet scout."));
+  }, [password]);
+  useEffect(load, [load]);
+
+  async function act(c: ScoutCandidate, what: "add" | "dismiss") {
+    if (what === "add" && !confirm(`Add ${c.address} to account "main" as a smart wallet, switched OFF? `
+      + "You turn it on in /accounts when you want to copy it.")) return;
+    setBusy(c.id);
+    setMsg("");
+    try {
+      if (what === "add") await api.scoutAdd(password, c.id);
+      else await api.scoutDismiss(password, c.id);
+      load();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "Could not save.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const rows = (data?.candidates ?? []).filter((c) => all || ["passed", "trial", "new"].includes(c.status));
+  return (
+    <Panel title="Wallet scout">
+      <p className="mb-3 text-xs text-muted">
+        Once a day it finds wallets that bought early in recent winners, keeps only the ones that pass a strict
+        filter (several days, profitable without their best trade, copyable pace), then copies them on paper for
+        a few days, entering seconds late like the bot. Nothing is copied for real until you add a wallet and
+        switch it on. {data && !data.enabled && <span className="text-warn">The scout is off on the server.</span>}
+      </p>
+      <label className="mb-2 flex items-center gap-2 text-xs text-muted">
+        <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Show rejected and failed too
+      </label>
+      {!data ? (
+        <p className="text-sm text-muted">{msg || "Loading…"}</p>
+      ) : rows.length === 0 ? (
+        <Empty>No candidates yet.</Empty>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="data-table w-full text-sm">
+            <thead>
+              <tr>
+                <th className="text-left">Wallet</th>
+                <th className="text-left">Status</th>
+                <th className="text-right">History</th>
+                <th className="text-right">Paper trial</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((c) => {
+                const m = c.metrics;
+                const t = c.trial;
+                const tnet = t ? t.net_usd + t.open_usd : 0;
+                return (
+                  <tr key={c.id}>
+                    <td>
+                      <a className="num hover:underline" target="_blank" rel="noreferrer"
+                        href={`https://solscan.io/account/${c.address}`}>{c.address.slice(0, 6)}…{c.address.slice(-4)}</a>
+                      <div className="text-[11px] text-faint">early in {c.hits} winners</div>
+                    </td>
+                    <td>
+                      <span className={`font-medium ${SCOUT_TONE[c.status]}`}>{c.status}</span>
+                      <div className="max-w-[28ch] text-[11px] text-muted">{c.reason}</div>
+                    </td>
+                    <td className="num text-right text-xs">
+                      {m ? (
+                        <>
+                          <div>{m.closed} trades · {m.win_rate.toFixed(0)}% wins</div>
+                          <div className={m.net_usd >= 0 ? "text-mint" : "text-bear"}>
+                            net ${m.net_usd.toFixed(0)}
+                            <span className="text-faint"> (${m.net_wo_best.toFixed(0)} w/o best)</span>
+                          </div>
+                          <div className="text-faint">
+                            {m.days.toFixed(1)} d · {m.per_day.toFixed(0)}/day · hold {m.hold_min.toFixed(0)}m
+                          </div>
+                        </>
+                      ) : "—"}
+                    </td>
+                    <td className="num text-right text-xs">
+                      {t ? (
+                        <>
+                          <div>{t.trades} trades · {t.wins} wins</div>
+                          <div className={tnet >= 0 ? "text-mint" : "text-bear"}>${tnet.toFixed(2)}</div>
+                          {c.status === "trial" && c.trial_end && (
+                            <div className="text-faint">ends {new Date(c.trial_end).toLocaleString()}</div>
+                          )}
+                        </>
+                      ) : "—"}
+                    </td>
+                    <td className="whitespace-nowrap text-right">
+                      {c.status === "passed" && (
+                        <button type="button" className={button("primary")} disabled={busy === c.id}
+                          onClick={() => act(c, "add")}>Add to main</button>
+                      )}
+                      {["passed", "new", "trial"].includes(c.status) && (
+                        <button type="button" className="ml-2 text-xs text-muted hover:text-bear" disabled={busy === c.id}
+                          onClick={() => act(c, "dismiss")}>Dismiss</button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {msg && data && <p className="mt-2 text-xs text-bear">{msg}</p>}
+    </Panel>
+  );
+}
 
 /** The operator's Telegram chat: one switch per kind of message. Account and security notes always go out. */
 function TelegramPanel({ password }: { password: string }) {
@@ -810,6 +936,7 @@ export function AdminView() {
           </Panel>
 
           <AccountsTable accounts={data.accounts} now={now} />
+          <ScoutPanel password={password} />
           <TelegramPanel password={password} />
           <BillingPanel password={password} now={now} />
           <CouponsPanel password={password} now={now} />

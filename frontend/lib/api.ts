@@ -1,4 +1,5 @@
 import type {
+  ScoutList,
   TelegramPrefs,
   AIAnalysis,
   Chain,
@@ -182,6 +183,16 @@ export const api = {
     }),
 
   terms: () => request<PublicTerms>("/api/me/terms"),
+
+  scout: (password: string) => request<ScoutList>("/api/live/scout", { ...adm(password) }),
+
+  scoutAdd: (password: string, id: number, account = "main") =>
+    request<{ ok: boolean }>(`/api/live/scout/${id}/add`, {
+      method: "POST", ...adm(password), body: JSON.stringify({ account }),
+    }),
+
+  scoutDismiss: (password: string, id: number) =>
+    request<{ ok: boolean }>(`/api/live/scout/${id}/dismiss`, { method: "POST", ...adm(password) }),
 
   telegramPrefs: (password: string) =>
     request<TelegramPrefs>("/api/live/telegram", { ...adm(password) }),

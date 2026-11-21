@@ -437,6 +437,9 @@ class TelegramAlerts:
             if claimed.rowcount != len(ids):
                 continue  # another replica took (part of) it
             side = trades[0].side or "buy"
+            trades = [t for t in trades if not (t.wallet_label or "").startswith("scout")]   # paper trials: quiet
+            if not trades:
+                continue
             if not prefs.get("wallet_sells" if side == "sell" else "wallet_buys", True):
                 continue  # switched off on /admin: marked sent, not delivered
             text = (render_trade(trades[0], self.settings.public_dashboard_url) if len(trades) == 1

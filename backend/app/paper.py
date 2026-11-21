@@ -68,6 +68,9 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              leader=DULX, live_rule=True),
     Strategy("dulx_50_1000", "Copy DULX3e like live, only its $50-1000 buys", tp_pct=0.0, sl_pct=0.0,
              leader=DULX, min_usd=50.0, max_usd=1000.0, live_rule=True),
+    # wallet scout trials (app/wallet_scout.py): each candidate's first buys, copied like live
+    Strategy("scout_trial", "Wallet scout: paper trial of a candidate wallet (live exit rule)", tp_pct=0.0,
+             sl_pct=0.0, live_rule=True),
     Strategy("signal_80", "Scanner signal, score >= 80", min_score=80),
     Strategy("signal_85", "Scanner signal, score >= 85", min_score=85),
     # run by app/sniper.py (own live feed and exits); listed here so /paper shows them
@@ -183,6 +186,11 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
                         log.warning("paper: entry prices failed", exc_info=True)
                         got = {}
                     now_px.update({(chain, a): p for a, p in got.items() if p and p > 0})
+        try:
+            from app.wallet_scout import trial_wallets
+            trials = await trial_wallets(session) if trades else set()
+        except Exception:
+            trials = set()
         for t in trades:
             if not _is_buy(t) or not t.price_usd:
                 continue
@@ -198,6 +206,11 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
                     session, keys, STRATEGIES["wallet_mirror"], chain=t.chain, token=t.token_address,
                     symbol=t.symbol, price=entry_px, trigger=f"copy {label}{usd}", at=now, s=s,
                     wallet=t.wallet, leader_trade_id=t.id):
+                opened += 1
+            if t.wallet in trials and t.first_buy and _open(
+                    session, keys, STRATEGIES["scout_trial"], chain=t.chain, token=t.token_address, symbol=t.symbol,
+                    price=entry_px, trigger=f"scout trial {t.wallet[:6]}{usd}", at=now, s=s, wallet=t.wallet,
+                    leader_trade_id=t.id):
                 opened += 1
             for strat in STRATEGIES.values():          # one leader's first buys, maybe sized
                 if strat.leader != t.wallet or not t.first_buy:

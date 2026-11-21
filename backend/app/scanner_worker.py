@@ -1021,6 +1021,7 @@ async def _main(once: bool) -> None:
             from app.billing import BillingLoop
             from app.grad import PaperGrad
             from app.sniper import PaperSniper
+            from app.wallet_scout import WalletScout
             from app.live import LiveTrader
             from app.paper import PaperEngine
             from app.performance import PerformanceTracker
@@ -1031,6 +1032,7 @@ async def _main(once: bool) -> None:
                                  LiveTrader(scanner.settings).run_forever(),
                                  BillingLoop(scanner.settings).run_forever(),
                                  PaperSniper(scanner.settings).run_forever(),
+                                 WalletScout(scanner.settings).run_forever(),
                                  PaperGrad(scanner.settings).run_forever())
     finally:
         await tracker.close()

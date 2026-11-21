@@ -463,6 +463,26 @@ export interface LiveAccount {
   failed: LivePositionOut[];
 }
 
+export interface ScoutCandidate {
+  id: number;
+  address: string;
+  source: string;
+  hits: number;
+  status: "new" | "rejected" | "trial" | "passed" | "failed" | "added";
+  reason: string;
+  metrics: { days: number; per_day: number; closed: number; win_rate: number; net_usd: number; net_wo_best: number;
+    profit_factor: number; hold_min: number; buy_usd: number } | null;
+  trial: { trades: number; closed: number; wins: number; net_usd: number; open_usd: number; size_usd: number } | null;
+  found_at: string | null;
+  trial_end: string | null;
+}
+
+export interface ScoutList {
+  enabled: boolean;
+  hour_utc: number;
+  candidates: ScoutCandidate[];
+}
+
 export interface TelegramKind {
   key: string;
   title: string;
