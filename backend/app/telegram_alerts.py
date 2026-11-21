@@ -369,13 +369,22 @@ class TelegramAlerts:
                                                       WalletTrade.detected_at < cutoff).values(telegram_sent=True))
             await s.commit()
 
+    async def _prefs(self) -> dict[str, bool]:
+        from app.tg_prefs import get_prefs
+
+        async with SessionLocal() as s:
+            return await get_prefs(s, self.settings.telegram_signal_alerts)
+
     async def deliver_pending(self) -> int:
         chat = self.settings.telegram_chat_id
         if not chat:
             return 0
-        if not self.settings.telegram_signal_alerts:
-            # Signal alerts off: only wallet buy/sell alerts go out. Signals stay on the dashboard, /top and
-            # /performance; they are not queued (switching back on later does not replay old ones).
+        if not (await self._prefs()).get("signals", True):
+            # Signal alerts off (/admin): only wallet alerts go out. Signals stay on the dashboard, /top and
+            # /performance; they are marked sent, so switching back on later does not replay old ones.
+            async with SessionLocal() as s:
+                await s.execute(update(Signal).where(Signal.telegram_sent.is_(False)).values(telegram_sent=True))
+                await s.commit()
             return await self.deliver_trades(chat)
         async with SessionLocal() as s:
             pending = (await s.execute(
@@ -410,6 +419,7 @@ class TelegramAlerts:
             )).scalars().all()
         wait = max(0, self.settings.telegram_trade_group_seconds)
         now = datetime.now(timezone.utc)
+        prefs = await self._prefs()
         groups: dict[tuple, list[WalletTrade]] = {}
         for t in pending:
             groups.setdefault((t.chain, t.token_address, t.side or "buy"), []).append(t)
@@ -426,6 +436,9 @@ class TelegramAlerts:
                 await s.commit()
             if claimed.rowcount != len(ids):
                 continue  # another replica took (part of) it
+            side = trades[0].side or "buy"
+            if not prefs.get("wallet_sells" if side == "sell" else "wallet_buys", True):
+                continue  # switched off on /admin: marked sent, not delivered
             text = (render_trade(trades[0], self.settings.public_dashboard_url) if len(trades) == 1
                     else render_trade_group(trades, self.settings.public_dashboard_url))
             if await self.send(chat, text):
@@ -616,7 +629,7 @@ class TelegramAlerts:
             return
         today = now.strftime("%Y-%m-%d")
         await self._user_daily_reports(today)
-        if not chat:
+        if not chat or not (await self._prefs()).get("daily_report", True):
             return
         async with SessionLocal() as s:  # claim today's report once, even across restarts / replicas
             row = await s.get(TrackerCursor, "daily_report")

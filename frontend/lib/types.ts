@@ -463,6 +463,18 @@ export interface LiveAccount {
   failed: LivePositionOut[];
 }
 
+export interface TelegramKind {
+  key: string;
+  title: string;
+  help: string;
+  on: boolean;
+}
+
+export interface TelegramPrefs {
+  configured: boolean;     // bot token and chat set on the server
+  kinds: TelegramKind[];
+}
+
 export interface LeaderCfg {
   wallet: string;
   label: string;

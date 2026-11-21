@@ -22,7 +22,7 @@ import { AppNav } from "@/components/AppNav";
 import { Badge, button, Empty, PageHeader, Panel, StatTile } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
-import type { AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount } from "@/lib/types";
+import type { AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount, TelegramPrefs } from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live and Accounts pages
 const REFRESH_MS = 15_000;
@@ -290,6 +290,66 @@ const STATUS_CLS: Record<Bill["status"], string> = {
   sending: "bg-bear-soft text-bear",
   waived: "bg-raised text-muted",
 };
+
+/** The operator's Telegram chat: one switch per kind of message. Account and security notes always go out. */
+function TelegramPanel({ password }: { password: string }) {
+  const [data, setData] = useState<TelegramPrefs | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    api.telegramPrefs(password).then(setData).catch((e) =>
+      setMsg(e instanceof ApiError ? e.message : "Could not load Telegram settings."));
+  }, [password]);
+
+  async function flip(key: string, on: boolean) {
+    setBusy(key);
+    setMsg("");
+    try {
+      setData(await api.setTelegramPrefs(password, { [key]: on }));
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "Could not save.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Panel title="Telegram alerts">
+      <p className="mb-3 text-xs text-muted">
+        What your Telegram chat receives. Changes apply within about 10 seconds. Account and security notes
+        (sign-ups, withdrawals, key reveals, watchdog) always go out.
+      </p>
+      {!data ? (
+        <p className="text-sm text-muted">{msg || "Loading…"}</p>
+      ) : (
+        <>
+          {!data.configured && (
+            <p className="mb-3 text-xs text-warn">No Telegram bot or chat is set on the server, so nothing is sent.</p>
+          )}
+          <ul className="divide-y divide-line">
+            {data.kinds.map((k) => (
+              <li key={k.key} className="flex items-center justify-between gap-4 py-2.5">
+                <div className="min-w-0">
+                  <div className="text-sm text-ink">{k.title}</div>
+                  <div className="text-xs text-muted">{k.help}</div>
+                </div>
+                <button type="button" role="switch" aria-checked={k.on} aria-label={k.title}
+                  disabled={busy === k.key} onClick={() => flip(k.key, !k.on)}
+                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:opacity-50 ${
+                    k.on ? "bg-mint" : "bg-raised ring-1 ring-line-strong"}`}>
+                  <span className={`inline-block size-4 rounded-full bg-ink shadow transition ${
+                    k.on ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+                </button>
+              </li>
+            ))}
+          </ul>
+          {msg && <p className="mt-2 text-xs text-bear">{msg}</p>}
+        </>
+      )}
+    </Panel>
+  );
+}
 
 function BillingPanel({ password, now }: { password: string; now: number }) {
   const [data, setData] = useState<BillingAdmin | null>(null);
@@ -750,6 +810,7 @@ export function AdminView() {
           </Panel>
 
           <AccountsTable accounts={data.accounts} now={now} />
+          <TelegramPanel password={password} />
           <BillingPanel password={password} now={now} />
           <CouponsPanel password={password} now={now} />
           <Recent items={data.recent} now={now} />

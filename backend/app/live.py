@@ -1530,6 +1530,16 @@ class LiveTrader:
         if not (self.s.telegram_bot_token and self.s.telegram_chat_id):
             return
         try:
+            from app.db import SessionLocal
+            from app.tg_prefs import get_prefs, live_kind
+
+            async with SessionLocal() as session:          # the operator's switches on /admin
+                prefs = await get_prefs(session, self.s.telegram_signal_alerts)
+            if not prefs.get(live_kind(text), True):
+                return
+        except Exception:
+            log.warning("live: telegram prefs unavailable; sending", exc_info=True)
+        try:
             async with httpx.AsyncClient(timeout=15) as c:
                 await c.post(f"https://api.telegram.org/bot{self.s.telegram_bot_token}/sendMessage",
                              json={"chat_id": self.s.telegram_chat_id, "text": text,

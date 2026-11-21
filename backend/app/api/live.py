@@ -741,6 +741,27 @@ class BillingConfigIn(BaseModel):
     wallet: str | None = None
 
 
+@router.get("/telegram")
+async def telegram_prefs(session: Session, _: Auth) -> dict[str, Any]:
+    from app.tg_prefs import KINDS, get_prefs
+
+    s = get_settings()
+    prefs = await get_prefs(session, s.telegram_signal_alerts, fresh=True)
+    return {"configured": bool(s.telegram_bot_token and s.telegram_chat_id),
+            "kinds": [{"key": k, "title": t, "help": h, "on": prefs[k]} for k, t, h in KINDS]}
+
+
+@router.put("/telegram")
+async def telegram_prefs_set(body: dict[str, bool], request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    from app.tg_prefs import set_prefs
+    from app.users import audit
+
+    await set_prefs(session, body, get_settings().telegram_signal_alerts)
+    await audit(session, "admin", "telegram_prefs", "telegram", body, _ip(request))
+    await session.commit()
+    return await telegram_prefs(session, _)
+
+
 @router.get("/billing")
 async def billing(session: Session, _: Auth) -> dict[str, Any]:
     from datetime import timedelta

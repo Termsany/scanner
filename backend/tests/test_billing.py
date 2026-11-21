@@ -292,3 +292,18 @@ def test_coupons_admin_apply_and_months(env):
         assert bills == [(59.0, 29.5, 29.5, "HALF2"), (59.0, 29.5, 29.5, "HALF2"), (59.0, 0.0, 59.0, None)]
         assert left == 0
         c.put("/api/live/billing/config", headers=ADMIN, json={"enabled": False})
+
+
+def test_telegram_switches_api(env):
+    from app import tg_prefs
+
+    tg_prefs._cache.update(at=-1e9, prefs=None)
+    with TestClient(app) as c:
+        assert c.get("/api/live/telegram").status_code == 401
+        r = c.get("/api/live/telegram", headers=ADMIN).json()
+        assert {k["key"] for k in r["kinds"]} == set(tg_prefs.DEFAULTS) and all(k["on"] for k in r["kinds"] if k["key"] != "signals")
+        r = c.put("/api/live/telegram", headers=ADMIN, json={"live_skips": False, "bogus": False}).json()
+        on = {k["key"]: k["on"] for k in r["kinds"]}
+        assert on["live_skips"] is False and on["live_trades"] is True and "bogus" not in on
+        tg_prefs._cache.update(at=-1e9, prefs=None)
+        assert {k["key"]: k["on"] for k in c.get("/api/live/telegram", headers=ADMIN).json()["kinds"]}["live_skips"] is False

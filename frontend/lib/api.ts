@@ -1,4 +1,5 @@
 import type {
+  TelegramPrefs,
   AIAnalysis,
   Chain,
   ChartData,
@@ -181,6 +182,12 @@ export const api = {
     }),
 
   terms: () => request<PublicTerms>("/api/me/terms"),
+
+  telegramPrefs: (password: string) =>
+    request<TelegramPrefs>("/api/live/telegram", { ...adm(password) }),
+
+  setTelegramPrefs: (password: string, body: Record<string, boolean>) =>
+    request<TelegramPrefs>("/api/live/telegram", { method: "PUT", ...adm(password), body: JSON.stringify(body) }),
 
   billing: (password: string) =>
     request<BillingAdmin>("/api/live/billing", { ...adm(password) }),
