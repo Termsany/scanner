@@ -18,6 +18,7 @@ CACHE_SECONDS = 10.0
 # key, title, help
 KINDS: list[tuple[str, str, str]] = [
     ("live_trades", "Bot buys and sells", "Every buy and sell the bot makes, with the transaction link"),
+    ("leader_exits", "Wallet sold everything", "A copied wallet sold ALL of a token the account still holds"),
     ("live_skips", "Skipped buys", "A wallet bought but the bot did not (price ran away, limits, checks)"),
     ("live_info", "Position notes", "Ignored partial sells, hold-only tokens, hand trades found in the wallet"),
     ("live_errors", "Errors", "Failed buys or sells, not enough SOL"),
@@ -66,6 +67,8 @@ async def set_prefs(session, changes: dict[str, Any], signals_default: bool = Tr
 
 def live_kind(text: str) -> str:
     """The trading bot's note -> its kind (the notes are written in app/live.py with these markers)."""
+    if "🚪" in text:
+        return "leader_exits"
     if "✅ Bought" in text or "💰 Sold" in text:
         return "live_trades"
     if "⏭ Skipped" in text or "🛡 Skipped" in text:

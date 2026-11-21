@@ -1144,6 +1144,8 @@ class CopyEngine:
             LivePosition.token_address == t.token_address, LivePosition.leader_wallet == t.wallet,
             LivePosition.status == "open", *self._mine()))).scalars().first()
         share = _share(t)
+        if share >= 0.99:
+            await self._exit_alert(t, pos)
         if self._hold(t.token_address):
             sym = t.symbol or t.token_address[:6]
             if pos is not None:
@@ -1202,6 +1204,34 @@ class CopyEngine:
                 await session.commit()
         if self.s.live_sell_manual_with_leader and self.x.mode == "live":
             await self._sell_manual(session, t, share)
+
+    async def _exit_alert(self, t: WalletTrade, pos: LivePosition | None) -> None:
+        """The user's alert: a copied wallet sold ALL of a token this account still holds (bot or hand-bought)."""
+        sym = t.symbol or t.token_address[:6]
+        who = t.wallet_label or t.wallet[:6]
+        held_by_hand = 0
+        if pos is None:
+            if self.x.mode != "live":
+                return
+            try:
+                held_by_hand = await self.x.token_balance(t.token_address)
+            except Exception:
+                return
+            if held_by_hand <= 0:
+                return
+        ld = self.a.leaders.get(t.wallet)
+        if pos is None:
+            what = "you still hold it (not a bot position): sell by hand if you want"
+        elif self._hold(t.token_address):
+            what = "it is hold-only: the bot keeps it"
+        elif ld is not None and ld.ignore_sells:
+            what = "its sells are ignored: the bot keeps it (quick exit / max hold)"
+        else:
+            what = "the bot sells its position now"
+        pnl = ""
+        if pos is not None and pos.cost_usd:
+            pnl = f" · in ${pos.cost_usd:,.2f}, out so far ${pos.proceeds_usd or 0:,.2f}"
+        await self.notify(f"{self._tag()} 🚪 {who} sold ALL its ${sym}{pnl}\n{what}")
 
     @staticmethod
     def _following(pos: LivePosition) -> bool:

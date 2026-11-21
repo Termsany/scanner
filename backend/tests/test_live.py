@@ -1907,3 +1907,19 @@ def test_ignore_sells_keeps_the_position_and_quick_exit_still_takes_profit():
 
     before, p = _db(body)
     assert before == [] and p.status == "closed" and p.exit_reason == "take_profit"
+
+
+def test_full_exit_of_a_held_token_sends_an_alert_partial_does_not():
+    pos, x, notes = _run([
+        [_trade()],
+        [_trade(side="sell", pct_sold=40, remaining=6)],          # a trim: no exit alert
+        [_trade(side="sell", pct_sold=100, remaining=0)],         # everything: alert, then the bot sells
+    ])
+    alerts = [n for n in notes if "🚪" in n]
+    assert len(alerts) == 1 and "sold ALL" in alerts[0] and "the bot sells its position now" in alerts[0]
+    assert notes.index(alerts[0]) < max(i for i, n in enumerate(notes) if "💰 Sold" in n)   # alert first
+
+
+def test_exit_alert_kind_is_its_own_switch():
+    from app.tg_prefs import live_kind
+    assert live_kind("🟢 LIVE 🚪 DODY sold ALL its $X") == "leader_exits"
