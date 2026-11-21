@@ -125,6 +125,11 @@ class Settings(BaseSettings):
     live_slippage_bps_unconditional: int = 2_500 # 25% first try for LIVE_UNCONDITIONAL_WALLETS (fresh launches)
     live_max_slippage_bps: int = 5_000           # retries after a slippage failure widen up to this (50%)
     live_priority_fee_lamports: int = 1_000_000  # cap on priority fee per swap (0.001 SOL)
+    # Buy pump.fun / PumpSwap tokens through PumpPortal's transaction API instead of Jupiter (user's choice
+    # 2026-11-21: ~0.5% PumpPortal fee for skipping the shared Jupiter queue). Sells stay on Jupiter.
+    live_direct_pump_buys: bool = False
+    live_direct_priority_fee_sol: float = 0.0005
+    live_direct_slippage_cap_pct: float = 15.0      # direct buys with a chase limit: slippage at most this
     live_min_liquidity_usd: float = 10_000.0
     # Skip a copy buy when the live quote's price per token is more than this % above the price recorded with
     # the leader's buy (we would be buying the leader's pump). None = no limit.

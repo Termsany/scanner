@@ -37,6 +37,11 @@ log = logging.getLogger("live")
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS = 1_000_000_000
+PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+PUMPPORTAL_TRADE = "https://pumpportal.fun/api/trade-local"
+TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+PUMPPORTAL_FEE = 0.005      # PumpPortal's own fee on each trade (included in the simulated SOL spent)
 MAX_TRADE_AGE_SECONDS = 180
 MAX_SELL_ATTEMPTS = 8
 CURSOR = "live:wallet_trades"
@@ -61,6 +66,11 @@ class SlippageError(Dropped):
 def _is_slippage(err: object) -> bool:
     s = str(err)
     return "0x1771" in s or "'Custom': 6001" in s or "Custom(6001)" in s
+
+
+class DirectUnavailable(Exception):
+    """The direct pump.fun / PumpSwap buy could not even be prepared (no price, no transaction): nothing was
+    sent, so the buy falls back to Jupiter."""
 
 
 class ChaseError(Exception):
@@ -513,16 +523,24 @@ class JupiterExecutor:
             raise SwapError(f"swap build failed ({r.status_code}): {r.text[:150]}")
         last_valid = body.get("lastValidBlockHeight")
         _took("swap_build", time.monotonic() - t_build)
-        tx = VersionedTransaction.from_bytes(base64.b64decode(body["swapTransaction"]))
-        signed = VersionedTransaction(tx.message, [self.kp])
-        raw = base64.b64encode(bytes(signed)).decode()
+        return await self._send_tx(base64.b64decode(body["swapTransaction"]), last_valid)
+
+    async def _send_tx(self, tx_bytes: bytes, last_valid: int | None = None,
+                       signed_b64: str | None = None) -> tuple[str, bool]:
+        """Sign an unsigned swap transaction and get it on-chain (see _send). `signed_b64`: already signed and
+        simulated by the caller, so the first send skips the preflight."""
+        from solders.transaction import VersionedTransaction
+
+        tx = VersionedTransaction.from_bytes(tx_bytes)
+        raw = signed_b64 or base64.b64encode(bytes(VersionedTransaction(tx.message, [self.kp]))).decode()
         # First send with preflight (a doomed swap fails here, not on-chain). Then re-broadcast the same signed
         # transaction every ~2 s until it confirms or its blockhash expires: under load, nodes drop transactions
         # and a single send often never lands.
         t_send = time.monotonic()
         try:
             sig = await self._rpc("sendTransaction", [raw, {
-                "encoding": "base64", "skipPreflight": False, "maxRetries": 0, "preflightCommitment": "confirmed"}])
+                "encoding": "base64", "skipPreflight": bool(signed_b64), "maxRetries": 0,
+                "preflightCommitment": "confirmed"}])
         except SwapError as exc:
             if _is_slippage(exc):
                 raise SlippageError("price moved past the slippage limit (simulation)") from exc
@@ -532,7 +550,7 @@ class JupiterExecutor:
         deadline = time.monotonic() + 90
         n = 0
         while time.monotonic() < deadline:
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)        # was 2 s: the confirmation is seen up to 1.5 s sooner
             n += 1
             st = ((await self._rpc("getSignatureStatuses", [[sig]])) or {}).get("value", [None])[0]
             if st:
@@ -544,9 +562,16 @@ class JupiterExecutor:
                     _took("confirm", time.monotonic() - t_sent)
                     return sig, True
                 continue        # processed: landed, waiting for confirmation; no need to resend
-            if last_valid and n % 3 == 0:
+            if n % 4:
+                continue                    # re-broadcast / expiry check every ~2 s as before
+            if last_valid and n % 12 == 0:
                 height = await self._rpc("getBlockHeight", [{"commitment": "confirmed"}])
                 if isinstance(height, int) and height > last_valid:
+                    raise Dropped(f"{sig[:12]}… expired without landing")
+            elif not last_valid and n % 12 == 0:      # PumpPortal gives no last valid height: ask about the blockhash
+                valid = await self._rpc("isBlockhashValid", [str(tx.message.recent_blockhash),
+                                                             {"commitment": "processed"}])
+                if isinstance(valid, dict) and valid.get("value") is False:
                     raise Dropped(f"{sig[:12]}… expired without landing")
             try:
                 await self._rpc("sendTransaction", [raw, {"encoding": "base64", "skipPreflight": True,
@@ -572,9 +597,20 @@ class JupiterExecutor:
 
     async def _buy_attempts(self, mint: str, usd: float, max_price: float | None, bps: int,
                             timing: dict[str, float], t_start: float) -> Fill:
+        direct = self.s.live_direct_pump_buys and mint.endswith("pump")
         for attempt in range(3):   # nothing is spent when a swap is dropped or hits slippage: try again, fresh quote
             try:
-                f = await self._buy_once(mint, usd, max_price, bps)
+                f = None
+                if direct:
+                    try:
+                        f = await self._buy_direct(mint, usd, max_price, bps)
+                        timing["route"] = "pumpportal"
+                    except DirectUnavailable as exc:
+                        log.info("buy %s: direct route unavailable (%s); using Jupiter", mint[:8], exc)
+                        direct = False
+                if f is None:
+                    f = await self._buy_once(mint, usd, max_price, bps)
+                    timing["route"] = "jupiter"
                 timing["attempts"] = attempt + 1
                 timing["executor_total"] = round(time.monotonic() - t_start, 2)
                 f.timing = dict(timing)
@@ -586,6 +622,102 @@ class JupiterExecutor:
                     bps = self._wider(bps)
                 log.warning("buy %s: %s; retrying with a fresh quote (slippage %.0f%%)", mint[:8], exc, bps / 100)
         raise SwapError("unreachable")
+
+    async def _simulate_buy(self, raw_b64: str, mint: str) -> tuple[int, int, Any]:
+        """Simulate a signed buy: (tokens it would bring, lamports it would cost, error). Reads both token programs'
+        accounts, since newer pump.fun mints are Token-2022."""
+        from app.solana_pda import TOKEN_PROGRAM, associated_token_address
+
+        atas = [associated_token_address(self.pubkey, mint, TOKEN_PROGRAM),
+                associated_token_address(self.pubkey, mint, TOKEN_2022_PROGRAM)]
+        res = await self._rpc("simulateTransaction", [raw_b64, {
+            "encoding": "base64", "commitment": "processed", "sigVerify": False,
+            "accounts": {"encoding": "jsonParsed", "addresses": [self.pubkey, *atas]}}])
+        v = (res or {}).get("value") or {}
+        accs = v.get("accounts") or [None, None, None]
+        tokens = 0
+        for acc in accs[1:]:
+            try:
+                tokens = max(tokens, int(acc["data"]["parsed"]["info"]["tokenAmount"]["amount"]))
+            except Exception:
+                pass
+        lamports_after = int((accs[0] or {}).get("lamports") or 0)
+        return tokens, lamports_after, v.get("err")
+
+    async def _buy_direct(self, mint: str, usd: float, max_price: float | None, bps: int) -> Fill:
+        """Buy a pump.fun / PumpSwap token through PumpPortal's transaction API: no Jupiter queue. The signed
+        transaction is simulated first, which gives the exact tokens and SOL for the chase check (and replaces the
+        preflight). Anything that fails before sending raises DirectUnavailable (the caller uses Jupiter)."""
+        from solders.transaction import VersionedTransaction
+
+        if not getattr(self, "kp", None) or not self.pubkey:
+            raise DirectUnavailable("no wallet key (dry run)")
+        before = asyncio.ensure_future(asyncio.gather(self.token_balance(mint), self.sol_balance()))
+        try:
+            t0 = time.monotonic()
+            px = await self.sol_price()
+            _took("sol_price", time.monotonic() - t0)
+            lamports = int(usd / px * LAMPORTS)
+            slip = bps
+            if max_price:       # the price we may pay is checked on the simulation below; cap the slippage too
+                slip = max(min(bps, int(self.s.live_direct_slippage_cap_pct * 100)), 100)
+            t0 = time.monotonic()
+            try:
+                r = await self.http.post(PUMPPORTAL_TRADE, data={
+                    "publicKey": self.pubkey, "action": "buy", "mint": mint, "amount": f"{lamports / LAMPORTS:.9f}",
+                    "denominatedInSol": "true", "slippage": f"{slip / 100:.2f}",
+                    "priorityFee": f"{self.s.live_direct_priority_fee_sol:.6f}", "pool": "auto"}, timeout=8)
+            except Exception as exc:
+                raise DirectUnavailable(f"PumpPortal: {exc}") from exc
+            _took("direct_build", time.monotonic() - t0)
+            ctype = r.headers.get("content-type", "")
+            if r.status_code != 200 or not r.content or ctype.startswith(("application/json", "text")):
+                raise DirectUnavailable(f"PumpPortal {r.status_code}: {r.text[:150]}")
+            try:
+                tx = VersionedTransaction.from_bytes(r.content)
+            except Exception as exc:
+                raise DirectUnavailable(f"PumpPortal sent no transaction: {exc}") from exc
+            signed = VersionedTransaction(tx.message, [self.kp])
+            raw = base64.b64encode(bytes(signed)).decode()
+            t0 = time.monotonic()
+            tok0, sol0 = await before
+            _took("balances", time.monotonic() - t0)
+            t0 = time.monotonic()
+            try:
+                tok_after, lam_after, err = await self._simulate_buy(raw, mint)
+            except Exception as exc:
+                raise DirectUnavailable(f"simulation failed: {exc}") from exc
+            _took("simulate", time.monotonic() - t0)
+            if err:     # nothing was sent: Jupiter tries it (PumpPortal's build fails on some newer pools)
+                raise DirectUnavailable(f"simulation error: {err}")
+            got = tok_after - tok0
+            spent = sol0 - lam_after / LAMPORTS
+            if got <= 0 or spent <= 0:
+                raise DirectUnavailable("simulation shows no tokens")
+            if max_price:
+                decimals = await self.decimals(mint)
+                pay = spent * px / (got / 10 ** decimals)
+                if pay > max_price:
+                    raise ChaseError(pay, max_price)
+            if self.mode == "dry":
+                self._dry_n += 1
+                return Fill(f"dry-direct-{self._dry_n}", spent, got, px)
+        finally:
+            if not before.done():
+                before.cancel()
+        sig, ok = await self._send_tx(r.content, signed_b64=raw)
+        t0 = time.monotonic()
+        got = 0
+        for _ in range(8):
+            await asyncio.sleep(0.4)
+            got = await self.token_balance(mint) - tok0
+            if got > 0:
+                break
+        sol1 = await self.sol_balance()
+        _took("after_confirm", time.monotonic() - t0)
+        if got <= 0:
+            raise SwapError(f"buy {sig} {'not confirmed' if not ok else 'returned no tokens'}")
+        return Fill(sig, max(sol0 - sol1, 0.0), got, px)
 
     async def _buy_once(self, mint: str, usd: float, max_price: float | None = None,
                         bps: int | None = None) -> Fill:

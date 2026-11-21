@@ -1742,3 +1742,107 @@ def test_buy_keeps_its_timing():
     p = _db(body)
     t = p.fills[0]["timing"]
     assert {"pickup", "checks", "buy_call", "block_to_bought"} <= set(t) and t["block_to_bought"] >= 0
+
+
+def _direct_exec(sim=(0, 0, None), pp_status=200):
+    """JupiterExecutor in live mode with PumpPortal, the RPC and Jupiter stubbed (nothing leaves the test)."""
+    import httpx as hx
+    from solders.hash import Hash
+    from solders.keypair import Keypair
+    from solders.message import MessageV0
+    from solders.transaction import VersionedTransaction
+
+    from app.live import JupiterExecutor
+
+    kp = Keypair()
+    calls = {"quote": 0, "sent": 0, "pp": 0}
+    x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/",
+                                 live_direct_pump_buys=True), live=True, private_key=str(kp))
+    unsigned = bytes(VersionedTransaction(MessageV0.try_compile(kp.pubkey(), [], [], Hash.default()), [kp]))
+    state = {"tok": 0, "sol": 2.0}
+
+    async def sol_price():
+        return 100.0
+
+    async def decimals(mint):
+        return 6
+
+    async def token_balance(mint):
+        return state["tok"]
+
+    async def sol_balance():
+        return state["sol"]
+
+    async def quote(a, b, lamports, bps=None):
+        calls["quote"] += 1
+        return {"outAmount": "1000000", "inAmount": str(lamports)}
+
+    async def simulate(raw, mint):
+        return sim
+
+    async def post(url, **kw):
+        calls["pp"] += 1
+        return hx.Response(pp_status, content=unsigned, headers={"content-type": "application/octet-stream"})
+
+    async def send_tx(tx_bytes, last_valid=None, signed_b64=None):
+        calls["sent"] += 1
+        state["tok"] += sim[0]
+        state["sol"] = sim[1] / 1e9
+        return "SIGD", True
+
+    x.sol_price, x.decimals, x.quote, x.token_balance, x.sol_balance = sol_price, decimals, quote, token_balance, sol_balance
+    x._simulate_buy, x.http.post, x._send_tx = simulate, post, send_tx
+    return x, calls
+
+
+MINT_PUMP = "ByCUjGx4FkhK7ac8Vdqzb41yScUtvG78GBYSXKsMpump"
+
+
+def test_direct_pump_buy_uses_pumpportal_and_the_simulated_price():
+    async def go():
+        # simulation: +100 tokens (6 decimals: 100e6 raw), SOL 2.0 -> 1.7 (0.3 SOL = $30)
+        x, calls = _direct_exec(sim=(100_000_000, int(1.7e9), None))
+        try:
+            f = await x.buy(MINT_PUMP, 30.0, max_price=0.31)             # pays $0.30 per token: under the limit
+        finally:
+            await x.close()
+        return f, calls
+
+    f, calls = asyncio.run(go())
+    assert f.signature == "SIGD" and f.timing["route"] == "pumpportal"
+    assert calls == {"quote": 0, "sent": 1, "pp": 1} and f.tokens_raw == 100_000_000
+
+
+def test_direct_buy_chase_skips_and_failures_fall_back_to_jupiter():
+    from app.live import ChaseError
+
+    async def chase():
+        x, calls = _direct_exec(sim=(100_000_000, int(1.7e9), None))
+        try:
+            await x.buy(MINT_PUMP, 30.0, max_price=0.25)                 # would pay $0.30: skip, nothing sent
+        finally:
+            await x.close()
+
+    try:
+        asyncio.run(chase())
+        raise AssertionError("expected ChaseError")
+    except ChaseError:
+        pass
+
+    async def failing_sim():
+        x, calls = _direct_exec(sim=(0, 0, {"InstructionError": [3, {"Custom": 6004}]}))
+        x._buy_once = None    # set below
+
+        async def jup(mint, usd, max_price=None, bps=None):
+            calls["quote"] += 1
+            return Fill("SIGJ", 0.3, 5, 100.0)
+
+        x._buy_once = jup
+        try:
+            f = await x.buy(MINT_PUMP, 30.0, max_price=1.0)
+        finally:
+            await x.close()
+        return f, calls
+
+    f, calls = asyncio.run(failing_sim())
+    assert f.signature == "SIGJ" and f.timing["route"] == "jupiter" and calls["sent"] == 0
