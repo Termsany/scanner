@@ -33,6 +33,7 @@ from app.repository import utc
 log = logging.getLogger("paper")
 
 CLUSTER_MINUTES = 10
+DULX = "DULX3e6vt1ZpHq3AdCUBZLPZ1CrhApdNKcewMPxZQRXf"
 CLUSTER_MIN_WALLETS = 2
 CURSOR_TRADES = "paper:wallet_trades"
 CURSOR_SIGNALS = "paper:signals"
@@ -47,6 +48,11 @@ class Strategy:
     max_hold_minutes: int = 360
     min_score: int | None = None
     mirror: bool = False        # no TP / SL: sell the same share the leader sells
+    leader: str | None = None   # only this wallet's buys (first buy of a token)
+    min_usd: float | None = None   # ... and only when its buy is this big
+    max_usd: float | None = None
+    live_rule: bool = False     # exit like the live engine: leader trims before 2x -> follow every leader sell;
+                                # otherwise 50% at 2x, the rest only on the leader's full exit
 
 
 # priced and closed by their own loops (app/sniper.py, app/grad.py), second by second
@@ -57,6 +63,11 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("wallet_cluster", f"{CLUSTER_MIN_WALLETS}+ tracked wallets buy within {CLUSTER_MINUTES} min"),
     Strategy("wallet_mirror", "Copy the wallet: buy with it, sell the same share when it sells",
              tp_pct=0.0, sl_pct=0.0, mirror=True),
+    # DULX3e test (user's request 2026-11-21): same exits as live; all buys vs only its $50-1000 buys
+    Strategy("dulx_all", "Copy DULX3e like live (50% at 2x, rest on its full exit)", tp_pct=0.0, sl_pct=0.0,
+             leader=DULX, live_rule=True),
+    Strategy("dulx_50_1000", "Copy DULX3e like live, only its $50-1000 buys", tp_pct=0.0, sl_pct=0.0,
+             leader=DULX, min_usd=50.0, max_usd=1000.0, live_rule=True),
     Strategy("signal_80", "Scanner signal, score >= 80", min_score=80),
     Strategy("signal_85", "Scanner signal, score >= 85", min_score=85),
     # run by app/sniper.py (own live feed and exits); listed here so /paper shows them
@@ -130,7 +141,8 @@ def _open(session: AsyncSession, keys: set, strategy: Strategy, *, chain: Chain,
         strategy=strategy.name, chain=chain, token_address=token, symbol=symbol or "", trigger=trigger[:160],
         trigger_wallet=wallet, status="open", size_usd=s.paper_size_usd, entry_time=at, entry_price=price,
         fill_price=price * (1 + s.paper_slippage_pct / 100), tp_pct=strategy.tp_pct, sl_pct=strategy.sl_pct,
-        max_hold_minutes=(s.paper_mirror_max_hold_hours * 60 if strategy.mirror else strategy.max_hold_minutes),
+        max_hold_minutes=(s.paper_mirror_max_hold_hours * 60 if strategy.mirror or strategy.live_rule
+                          else strategy.max_hold_minutes),
         last_price=price, last_priced_at=at, peak_pct=0.0, trough_pct=0.0,
         remaining_frac=1.0, proceeds_usd=0.0, leader_trade_id=leader_trade_id,
     )
@@ -167,6 +179,17 @@ async def process_entries(session: AsyncSession, s: Settings | None = None) -> i
                     symbol=t.symbol, price=t.price_usd, trigger=f"copy {label}{usd}", at=now, s=s,
                     wallet=t.wallet, leader_trade_id=t.id):
                 opened += 1
+            for strat in STRATEGIES.values():          # one leader's first buys, maybe sized
+                if strat.leader != t.wallet or not t.first_buy:
+                    continue
+                if strat.min_usd is not None and (t.usd_value or 0) < strat.min_usd:
+                    continue
+                if strat.max_usd is not None and (t.usd_value or 0) > strat.max_usd:
+                    continue
+                if _open(session, keys, strat, chain=t.chain, token=t.token_address, symbol=t.symbol,
+                         price=t.price_usd, trigger=f"copy {label}{usd}", at=now, s=s, wallet=t.wallet,
+                         leader_trade_id=t.id):
+                    opened += 1
             # cluster: distinct tracked wallets buying this token in the last CLUSTER_MINUTES
             ref = utc(t.block_time) or utc(t.detected_at) or now
             window_start = ref - timedelta(minutes=CLUSTER_MINUTES)
@@ -268,6 +291,11 @@ async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings
         strat = STRATEGIES.get(p.strategy)
         mirror = bool(strat and strat.mirror)
 
+        if strat and strat.live_rule and p.trigger_wallet:
+            if await _live_rule_step(session, p, px, now, s):
+                closed += 1
+            continue
+
         # wallet_mirror: copy each leader sell with the same share of what is left
         if mirror and p.trigger_wallet:
             sells = (await session.execute(
@@ -332,6 +360,51 @@ async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings
     return closed
 
 
+def _sell_share(p: PaperPosition, share: float, at_px: float, s: Settings) -> None:
+    frac = 1.0 if p.remaining_frac is None else p.remaining_frac
+    sold = frac * share
+    p.proceeds_usd = (p.proceeds_usd or 0.0) + p.size_usd * sold / p.fill_price * at_px * (1 - s.paper_slippage_pct / 100)
+    p.remaining_frac = frac - sold
+
+
+async def _live_rule_step(session: AsyncSession, p: PaperPosition, px: float | None, now: datetime,
+                          s: Settings) -> bool:
+    """The live engine's exit rule on paper. Returns True when the position closed."""
+    sells = (await session.execute(
+        select(WalletTrade).where(
+            WalletTrade.chain == p.chain, WalletTrade.token_address == p.token_address,
+            WalletTrade.wallet == p.trigger_wallet, WalletTrade.side == "sell",
+            WalletTrade.kind == "sell", WalletTrade.id > (p.leader_trade_id or 0),
+        ).order_by(WalletTrade.id)
+    )).scalars().all()
+    for sell in sells:
+        p.leader_trade_id = sell.id
+        at_px = px or sell.price_usd or p.last_price or p.entry_price
+        full = (sell.remaining_amount is not None and sell.remaining_amount <= 0) or (sell.pct_sold or 0) >= 99
+        if full:
+            _close(p, at_px, "leader_sold", now, s)
+            return True
+        if p.exit_mode == "half":
+            continue                                   # capital is out: only the leader's full exit counts
+        p.exit_mode = "follow"                         # a trim before our 2x: follow every leader sell
+        _sell_share(p, min((sell.pct_sold or 0) / 100, 1.0), at_px, s)
+        if (p.remaining_frac or 0) <= 0.01:
+            _close(p, at_px, "leader_sold", now, s)
+            return True
+    if px is not None and p.exit_mode is None and px >= 2 * p.fill_price:
+        _sell_share(p, 0.5, px, s)                     # 2x: half out, the rest waits for the leader's full exit
+        p.exit_mode = "half"
+        log.info("paper %s %s: 50%% at 2x @ %.10g", p.strategy, p.symbol or p.token_address, px)
+    if now - utc(p.entry_time) >= timedelta(minutes=p.max_hold_minutes):
+        _close(p, p.last_price or p.entry_price, "time", now, s)
+        return True
+    last = utc(p.last_priced_at) or utc(p.entry_time)
+    if px is None and now - last >= timedelta(minutes=s.paper_no_price_minutes):
+        _close(p, p.last_price or p.entry_price, "no_price", now, s)
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
@@ -377,8 +450,8 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
         realized = sum(r.pnl_usd or 0.0 for r in closed)
         strategies.append({
             "name": strat.name, "title": strat.title, "tp_pct": strat.tp_pct, "sl_pct": strat.sl_pct,
-            "mirror": strat.mirror,
-            "max_hold_minutes": s.paper_mirror_max_hold_hours * 60 if strat.mirror else strat.max_hold_minutes,
+            "mirror": strat.mirror or strat.live_rule,
+            "max_hold_minutes": s.paper_mirror_max_hold_hours * 60 if strat.mirror or strat.live_rule else strat.max_hold_minutes,
             "trades": len(mine), "open": len(opened), "closed": len(closed), "wins": len(wins),
             "win_rate": round(len(wins) / len(closed), 3) if closed else None,
             "realized_usd": round(realized, 2), "unrealized_usd": round(unreal, 2),

@@ -67,7 +67,8 @@ def test_no_backfill_then_follow_cluster_and_mirror():
         rows = (await sess.execute(select(PaperPosition))).scalars().all()
         by = {r.strategy for r in rows}
         # follow (one per token), mirror (leader only), cluster (2 wallets in 10 min, counting the pre-run buy)
-        assert by == {"wallet_follow", "wallet_mirror", "wallet_cluster"} and opened == 3
+        # + the two DULX3e copies (LEADER is DULX3e, its $500 buy fits both)
+        assert by == {"wallet_follow", "wallet_mirror", "wallet_cluster", "dulx_all", "dulx_50_1000"} and opened == 5
         assert sum(r.strategy == "wallet_mirror" for r in rows) == 1
         return True
 
@@ -158,6 +159,63 @@ def test_signals_stop_loss_and_no_price():
         reasons = {(r.token_address, r.strategy): r.exit_reason for r in rows}
         assert reasons[(MINT, "signal_80")] == "stop_loss" and reasons[(MINT, "signal_85")] == "stop_loss"
         assert reasons[("Mint2", "signal_80")] == "no_price"
+        return True
+
+    assert _db(body)
+
+
+def _usd_trade(i, usd, **kw):
+    t = _trade(i, LEADER, **kw)
+    t.usd_value = usd
+    return t
+
+
+def test_dulx_paper_size_filter_and_live_exit_rule():
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)
+        await sess.commit()
+        sess.add(_usd_trade(1, 500, price=1.0))                       # $500 buy: both strategies
+        sess.add(_usd_trade(2, 2000, price=1.0, mint="Big1111"))      # $2000: only dulx_all
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy.like("dulx%")))).scalars().all()
+        assert sorted((r.strategy, r.token_address) for r in rows) == [
+            ("dulx_50_1000", MINT), ("dulx_all", "Big1111"), ("dulx_all", MINT)]
+
+        # 2x without a leader trim: half out, then the leader's partial sell is ignored, full exit closes
+        await process_exits(sess, _prices({MINT: 2.1, "Big1111": 1.0}), s)
+        await sess.commit()
+        m = next(r for r in rows if r.strategy == "dulx_all" and r.token_address == MINT)
+        await sess.refresh(m)
+        assert m.exit_mode == "half" and abs(m.remaining_frac - 0.5) < 1e-9 and m.status == "open"
+        sess.add(_usd_trade(3, 100, side="sell", price=2.5, pct_sold=40.0, remaining=6))
+        await sess.commit()
+        await process_exits(sess, _prices({MINT: 2.5, "Big1111": 1.0}), s)
+        await sess.commit()
+        await sess.refresh(m)
+        assert abs(m.remaining_frac - 0.5) < 1e-9 and m.status == "open"
+        sess.add(_usd_trade(4, 100, side="sell", price=3.0, pct_sold=100.0, remaining=0))
+        await sess.commit()
+        await process_exits(sess, _prices({MINT: 3.0, "Big1111": 1.0}), s)
+        await sess.commit()
+        await sess.refresh(m)
+        assert m.status == "closed" and m.exit_reason == "leader_sold" and m.pnl_pct > 100
+
+        # trim before 2x: follow the same share, no 50% at 2x afterwards
+        b = next(r for r in rows if r.token_address == "Big1111")
+        sess.add(_usd_trade(5, 100, side="sell", price=1.2, pct_sold=30.0, remaining=7, mint="Big1111"))
+        await sess.commit()
+        await process_exits(sess, _prices({"Big1111": 1.2}), s)
+        await sess.commit()
+        await sess.refresh(b)
+        assert b.exit_mode == "follow" and abs(b.remaining_frac - 0.7) < 1e-9
+        await process_exits(sess, _prices({"Big1111": 2.5}), s)
+        await sess.commit()
+        await sess.refresh(b)
+        assert abs(b.remaining_frac - 0.7) < 1e-9                    # no half at 2x in follow mode
         return True
 
     assert _db(body)

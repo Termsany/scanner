@@ -293,6 +293,7 @@ class PaperPosition(Base):
     remaining_frac: Mapped[float | None] = mapped_column(Float, nullable=True, default=1.0)
     proceeds_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)
     leader_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # last leader sell copied
+    exit_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)   # live-rule paper: follow | half
 
 
 class LivePosition(Base):
