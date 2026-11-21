@@ -49,6 +49,9 @@ class Strategy:
     mirror: bool = False        # no TP / SL: sell the same share the leader sells
 
 
+# priced and closed by their own loops (app/sniper.py, app/grad.py), second by second
+SELF_PRICED = ("snipe_all", "snipe_momentum", "grad_all", "grad_confirm")
+
 STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("wallet_follow", "Follow a tracked wallet (exit when it sells)"),
     Strategy("wallet_cluster", f"{CLUSTER_MIN_WALLETS}+ tracked wallets buy within {CLUSTER_MINUTES} min"),
@@ -58,6 +61,10 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("signal_85", "Scanner signal, score >= 85", min_score=85),
     # run by app/sniper.py (own live feed and exits); listed here so /paper shows them
     Strategy("snipe_all", "Sniper: sample of every new pump.fun token", tp_pct=50.0, sl_pct=-30.0, max_hold_minutes=5),
+    Strategy("grad_all", "Graduation: every pump.fun token just moved to PumpSwap", tp_pct=50.0, sl_pct=-20.0,
+             max_hold_minutes=30),
+    Strategy("grad_confirm", "Graduation: just moved to PumpSwap and still rising a minute later", tp_pct=50.0,
+             sl_pct=-20.0, max_hold_minutes=30),
     Strategy("snipe_momentum", "Sniper: new pump.fun token with early buying", tp_pct=50.0, sl_pct=-30.0,
              max_hold_minutes=5),
 )}
@@ -227,8 +234,8 @@ def _close(pos: PaperPosition, price: float, reason: str, at: datetime, s: Setti
 async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings | None = None) -> int:
     s = s or get_settings()
     open_pos = (await session.execute(select(PaperPosition).where(
-        PaperPosition.status == "open", PaperPosition.strategy.notin_(("snipe_all", "snipe_momentum"))))).scalars().all()
-    if not open_pos:            # (sniper positions are priced and closed by app/sniper.py, second by second)
+        PaperPosition.status == "open", PaperPosition.strategy.notin_(SELF_PRICED)))).scalars().all()
+    if not open_pos:            # (sniper / grad positions are priced by their own loops)
         return 0
     now = _now()
 
@@ -342,7 +349,7 @@ def _row(p: PaperPosition, s: Settings) -> dict[str, Any]:
         "pnl_usd": p.pnl_usd, "pnl_pct": p.pnl_pct,
         "remaining_pct": round((1.0 if p.remaining_frac is None else p.remaining_frac) * 100, 1),
     }
-    if p.status == "open" and p.last_price and not (p.strategy.startswith("snipe_") and p.pnl_usd is not None):
+    if p.status == "open" and p.last_price and not (p.strategy in SELF_PRICED and p.pnl_usd is not None):
         d["pnl_usd"] = _value(p, p.last_price, s) - p.size_usd
         d["pnl_pct"] = d["pnl_usd"] / p.size_usd * 100
     return d

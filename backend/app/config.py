@@ -96,6 +96,21 @@ class Settings(BaseSettings):
     sniper_min_net_sol: float = 3.0
     sniper_max_open: int = 60
 
+    # Paper graduation trades (app/grad.py): pump.fun tokens right after they move to PumpSwap. Simulated only.
+    grad_paper_enabled: bool = False
+    grad_size_usd: float = 30.0
+    grad_latency_s: float = 2.0                  # our assumed delay from decision to a landed buy
+    grad_fee_pct: float = 1.0                    # PumpSwap fee + priority/tip, each way
+    grad_slippage_pct: float = 1.5               # each way
+    grad_sl_pct: float = -20.0
+    grad_tp1_pct: float = 20.0                   # sell GRAD_TP1_FRAC here...
+    grad_tp1_frac: float = 0.5
+    grad_tp2_pct: float = 50.0                   # ...and the rest here
+    grad_max_hold_s: float = 1800.0
+    grad_confirm_s: float = 60.0                 # grad_confirm: look this long after the migration...
+    grad_confirm_min_pct: float = 5.0            # ...and buy only if the price is up at least this much
+    grad_max_open: int = 40
+
     # Live copy trading (REAL money, Solana via Jupiter). Off unless LIVE_MODE=live AND a key is set.
     #   off     nothing runs
     #   dry     quotes real Jupiter routes and logs what it would do; never signs or sends
