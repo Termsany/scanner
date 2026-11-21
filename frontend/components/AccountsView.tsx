@@ -46,6 +46,9 @@ function save(v: string | null) {
 const input =
   "w-full rounded-md border border-line bg-carbon px-2.5 py-1.5 text-sm outline-none focus:border-accent";
 
+// small number boxes (quick exit targets): no w-full, or they collapse inside the narrow column
+const tiny = "num shrink-0 rounded border border-line bg-carbon px-1 py-0.5 text-center text-[11px] text-ink outline-none focus:border-accent";
+
 function short(a: string) {
   return `${a.slice(0, 4)}…${a.slice(-4)}`;
 }
@@ -336,16 +339,16 @@ function Leaders({ d, set, openBy, onToggle }: {
                   <input type="checkbox" checked={!!l.quick_exit} aria-label="Quick exit"
                     onChange={(e) => upd(i, { quick_exit: e.target.checked })} />
                   {l.quick_exit && (
-                    <div className="mt-1 flex items-center justify-center gap-1 text-[11px] text-muted">
-                      <input className={`${input} num w-14 px-1 py-0.5 text-[11px]`} inputMode="decimal" placeholder="50"
+                    <div className="mt-1 flex min-w-[13rem] items-center justify-center gap-1 text-[11px] text-muted">
+                      <input className={`${tiny} w-14`} inputMode="decimal" placeholder="50"
                         title="Take profit: sell everything at +this %" value={l.quick_tp_pct ?? ""}
                         onChange={(e) => upd(i, { quick_tp_pct: e.target.value === "" ? null : Number(e.target.value) })} />
                       <span>%/</span>
-                      <input className={`${input} num w-14 px-1 py-0.5 text-[11px]`} inputMode="decimal" placeholder="-25"
+                      <input className={`${tiny} w-14`} inputMode="decimal" placeholder="-25"
                         title="Stop loss: sell everything at this % (negative)" value={l.quick_sl_pct ?? ""}
                         onChange={(e) => upd(i, { quick_sl_pct: e.target.value === "" ? null : Number(e.target.value) })} />
                       <span>%/</span>
-                      <input className={`${input} num w-12 px-1 py-0.5 text-[11px]`} inputMode="decimal" placeholder="6"
+                      <input className={`${tiny} w-12`} inputMode="decimal" placeholder="6"
                         title="Time limit: sell everything after this many hours" value={l.quick_hours ?? ""}
                         onChange={(e) => upd(i, { quick_hours: e.target.value === "" ? null : Number(e.target.value) })} />
                       <span>h</span>
