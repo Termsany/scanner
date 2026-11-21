@@ -183,6 +183,11 @@ class Settings(BaseSettings):
         "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",   # ETH on Solana (Wormhole / Portal)
         "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",    # TTWO
     ])
+    # Per-wallet "quick exit" switch (off by default; the user's 2x rule otherwise): sell everything at
+    # +TP, at -SL, after the time limit, or on the wallet's first sell (like the paper wallet_follow)
+    live_quick_tp_pct: float = 50.0
+    live_quick_sl_pct: float = -25.0
+    live_quick_max_hold_minutes: float = 360.0
     live_max_hold_hours: int = 24 * 7            # sell everything after this even if the leader still holds
     live_time_stop_minutes: float | None = None  # off (user's choice). Set N to sell positions whose capital
                                                  # is not back N minutes after the buy

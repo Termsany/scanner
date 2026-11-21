@@ -115,6 +115,7 @@ class Leader:
     size_usd: float | None = None    # entry size for this leader; None = the account's
     enabled: bool = True             # off: no new buys from it; its open positions still follow its sells
     max_chase_pct: float | None = None   # never pay more than this % above its price; None = account default
+    quick_exit: bool = False         # its positions sell all at +TP / -SL / time / its first sell (no 2x rule)
 
 
 _FROM_SETTINGS = object()
@@ -141,10 +142,12 @@ class Account:
 # What a user is told about an exit: never which wallet, only what happened
 USER_REASON = {"leader_sold": "exit signal", "leader_trim": "partial exit", "take_capital": "capital taken back",
                "sold_by_hand": "sold by hand", "manual": "sold from your page", "max_hold": "max hold time",
-               "time_stop": "time limit, no profit"}
+               "time_stop": "time limit, no profit", "take_profit": "profit target", "stop_loss": "stop loss",
+               "quick_time": "time limit"}
 USER_REASON_AR = {"leader_sold": "إشارة خروج", "leader_trim": "خروج جزئي", "take_capital": "سحب رأس المال",
                   "sold_by_hand": "اتباعت يدوي", "manual": "اتباعت من صفحتك", "max_hold": "انتهت مدة الاحتفاظ",
-                  "time_stop": "انتهى الوقت من غير ربح"}
+                  "time_stop": "انتهى الوقت من غير ربح", "take_profit": "وصل هدف الربح", "stop_loss": "وقف الخسارة",
+                  "quick_time": "انتهى الوقت"}
 
 
 def user_note(lang: str, key: str, **v) -> str:
@@ -728,6 +731,8 @@ class CopyEngine:
         self._said: dict[str, float] = {}    # repeating skip notices -> last time sent
         self._beat = 0.0                     # monotonic time of the last heartbeat written
         self._up_seen: dict[int, int] = {}  # position id -> checks in a row at or above the target
+        self._quick_at = 0.0                # monotonic time of the last quick-exit check
+        self._quick_seen: dict[int, int] = {}   # position id -> quick-exit readings in a row past TP / SL
 
     def update(self, account: Account) -> None:
         """New settings from the /accounts page; takes effect on the next step."""
@@ -762,6 +767,11 @@ class CopyEngine:
     def _hold(self, mint: str) -> bool:
         """Hold-only token: the bot never sells it by itself."""
         return mint in self.s.live_hold_mints
+
+    def _quick(self, pos: LivePosition) -> bool:
+        """This position's wallet has the quick-exit switch on (and the token is not hold-only)."""
+        ld = self.a.leaders.get(pos.leader_wallet or "")
+        return bool(ld and ld.quick_exit) and not self._hold(pos.token_address)
 
     def _take_capital_target(self) -> float | None:
         t = self.a.take_capital_at_pct
@@ -929,7 +939,12 @@ class CopyEngine:
                 await self.notify(f"{self._tag()} 🔒 {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
                                   f"${sym}, but ${sym} is hold-only: keeping it (sell by hand if you want)")
             return
-        if pos is not None:
+        if pos is not None and self._quick(pos):
+            # quick exit: the wallet's first sell (any size) takes the whole position out
+            pos.leader_trade_id = t.id
+            await self._sell(session, pos, 1.0, "leader_sold")
+            await session.commit()
+        elif pos is not None:
             pos.leader_trade_id = t.id
             if share < 0.99 and self.s.live_follow_after_trim:
                 sym = pos.symbol or pos.token_address[:6]
@@ -1310,6 +1325,7 @@ class CopyEngine:
         capped = self.s.live_trim_cap_pct is not None
         todo = [p for p in opened
                 if not self._hold(p.token_address)
+                and not self._quick(p)                                         # quick exit has its own targets
                 and not taken(p)
                 and not (self.s.live_follow_after_trim and self._following(p))   # following the leader instead
                 # with the cap: until that share of the coins is sold; without: until the cost is back
@@ -1373,11 +1389,72 @@ class CopyEngine:
                 p.fills = fills
             await session.commit()
 
+    async def _quick_exits(self, session: AsyncSession) -> None:
+        """Quick-exit wallets: sell the whole position at +TP / -SL (two readings in a row, one when far past)
+        or after the time limit."""
+        if not any(ld.quick_exit for ld in self.a.leaders.values()):
+            return
+        if time.monotonic() - self._quick_at < self.s.live_take_capital_check_seconds:
+            return
+        self._quick_at = time.monotonic()
+        opened = [p for p in (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine()))).scalars().all()
+            if self._quick(p) and int(p.tokens_raw) > 0 and not p.manual_sell_frac
+            and not any(x.get("side") == "sell_failed" for x in (p.fills or []))]
+        if not opened:
+            return
+        now = _now()
+        limit = timedelta(minutes=self.s.live_quick_max_hold_minutes)
+        for p in [p for p in opened if now - utc(p.opened_at) >= limit]:
+            await self._sell(session, p, 1.0, "quick_time")
+            await session.commit()
+        opened = [p for p in opened if p.status == "open" and now - utc(p.opened_at) < limit]
+        if not opened or not hasattr(self.x, "token_prices"):
+            return
+        try:
+            prices = dict(await self.x.token_prices(sorted({p.token_address for p in opened})) or {})
+        except Exception as exc:
+            log.warning("live: quick-exit prices failed: %s", exc)
+            prices = {}
+        tp, sl = 1 + self.s.live_quick_tp_pct / 100, 1 + self.s.live_quick_sl_pct / 100
+
+        def ratio(p: LivePosition, px: dict[str, float] | None) -> float | None:
+            if not px or not px.get("usd") or not p.cost_usd:
+                return None
+            held = int(p.tokens_raw) / 10 ** int(px["decimals"]) * float(px["usd"])
+            return (held + (p.proceeds_usd or 0)) / p.cost_usd
+
+        near = []
+        for p in opened:
+            r = ratio(p, prices.get(p.token_address))
+            if r is None or r >= 1 + (tp - 1) * 0.7 or r <= 1 - (1 - sl) * 0.7:
+                near.append(p.token_address)
+        if (near and hasattr(self.x, "token_prices_fast")
+                and time.monotonic() - self._fast_at >= self.s.live_take_capital_check_seconds):
+            self._fast_at = time.monotonic()
+            try:
+                prices.update(await self.x.token_prices_fast(sorted(set(near))))   # fresher near a target
+            except Exception as exc:
+                log.warning("live: quick-exit fast prices failed: %s", exc)
+        for p in opened:
+            r = ratio(p, prices.get(p.token_address))
+            if r is None or sl < r < tp:
+                self._quick_seen.pop(p.id, None)
+                continue
+            self._quick_seen[p.id] = self._quick_seen.get(p.id, 0) + 1
+            far = r >= 1 + (tp - 1) * self.s.live_take_capital_strong or r <= sl * 0.9
+            if self._quick_seen[p.id] < 2 and not far:       # two readings in a row, unless far past
+                continue
+            self._quick_seen.pop(p.id, None)
+            await self._sell(session, p, 1.0, "take_profit" if r >= tp else "stop_loss")
+            await session.commit()
+
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         await self._reconcile(session)
         await self._adopt_hand_buys(session)
         await self._take_capital(session)
+        await self._quick_exits(session)
         opened = (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine()))).scalars().all()
         for pos in opened:

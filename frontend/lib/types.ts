@@ -470,6 +470,7 @@ export interface LeaderCfg {
   new_tokens_only: boolean;
   size_usd: number | null;
   max_chase_pct?: number | null;   // most paid above its price, %; null = account default
+  quick_exit?: boolean;   // sell all at +50% / -25% / 6 h / its first sell instead of the 2x rule
   enabled?: boolean;   // false: no new buys from it (its open positions still follow its sells)
 }
 

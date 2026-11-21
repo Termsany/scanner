@@ -1590,3 +1590,92 @@ def test_blocked_tokens_are_never_bought():
 
     assert _db(body) == ["A"]
     assert {"pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn"} <= Settings().blocked_mints()
+
+
+def _run_quick(steps, x, quick=True, **settings):
+    from app.live import Account, Leader
+
+    acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, unconditional=True, quick_exit=quick)})
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, **settings), account=acct)
+        await eng.step(sess)
+        for batch in steps:
+            if callable(batch):
+                batch()
+            else:
+                sess.add_all(batch)
+                await sess.commit()
+            await eng.step(sess)
+        return (await sess.execute(select(LivePosition).order_by(LivePosition.id))).scalars().all()
+
+    return _db(body)
+
+
+def test_quick_exit_take_profit_sells_all_and_skips_the_2x_rule():
+    x = PricedExec()
+    pos = _run_quick([
+        [_trade()],                                   # $30 for 1 token
+        lambda: x.price.update(M1=44.0),              # +47%: nothing
+        lambda: x.price.update(M1=46.0),              # +53%: first reading
+        [],                                           # second reading: sell everything
+    ], x)
+    sells = [c for c in x.calls if c[0] == "sell"]
+    assert sells == [("sell", "M1", 1_000_000)]
+    assert pos[0].status == "closed" and pos[0].exit_reason == "take_profit"
+
+
+def test_quick_exit_stop_loss_and_first_leader_trim_sell_all():
+    x = PricedExec()
+    pos = _run_quick([
+        [_trade()],
+        lambda: x.price.update(M1=20.0),              # -33%: far past -25%, one reading is enough
+    ], x)
+    assert pos[0].status == "closed" and pos[0].exit_reason == "stop_loss"
+
+    x2 = PricedExec()
+    pos2 = _run_quick([
+        [_trade(mint="M2")],
+        [_trade(side="sell", mint="M2", pct_sold=20, remaining=8)],   # a 20% trim: quick exit sells it all
+    ], x2)
+    assert [c for c in x2.calls if c[0] == "sell"] == [("sell", "M2", 1_000_000)]
+    assert pos2[0].status == "closed" and pos2[0].exit_reason == "leader_sold"
+
+
+def test_quick_exit_off_keeps_the_2x_rule():
+    x = PricedExec()
+    pos = _run_quick([
+        [_trade()],
+        lambda: x.price.update(M1=46.0), [],          # +53% with the switch off: nothing
+        lambda: x.price.update(M1=20.0), [],          # -33%: nothing either (no stop loss in the user's rule)
+    ], x, quick=False)
+    assert [c for c in x.calls if c[0] == "sell"] == [] and pos[0].status == "open"
+
+
+def test_quick_exit_time_limit():
+    x = PricedExec()
+
+    async def body(sess):
+        from app.live import Account, Leader
+        acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, unconditional=True, quick_exit=True)})
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0), account=acct)
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        p.opened_at = datetime.now(timezone.utc) - timedelta(minutes=361)
+        await sess.commit()
+        await eng.step(sess)
+        await sess.refresh(p)
+        return p
+
+    p = _db(body)
+    assert p.status == "closed" and p.exit_reason == "quick_time"
+
+
+def test_quick_exit_switch_is_saved_with_the_leaders():
+    from app.accounts import clean_leaders
+
+    out = clean_leaders([{"wallet": LEADER, "quick_exit": True}, {"wallet": "5hqZDJQidTDmjCrLLYi1NiwNUuCZYFc4vo9bPPMr3w85"}])
+    assert [d["quick_exit"] for d in out] == [True, False]

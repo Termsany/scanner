@@ -366,6 +366,7 @@ class LeaderIn(BaseModel):
     size_usd: float | None = None
     enabled: bool = True                 # the follow switch: kept when the account is saved
     max_chase_pct: float | None = None   # most paid above its price, %; None = account default
+    quick_exit: bool = False             # sell all at +TP / -SL / time limit / its first sell, instead of the 2x rule
 
 
 class AccountIn(BaseModel):
