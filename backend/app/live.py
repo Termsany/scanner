@@ -1033,6 +1033,12 @@ class CopyEngine:
                     return "already holding: leader added to a token it held (new tokens only)"
             elif not t.first_buy:                               # older rows without balances: fall back
                 return "already holding: leader bought this token before (new tokens only)"
+        sold = (await session.execute(select(WalletTrade.id).where(
+            WalletTrade.wallet == t.wallet, WalletTrade.token_address == t.token_address,
+            WalletTrade.side == "sell", WalletTrade.id > t.id).limit(1))).first()
+        if sold:
+            # it already sold again (DULX3e often flips in 3-4 s): buying now only pays the fees both ways
+            return "leader already sold it"
         seen = utc(t.block_time) or utc(t.detected_at)
         if seen and (_now() - seen).total_seconds() > MAX_TRADE_AGE_SECONDS:
             return f"leader buy is {(_now() - seen).total_seconds() / 60:.0f} min old"

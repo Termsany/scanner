@@ -1866,3 +1866,17 @@ def test_housekeeping_yields_to_a_new_copied_trade():
         return seen
 
     assert _db(body) == ["take_capital"]
+
+
+def test_no_buy_when_the_leader_already_sold_it():
+    x = FakeExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, _s())
+        await eng.step(sess)
+        sess.add_all([_trade(mint="FLIP"), _trade(side="sell", mint="FLIP", pct_sold=100, remaining=0)])
+        await sess.commit()
+        await eng.step(sess)                  # both rows are in when we look: it is already out
+
+    _db(body)
+    assert x.calls == []
