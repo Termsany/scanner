@@ -1777,17 +1777,21 @@ def _direct_exec(sim=(0, 0, None), pp_status=200):
         calls["quote"] += 1
         return {"outAmount": "1000000", "inAmount": str(lamports)}
 
+    sims = list(sim) if isinstance(sim, list) else None
+
     async def simulate(raw, mint):
-        return sim
+        return sims.pop(0) if sims else sim
 
     async def post(url, **kw):
         calls["pp"] += 1
+        calls.setdefault("slips", []).append(kw.get("data", {}).get("slippage"))
         return hx.Response(pp_status, content=unsigned, headers={"content-type": "application/octet-stream"})
 
     async def send_tx(tx_bytes, last_valid=None, signed_b64=None):
         calls["sent"] += 1
-        state["tok"] += sim[0]
-        state["sol"] = sim[1] / 1e9
+        last = sim[-1] if isinstance(sim, list) else sim
+        state["tok"] += last[0]
+        state["sol"] = last[1] / 1e9
         return "SIGD", True
 
     x.sol_price, x.decimals, x.quote, x.token_balance, x.sol_balance = sol_price, decimals, quote, token_balance, sol_balance
@@ -1810,7 +1814,7 @@ def test_direct_pump_buy_uses_pumpportal_and_the_simulated_price():
 
     f, calls = asyncio.run(go())
     assert f.signature == "SIGD" and f.timing["route"] == "pumpportal"
-    assert calls == {"quote": 0, "sent": 1, "pp": 1} and f.tokens_raw == 100_000_000
+    assert (calls["quote"], calls["sent"], calls["pp"]) == (0, 1, 1) and f.tokens_raw == 100_000_000
 
 
 def test_direct_buy_chase_skips_and_failures_fall_back_to_jupiter():
@@ -1945,3 +1949,40 @@ def test_background_jupiter_calls_never_retry_and_back_off_after_a_429():
 
     r1, r2 = asyncio.run(go())
     assert r1.status_code == 429 and r2 is None and len(calls) == 1
+
+
+
+def test_direct_buy_retries_once_with_more_slippage_on_6004_and_skips_unsupported_tokens():
+    from app import live as L
+
+    async def retry():
+        x, calls = _direct_exec(sim=[(0, 0, {"InstructionError": [3, {"Custom": 6004}]}),
+                                     (100_000_000, int(1.7e9), None)])
+        try:
+            f = await x.buy(MINT_PUMP, 30.0, max_price=0.31)
+        finally:
+            await x.close()
+        return f, calls
+
+    f, calls = asyncio.run(retry())
+    assert f.timing["route"] == "pumpportal" and calls["sent"] == 1 and calls["slips"] == ["15.00", "40.00"]
+
+    L._NO_DIRECT.clear()
+
+    async def unsupported():
+        x, calls = _direct_exec(sim=(0, 0, {"InstructionError": [3, {"Custom": 6063}]}))
+
+        async def jup(mint, usd, max_price=None, bps=None):
+            calls["quote"] += 1
+            return Fill("SIGJ", 0.3, 5, 100.0)
+        x._buy_once = jup
+        try:
+            await x.buy(MINT_PUMP, 30.0, max_price=1.0)
+            await x.buy(MINT_PUMP, 30.0, max_price=1.0)          # known now: straight to Jupiter
+        finally:
+            await x.close()
+        return calls
+
+    calls = asyncio.run(unsupported())
+    assert calls["pp"] == 1 and calls["quote"] == 2
+    L._NO_DIRECT.clear()

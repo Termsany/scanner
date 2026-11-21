@@ -68,6 +68,11 @@ def _is_slippage(err: object) -> bool:
     return "0x1771" in s or "'Custom': 6001" in s or "Custom(6001)" in s
 
 
+# mints PumpPortal can't buy (non-SOL quote, unsupported pool): Jupiter straight away for a while
+_NO_DIRECT: dict[str, float] = {}
+NO_DIRECT_SECONDS = 1800.0
+
+
 class DirectUnavailable(Exception):
     """The direct pump.fun / PumpSwap buy could not even be prepared (no price, no transaction): nothing was
     sent, so the buy falls back to Jupiter."""
@@ -670,6 +675,8 @@ class JupiterExecutor:
 
         if not getattr(self, "kp", None) or not self.pubkey:
             raise DirectUnavailable("no wallet key (dry run)")
+        if time.monotonic() - _NO_DIRECT.get(mint, -1e9) < NO_DIRECT_SECONDS:
+            raise DirectUnavailable("PumpPortal can't trade this token (seen earlier)")
         before = asyncio.ensure_future(asyncio.gather(self.token_balance(mint), self.sol_balance()))
         try:
             t0 = time.monotonic()
@@ -679,34 +686,51 @@ class JupiterExecutor:
             slip = bps
             if max_price:       # the price we may pay is checked on the simulation below; cap the slippage too
                 slip = max(min(bps, int(self.s.live_direct_slippage_cap_pct * 100)), 100)
-            t0 = time.monotonic()
-            try:
-                r = await self.http.post(PUMPPORTAL_TRADE, data={
-                    "publicKey": self.pubkey, "action": "buy", "mint": mint, "amount": f"{lamports / LAMPORTS:.9f}",
-                    "denominatedInSol": "true", "slippage": f"{slip / 100:.2f}",
-                    "priorityFee": f"{self.s.live_direct_priority_fee_sol:.6f}", "pool": "auto"}, timeout=8)
-            except Exception as exc:
-                raise DirectUnavailable(f"PumpPortal: {exc}") from exc
-            _took("direct_build", time.monotonic() - t0)
-            ctype = r.headers.get("content-type", "")
-            if r.status_code != 200 or not r.content or ctype.startswith(("application/json", "text")):
-                raise DirectUnavailable(f"PumpPortal {r.status_code}: {r.text[:150]}")
-            try:
-                tx = VersionedTransaction.from_bytes(r.content)
-            except Exception as exc:
-                raise DirectUnavailable(f"PumpPortal sent no transaction: {exc}") from exc
-            signed = VersionedTransaction(tx.message, [self.kp])
-            raw = base64.b64encode(bytes(signed)).decode()
-            t0 = time.monotonic()
-            tok0, sol0 = await before
-            _took("balances", time.monotonic() - t0)
-            t0 = time.monotonic()
-            try:
-                tok_after, lam_after, err = await self._simulate_buy(raw, mint)
-            except Exception as exc:
-                raise DirectUnavailable(f"simulation failed: {exc}") from exc
-            _took("simulate", time.monotonic() - t0)
-            if err:     # nothing was sent: Jupiter tries it (PumpPortal's build fails on some newer pools)
+            tok0 = sol0 = None
+
+            async def build_and_simulate(slip_bps: int):
+                nonlocal tok0, sol0
+                t1 = time.monotonic()
+                try:
+                    resp = await self.http.post(PUMPPORTAL_TRADE, data={
+                        "publicKey": self.pubkey, "action": "buy", "mint": mint,
+                        "amount": f"{lamports / LAMPORTS:.9f}", "denominatedInSol": "true",
+                        "slippage": f"{slip_bps / 100:.2f}",
+                        "priorityFee": f"{self.s.live_direct_priority_fee_sol:.6f}", "pool": "auto"}, timeout=8)
+                except Exception as exc:
+                    raise DirectUnavailable(f"PumpPortal: {exc}") from exc
+                _took("direct_build", time.monotonic() - t1)
+                ctype = resp.headers.get("content-type", "")
+                if resp.status_code != 200 or not resp.content or ctype.startswith(("application/json", "text")):
+                    _NO_DIRECT[mint] = time.monotonic()         # e.g. a pool PumpPortal doesn't support
+                    raise DirectUnavailable(f"PumpPortal {resp.status_code}: {resp.text[:150]}")
+                try:
+                    txo = VersionedTransaction.from_bytes(resp.content)
+                except Exception as exc:
+                    raise DirectUnavailable(f"PumpPortal sent no transaction: {exc}") from exc
+                raw_b64 = base64.b64encode(bytes(VersionedTransaction(txo.message, [self.kp]))).decode()
+                if tok0 is None:
+                    t1 = time.monotonic()
+                    tok0, sol0 = await before
+                    _took("balances", time.monotonic() - t1)
+                t1 = time.monotonic()
+                try:
+                    res = await self._simulate_buy(raw_b64, mint)
+                except Exception as exc:
+                    raise DirectUnavailable(f"simulation failed: {exc}") from exc
+                _took("simulate", time.monotonic() - t1)
+                return resp, raw_b64, res
+
+            r, raw, (tok_after, lam_after, err) = await build_and_simulate(slip)
+            if err and "6004" in str(err):
+                # PumpPortal misprices some PumpSwap pools (its own slippage check fails): build once more with a
+                # wider limit; what we really get is read from the simulation and checked against the chase limit
+                r, raw, (tok_after, lam_after, err) = await build_and_simulate(
+                    max(slip, int(self.s.live_direct_retry_slippage_pct * 100)))
+                _took("direct_retry", 1)
+            if err:     # nothing was sent: Jupiter tries it
+                if "6063" in str(err):                   # pump.fun coin quoted in another token: not for PumpPortal
+                    _NO_DIRECT[mint] = time.monotonic()
                 raise DirectUnavailable(f"simulation error: {err}")
             got = tok_after - tok0
             spent = sol0 - lam_after / LAMPORTS
