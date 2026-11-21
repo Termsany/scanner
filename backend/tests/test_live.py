@@ -1698,3 +1698,31 @@ def test_quick_exit_uses_jupiter_price_when_dexscreener_lags():
         lambda: (x.price.update(M1=34.0), x.fast.update(M1=60.0)),   # DexScreener +13%, Jupiter +100%: far past
     ], x)
     assert pos[0].status == "closed" and pos[0].exit_reason == "take_profit"
+
+
+def test_buy_slippage_never_carries_the_fill_past_the_chase_limit():
+    from app.live import JupiterExecutor
+
+    seen = []
+
+    async def go():
+        x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/"), live=False)
+
+        async def sol_price():
+            return 100.0
+
+        async def decimals(mint):
+            return 0
+
+        async def quote(a, b, lamports, bps=None):
+            seen.append(bps)
+            return {"outAmount": "100", "inAmount": str(lamports)}    # $30 -> 100 tokens = $0.30 each
+
+        x.sol_price, x.decimals, x.quote = sol_price, decimals, quote
+        try:
+            return await x.buy("MINT", 30.0, max_price=0.33, slippage_bps=2_500)   # 10% room, 25% asked
+        finally:
+            await x.close()
+
+    asyncio.run(go())
+    assert seen == [2_500, 1_000]      # re-quoted with the slippage capped at the 10% left before the limit

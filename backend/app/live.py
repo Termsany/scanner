@@ -573,6 +573,14 @@ class JupiterExecutor:
                 pay = usd / (int(q["outAmount"]) / 10 ** decimals)
                 if pay > max_price:
                     raise ChaseError(pay, max_price)
+                # the slippage allowed on top of the quote must not carry the fill past the chase limit either
+                # (2026-11-21: a 30% limit with 25% slippage filled up to ~1.6x the leader's price)
+                room = int((max_price / pay - 1) * 10_000)
+                if room < (bps or 0):
+                    q = await self.quote(SOL_MINT, mint, lamports, max(room, 100))
+                    pay = usd / (int(q["outAmount"]) / 10 ** decimals)
+                    if pay > max_price:
+                        raise ChaseError(pay, max_price)
             if not live:
                 self._dry_n += 1
                 return Fill(f"dry-{self._dry_n}", lamports / LAMPORTS, int(q["outAmount"]), px)
