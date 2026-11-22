@@ -5,16 +5,15 @@ import {
   ExternalLink,
   KeyRound,
   Lock,
-  Pause,
-  Play,
   Plus,
   Power,
-  Save,
+  Check,
+  Loader2,
   ScrollText,
   Trash2,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
@@ -163,10 +162,12 @@ function Field({
 function Settings({
   d,
   set,
+  now,
   defaultHold,
 }: {
   d: Draft;
-  set: (d: Draft) => void;
+  set: (d: Draft) => void;        // typing: saved a moment after you stop
+  now: (d: Draft) => void;        // switches: saved at once
   defaultHold: number;
 }) {
   return (
@@ -185,8 +186,7 @@ function Settings({
       </Field>
       <Field label="Take capital at" hint={d.take_on ? "% gain: sell the cost back, rest rides" : "off"}>
         <div className="flex items-center gap-2">
-          <input type="checkbox" checked={d.take_on}
-            onChange={(e) => set({ ...d, take_on: e.target.checked })} />
+          <Switch on={d.take_on} label="Take capital" onClick={() => now({ ...d, take_on: !d.take_on })} />
           <input className={`${input} num`} inputMode="decimal" disabled={!d.take_on}
             value={d.take_capital_at_pct}
             onChange={(e) => set({ ...d, take_capital_at_pct: e.target.value })} />
@@ -254,15 +254,18 @@ function FollowCell({ l, open, onToggle }: { l: LeaderCfg; open: number; onToggl
   );
 }
 
-function Leaders({ d, set, openBy, onToggle }: {
+function Leaders({ d, set, now, openBy, onToggle }: {
   d: Draft;
-  set: (d: Draft) => void;
+  set: (d: Draft) => void;     // typing
+  now: (d: Draft) => void;     // switches, add, remove
   openBy?: Record<string, number>;
   onToggle?: Toggle;           // saved accounts: the switch applies right away
 }) {
   const [add, setAdd] = useState("");
   const upd = (i: number, patch: Partial<LeaderCfg>) =>
     set({ ...d, leaders: d.leaders.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
+  const flip = (i: number, patch: Partial<LeaderCfg>) =>
+    now({ ...d, leaders: d.leaders.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
   return (
     <div className="mt-4">
       <div className="mb-2 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">
@@ -302,7 +305,7 @@ function Leaders({ d, set, openBy, onToggle }: {
                     <FollowCell l={l} open={openBy?.[l.wallet] ?? 0} onToggle={onToggle} />
                   ) : (
                     <Switch on={l.enabled !== false} label="Follow"
-                      onClick={() => upd(i, { enabled: l.enabled === false })} />
+                      onClick={() => flip(i, { enabled: l.enabled === false })} />
                   )}
                 </td>
                 <td className="num ">
@@ -327,16 +330,16 @@ function Leaders({ d, set, openBy, onToggle }: {
                     onChange={(e) => upd(i, { max_chase_pct: e.target.value === "" ? null : Number(e.target.value) })} />
                 </td>
                 <td className="text-center">
-                  <input type="checkbox" checked={l.unconditional}
-                    onChange={(e) => upd(i, { unconditional: e.target.checked })} />
+                  <span className="inline-flex"><Switch on={!!l.unconditional} label="unconditional"
+                    onClick={() => flip(i, { unconditional: !l.unconditional })} /></span>
                 </td>
                 <td className="text-center">
-                  <input type="checkbox" checked={l.new_tokens_only}
-                    onChange={(e) => upd(i, { new_tokens_only: e.target.checked })} />
+                  <span className="inline-flex"><Switch on={!!l.new_tokens_only} label="new tokens only"
+                    onClick={() => flip(i, { new_tokens_only: !l.new_tokens_only })} /></span>
                 </td>
                 <td className="text-center">
-                  <input type="checkbox" checked={!!l.quick_exit} aria-label="Quick exit"
-                    onChange={(e) => upd(i, { quick_exit: e.target.checked })} />
+                  <span className="inline-flex"><Switch on={!!l.quick_exit} label="Quick exit"
+                    onClick={() => flip(i, { quick_exit: !l.quick_exit })} /></span>
                   {l.quick_exit && (
                     <div className="mt-1 flex min-w-[13rem] items-center justify-center gap-1 text-[11px] text-muted">
                       <input className={`${tiny} w-14`} inputMode="decimal" placeholder="50"
@@ -360,12 +363,15 @@ function Leaders({ d, set, openBy, onToggle }: {
                   )}
                 </td>
                 <td className="text-center">
-                  <input type="checkbox" checked={!!l.ignore_sells} aria-label="Ignore its sells"
-                    onChange={(e) => upd(i, { ignore_sells: e.target.checked })} />
+                  <span className="inline-flex"><Switch on={!!l.ignore_sells} label="Ignore its sells"
+                    onClick={() => flip(i, { ignore_sells: !l.ignore_sells })} /></span>
                 </td>
                 <td className="text-right">
                   <button type="button" aria-label="Remove" className="text-muted hover:text-bear"
-                    onClick={() => set({ ...d, leaders: d.leaders.filter((_, j) => j !== i) })}>
+                    onClick={() => {
+                      if (onToggle && !confirm(`Remove ${short(l.wallet)}${l.label ? ` (${l.label})` : ""} from this account?`)) return;
+                      now({ ...d, leaders: d.leaders.filter((_, j) => j !== i) });
+                    }}>
                     <Trash2 className="size-4" />
                   </button>
                 </td>
@@ -389,7 +395,7 @@ function Leaders({ d, set, openBy, onToggle }: {
           onClick={() => {
             const w = add.trim();
             if (!w || d.leaders.some((l) => l.wallet === w)) return;
-            set({ ...d, leaders: [...d.leaders, { wallet: w, label: "", unconditional: false,
+            now({ ...d, leaders: [...d.leaders, { wallet: w, label: "", unconditional: false,
               new_tokens_only: false, size_usd: null, enabled: true }] });
             setAdd("");
           }}>
@@ -399,6 +405,30 @@ function Leaders({ d, set, openBy, onToggle }: {
     </div>
   );
 }
+
+function fullBody(d: Draft) {
+  return {
+    ...payload(d),
+    ...capsPayload(d),
+    ...(d.take_on ? { take_capital_at_pct: num(d.take_capital_at_pct) } : { take_capital_off: true }),
+    ...(d.max_hold_hours ? { max_hold_hours: num(d.max_hold_hours) } : { max_hold_default: true }),
+  };
+}
+
+/** A half-typed form is not sent: the field it names is still being filled in. */
+function unfinished(d: Draft): string | null {
+  const need: [keyof Draft, string][] = [
+    ["size_usd", "Entry per trade"], ["max_open_usd", "Trading budget"], ["max_daily_loss_usd", "Max loss / 24h"]];
+  for (const [k, label] of need) {
+    const v = String(d[k] ?? "");
+    if (v.trim() === "" || !Number.isFinite(num(v))) return `${label}: enter a number`;
+  }
+  if (d.take_on && !(num(d.take_capital_at_pct) > 0)) return "Take capital at: enter a %";
+  if (d.max_hold_hours && !(num(d.max_hold_hours) > 0)) return "Max hold: enter hours";
+  return null;
+}
+
+type SaveState = { kind: "idle" | "typing" | "saving" | "saved" | "error"; text?: string };
 
 function AccountCard({
   a,
@@ -415,31 +445,83 @@ function AccountCard({
 }) {
   const [d, setD] = useState<Draft>(() => toDraft(a));
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  useEffect(() => setD(toDraft(a)), [a]);
-  const dirty = JSON.stringify(d) !== JSON.stringify(toDraft(a));
+  const [st, setSt] = useState<SaveState>({ kind: "idle" });
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pending = useRef<Draft | null>(null);   // the newest edit not sent yet
+  const inflight = useRef(false);
+  const local = useRef(false);                  // edits the server has not confirmed: keep them on screen
+  const latest = useRef(a);
+  latest.current = a;
+  useEffect(() => {
+    if (!local.current) setD(toDraft(a));
+  }, [a]);
+
+  const flush = useCallback(async () => {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    const next = pending.current;
+    if (!next || inflight.current) return;
+    const bad = unfinished(next);
+    if (bad) {
+      setSt({ kind: "error", text: bad });
+      return;
+    }
+    pending.current = null;
+    inflight.current = true;
+    setSt({ kind: "saving" });
+    try {
+      const r = await api.editAccount(password, latest.current.name, fullBody(next));
+      if (!pending.current) local.current = false;
+      onSaved({ ...r.account, open_by_leader: latest.current.open_by_leader });
+      setSt({ kind: "saved", text: "Saved · the bot picks it up within 30 s" });
+    } catch (e) {
+      setSt({ kind: "error", text: e instanceof ApiError ? e.message : "Could not save" });
+    } finally {
+      inflight.current = false;
+      if (pending.current) void flush();
+    }
+  }, [password, onSaved]);
+
+  // typing: save 0.9 s after the last key (or when the field loses focus); switches: save at once
+  const edit = useCallback((next: Draft, at_once = false) => {
+    setD(next);
+    local.current = true;
+    pending.current = next;
+    if (timer.current) clearTimeout(timer.current);
+    if (at_once) void flush();
+    else {
+      setSt({ kind: "typing" });
+      timer.current = setTimeout(() => void flush(), 900);
+    }
+  }, [flush]);
+  const type = useCallback((next: Draft) => edit(next), [edit]);
+  const now = useCallback((next: Draft) => edit(next, true), [edit]);
+
+  useEffect(() => () => {
+    if (pending.current) void flush();   // leaving the page: send what is left
+  }, [flush]);
 
   async function send(body: Record<string, unknown>, okText: string) {
     setBusy(true);
-    setMsg(null);
+    setSt({ kind: "saving" });
     try {
       const r = await api.editAccount(password, a.name, body);
       onSaved(r.account);
-      setMsg({ ok: true, text: okText });
+      setSt({ kind: "saved", text: okText });
     } catch (e) {
-      setMsg({ ok: false, text: e instanceof ApiError ? e.message : "Could not save" });
+      setSt({ kind: "error", text: e instanceof ApiError ? e.message : "Could not save" });
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <section className={`card overflow-hidden ${a.enabled ? "" : "opacity-70"}`}>
-      <header className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-4">
+    <section className={`card overflow-hidden transition ${a.enabled ? "" : "opacity-70"}`}
+      onBlur={() => pending.current && void flush()}>
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-5 py-4">
         <h2 className="num text-[15px] font-semibold">{a.name}</h2>
-        <Badge tone={!a.enabled ? "muted" : a.paused ? "gold" : "mint"} dot>
-          {!a.enabled ? "DISABLED" : a.paused ? "PAUSED" : "ACTIVE"}
-        </Badge>
         {a.billing_hold && <Badge tone="bear">unpaid bill: buys held</Badge>}
         <Badge tone="muted">
           <KeyRound className="size-3" />
@@ -452,68 +534,64 @@ function AccountCard({
           </a>
         )}
         <span className="text-xs text-faint">{a.open_positions} open</span>
-        {owner && (
-          <Badge tone="sky">user: {owner}</Badge>
-        )}
-        <div className="ms-auto flex gap-2">
-          {a.enabled && (
-            <button type="button" disabled={busy}
-              className={button("secondary")}
-              onClick={() => send({ paused: !a.paused }, a.paused ? "Resumed" : "Paused: no new buys, sells continue")}>
-              {a.paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
-              {a.paused ? "Resume" : "Pause"}
-            </button>
-          )}
-          <button type="button" disabled={busy}
-            className={button("secondary")}
-            onClick={() => {
-              if (a.enabled && !confirm(`Stop account ${a.name} completely?`)) return;
-              send({ enabled: !a.enabled }, a.enabled ? "Disabled" : "Enabled");
-            }}>
-            <Power className="size-3.5" /> {a.enabled ? "Disable" : "Enable"}
-          </button>
+        {owner && <Badge tone="sky">user: {owner}</Badge>}
+        <div className="ms-auto flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-xs">
+            <Switch on={a.enabled && !a.paused} busy={busy || !a.enabled} label="New buys"
+              onClick={() => send({ paused: !a.paused }, a.paused ? "New buys on" : "New buys off · open positions still sell")} />
+            <span className={a.enabled && !a.paused ? "text-mint" : "text-muted"}>New buys</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <Switch on={a.enabled} busy={busy} label="Account"
+              onClick={() => {
+                if (a.enabled && !confirm(`Stop account ${a.name} completely?`)) return;
+                send({ enabled: !a.enabled }, a.enabled ? "Account off" : "Account on");
+              }} />
+            <span className={a.enabled ? "text-mint" : "text-muted"}><Power className="me-1 inline size-3" />Account</span>
+          </label>
         </div>
       </header>
       <div className="p-5">
-      <Settings d={d} set={setD} defaultHold={defaultHold} />
-      <Leaders d={d} set={setD} openBy={a.open_by_leader}
+      <Settings d={d} set={type} now={now} defaultHold={defaultHold} />
+      <Leaders d={d} set={type} now={now} openBy={a.open_by_leader}
         onToggle={async (wallet, enabled, close) => {
-          if (dirty) {
-            setMsg({ ok: false, text: "Save or discard your other changes first" });
+          if (local.current) {
+            setSt({ kind: "error", text: "One moment: your last change is still saving" });
             return;
           }
-          setMsg(null);
+          setSt({ kind: "saving" });
           try {
             const r = await api.toggleLeader(password, a.name, wallet, enabled, close);
             onSaved({ ...r.account, open_by_leader: a.open_by_leader });
-            setMsg({ ok: true, text: enabled ? `Following ${short(wallet)} again (within 30 s)`
+            setSt({ kind: "saved", text: enabled ? `Following ${short(wallet)} again (within 30 s)`
               : close ? `Stopped ${short(wallet)}; selling ${r.closing} open position${r.closing === 1 ? "" : "s"} now`
                 : `Stopped following ${short(wallet)}: no new buys; its open positions still follow its sells` });
           } catch (e) {
-            setMsg({ ok: false, text: e instanceof ApiError ? e.message : "Could not change it" });
+            setSt({ kind: "error", text: e instanceof ApiError ? e.message : "Could not change it" });
           }
         }} />
-      {a.user_id != null && <Caps d={d} set={setD} />}
+      {a.user_id != null && <Caps d={d} set={type} />}
       </div>
-      <footer className="flex flex-wrap items-center gap-3 border-t border-line bg-surface-2/50 px-5 py-3">
-        <button type="button" disabled={busy || !dirty}
-          className={button("primary")}
-          onClick={() =>
-            send({
-              ...payload(d),
-              ...capsPayload(d),
-              ...(d.take_on ? { take_capital_at_pct: num(d.take_capital_at_pct) } : { take_capital_off: true }),
-              ...(d.max_hold_hours ? { max_hold_hours: num(d.max_hold_hours) } : { max_hold_default: true }),
-            }, "Saved: the bot picks it up within 30 s")
-          }>
-          <Save className="size-4" /> Save
-        </button>
-        {dirty && (
-          <button type="button" className="text-xs text-muted hover:text-ink" onClick={() => setD(toDraft(a))}>
-            Discard changes
-          </button>
+      <footer className="flex min-h-11 flex-wrap items-center gap-3 border-t border-line bg-surface-2/50 px-5 py-2.5 text-xs">
+        {st.kind === "idle" && <span className="text-faint">Changes save by themselves.</span>}
+        {st.kind === "typing" && <span className="text-faint">Editing…</span>}
+        {st.kind === "saving" && <span className="inline-flex items-center gap-1.5 text-muted"><Loader2 className="size-3.5 animate-spin" /> Saving…</span>}
+        {st.kind === "saved" && <span className="inline-flex animate-fade-in items-center gap-1.5 text-mint"><Check className="size-3.5" /> {st.text}</span>}
+        {st.kind === "error" && (
+          <>
+            <span className="text-bear">Not saved: {st.text}</span>
+            <button type="button" className="text-muted underline-offset-2 hover:text-ink hover:underline"
+              onClick={() => {
+                pending.current = null;
+                local.current = false;
+                if (timer.current) clearTimeout(timer.current);
+                setD(toDraft(a));
+                setSt({ kind: "idle" });
+              }}>
+              Undo my change
+            </button>
+          </>
         )}
-        {msg && <span className={`text-xs ${msg.ok ? "text-bull" : "text-bear"}`}>{msg.text}</span>}
       </footer>
     </section>
   );
@@ -561,8 +639,8 @@ function NewAccount({
             onChange={(e) => setD({ ...d, name: e.target.value.toLowerCase() })} />
         </Field>
       </div>
-      <Settings d={d} set={setD} defaultHold={defaultHold} />
-      <Leaders d={d} set={setD} />
+      <Settings d={d} set={setD} now={setD} defaultHold={defaultHold} />
+      <Leaders d={d} set={setD} now={setD} />
       <div className="mt-4 flex flex-col gap-2">
         <span className="text-[11px] font-medium tracking-[0.12em] text-muted uppercase">Trading wallet</span>
         <label className="flex items-center gap-2 text-sm">
