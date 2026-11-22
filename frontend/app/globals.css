@@ -232,3 +232,9 @@
 .font-arabic {
   font-family: var(--font-arabic);
 }
+
+/* /admin: the refresh button fills up until the next automatic refresh */
+@keyframes admin-progress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}

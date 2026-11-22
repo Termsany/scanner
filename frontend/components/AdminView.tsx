@@ -3,23 +3,34 @@
 import {
   Activity,
   AlertTriangle,
-  ArrowLeft,
+  ArrowUpRight,
   BarChart3,
+  Bell,
+  Cpu,
   ExternalLink,
+  Layers,
   LayoutDashboard,
-  Lock,
+  LayoutGrid,
+  Radar,
   Receipt,
   RefreshCw,
+  Rows3,
+  Search,
+  Sparkles,
+  Target,
   Ticket,
+  TrendingDown,
+  TrendingUp,
   UserPlus,
   Users,
   Wallet,
+  XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, PageHeader, Panel, StatTile } from "@/components/ui";
+import { Badge, button, Empty, Panel } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
 import type {
@@ -80,36 +91,6 @@ function minutesSince(iso: string | null, now: number): number | null {
 
 function short(a: string) {
   return `${a.slice(0, 4)}…${a.slice(-4)}`;
-}
-
-function Tile({ icon, label, value, sub, tone }: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  sub?: React.ReactNode;
-  tone?: string;
-}) {
-  return <StatTile icon={icon} label={label} value={value} sub={sub} tone={tone || "text-ink"} />;
-}
-
-function DailyBars({ days }: { days: AdminOverview["daily"] }) {
-  const max = Math.max(1, ...days.map((d) => Math.abs(d.pnl)));
-  const w = 100 / days.length;
-  return (
-    <svg viewBox="0 0 100 40" preserveAspectRatio="none" className="h-32 w-full" role="img"
-      aria-label="Realized P&L per day, all accounts">
-      <line x1="0" y1="20" x2="100" y2="20" stroke="currentColor" strokeOpacity="0.2" strokeWidth="0.2" />
-      {days.map((d, i) => {
-        const h = (Math.abs(d.pnl) / max) * 19;
-        return (
-          <rect key={d.day} x={i * w + w * 0.15} width={w * 0.7} y={d.pnl >= 0 ? 20 - h : 20}
-            height={Math.max(h, d.trades ? 0.4 : 0)} className={d.pnl >= 0 ? "fill-bull" : "fill-bear"}>
-            <title>{`${d.day}: ${money(d.pnl, true)} · ${d.trades} trades`}</title>
-          </rect>
-        );
-      })}
-    </svg>
-  );
 }
 
 type SortKey = "name" | "sol" | "open" | "unrealized" | "r24" | "r7" | "all" | "win" | "last";
@@ -228,59 +209,6 @@ function AccountsTable({ accounts, now }: { accounts: OverviewAccount[]; now: nu
           </tbody>
         </table>
       </div>
-    </Panel>
-  );
-}
-
-function Recent({ items, now }: { items: AdminOverview["recent"]; now: number }) {
-  return (
-    <Panel icon={<Activity />} title="Latest closed and failed trades" meta={`${items.length} most recent`} flush>
-      {items.length === 0 ? (
-        <Empty>No trades yet.</Empty>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="data-table compact min-w-[720px]">
-            <thead>
-              <tr>
-                <th className="text-left">When</th>
-                <th className="text-left">Account</th>
-                <th className="text-left">Token</th>
-                <th className="text-right">Cost</th>
-                <th className="text-right">Result</th>
-                <th className="text-left">Exit</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((p) => (
-                <tr key={p.id}>
-                  <td className="text-xs text-muted">{since(p.at, now)}</td>
-                  <td><Badge tone="muted" className="num text-ink">{p.account}</Badge></td>
-                  <td>
-                    <a className="font-medium hover:text-mint" target="_blank" rel="noreferrer"
-                      href={`https://dexscreener.com/solana/${p.token_address}`}>
-                      ${p.symbol || short(p.token_address)}
-                    </a>
-                  </td>
-                  <td className="num text-right text-muted">{money(p.cost_usd)}</td>
-                  <td className="num text-right">
-                    {p.status === "failed" ? <span className="text-faint">—</span> : (
-                      <>
-                        <span className={pctClass(p.pnl_usd)}>{money(p.pnl_usd, true)}</span>
-                        <span className={`ms-2 text-xs ${pctClass(p.pnl_pct)}`}>{pct(p.pnl_pct)}</span>
-                      </>
-                    )}
-                  </td>
-                  <td className="max-w-[320px] truncate text-xs">
-                    {p.status === "failed"
-                      ? <span className="text-bear" title={p.error ?? ""}>failed{p.error ? `: ${p.error}` : ""}</span>
-                      : <span className="text-muted">{(p.exit_reason ?? "").replace(/_/g, " ")}</span>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
     </Panel>
   );
 }
@@ -804,15 +732,481 @@ function CouponsPanel({ password, now }: { password: string; now: number }) {
   );
 }
 
+/* ---------- command-center pieces ---------------------------------------------------------- */
+
+/** Counts up/down to a new value instead of jumping (respects reduced motion). */
+function useTween(target: number, ms = 700): number {
+  const [v, setV] = useState(target);
+  const from = useRef(target);
+  useEffect(() => {
+    const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduce || !Number.isFinite(target)) {
+      setV(target);
+      from.current = target;
+      return;
+    }
+    const start = performance.now();
+    const a = from.current;
+    let raf = 0;
+    const step = (t: number) => {
+      const k = Math.min(1, (t - start) / ms);
+      const e = 1 - Math.pow(1 - k, 3);
+      setV(a + (target - a) * e);
+      if (k < 1) raf = requestAnimationFrame(step);
+      else from.current = target;
+    };
+    raf = requestAnimationFrame(step);
+    return () => {
+      cancelAnimationFrame(raf);
+      from.current = target;
+    };
+  }, [target, ms]);
+  return v;
+}
+
+function Money({ v, signed = false, className = "" }: { v: number | null | undefined; signed?: boolean; className?: string }) {
+  const t = useTween(v ?? 0);
+  return <span className={`num ${className}`}>{v == null ? "—" : money(t, signed)}</span>;
+}
+
+type Range = 7 | 14 | 30;
+type ChartMode = "cum" | "daily";
+
+/** Realized P&L across all accounts: cumulative area or daily bars, with a hover read-out. */
+function PnlChart({ days }: { days: AdminOverview["daily"] }) {
+  const [range, setRange] = useState<Range>(30);
+  const [mode, setMode] = useState<ChartMode>("cum");
+  const [hover, setHover] = useState<number | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const [w, setW] = useState(640);
+  const H = 220, PAD = 8;
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setW(Math.max(260, e.contentRect.width)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const rows = days.slice(-range);
+  let run = 0;
+  const pts = rows.map((d) => ({ ...d, cum: (run += d.pnl) }));
+  const vals = mode === "cum" ? pts.map((p) => p.cum) : pts.map((p) => p.pnl);
+  const hi = Math.max(0, ...vals), lo = Math.min(0, ...vals);
+  const span = hi - lo || 1;
+  const y = (v: number) => PAD + (1 - (v - lo) / span) * (H - PAD * 2);
+  const step = rows.length > 1 ? w / (rows.length - 1) : w;
+  const x = (i: number) => (rows.length > 1 ? i * step : w / 2);
+  const zero = y(0);
+  const total = pts.length ? pts[pts.length - 1].cum : 0;
+  const up = total >= 0;
+  const line = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join("");
+  const area = pts.length ? `${line}L${x(pts.length - 1)},${zero}L${x(0)},${zero}Z` : "";
+  const bw = Math.max(3, Math.min(22, (w / Math.max(rows.length, 1)) * 0.6));
+  const bx = (i: number) => (w / rows.length) * (i + 0.5);
+  const h = hover != null ? pts[hover] : null;
+  const hx = hover == null ? 0 : mode === "cum" ? x(hover) : bx(hover);
+
+  function move(e: React.PointerEvent) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const px = e.clientX - r.left;
+    const i = mode === "cum" ? Math.round(px / step) : Math.floor(px / (w / rows.length));
+    setHover(Math.max(0, Math.min(rows.length - 1, i)));
+  }
+
+  const seg = (on: boolean) =>
+    `rounded-md px-2.5 py-1 text-xs font-medium transition ${on ? "bg-raised text-ink shadow-sm" : "text-muted hover:text-ink"}`;
+
+  return (
+    <div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="flex rounded-lg border border-line bg-carbon/60 p-0.5" role="tablist" aria-label="Chart type">
+          <button type="button" className={seg(mode === "cum")} onClick={() => setMode("cum")}>Cumulative</button>
+          <button type="button" className={seg(mode === "daily")} onClick={() => setMode("daily")}>Daily</button>
+        </div>
+        <div className="ms-auto flex rounded-lg border border-line bg-carbon/60 p-0.5" aria-label="Range">
+          {([7, 14, 30] as Range[]).map((r) => (
+            <button key={r} type="button" className={seg(range === r)} onClick={() => setRange(r)}>{r}d</button>
+          ))}
+        </div>
+      </div>
+      <div ref={box} className="relative touch-none select-none" onPointerMove={move} onPointerLeave={() => setHover(null)}
+        onPointerDown={move}>
+        {rows.length === 0 ? (
+          <div className="grid h-[220px] place-items-center text-sm text-muted">No closed trades in this range.</div>
+        ) : (
+          <svg width={w} height={H} className="block overflow-visible" role="img"
+            aria-label={`Realized P&L, last ${range} days: ${money(total, true)}`}>
+            <defs>
+              <linearGradient id="pnl-fill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={up ? "#2be4a7" : "#ff5c6c"} stopOpacity="0.32" />
+                <stop offset="100%" stopColor={up ? "#2be4a7" : "#ff5c6c"} stopOpacity="0" />
+              </linearGradient>
+            </defs>
+            {[0.25, 0.5, 0.75].map((g) => (
+              <line key={g} x1="0" x2={w} y1={PAD + g * (H - PAD * 2)} y2={PAD + g * (H - PAD * 2)}
+                stroke="rgb(255 255 255 / 0.04)" />
+            ))}
+            <line x1="0" x2={w} y1={zero} y2={zero} stroke="rgb(255 255 255 / 0.14)" strokeDasharray="3 4" />
+            {mode === "cum" ? (
+              <g key={`c${range}`} className="animate-fade-in">
+                <path d={area} fill="url(#pnl-fill)" />
+                <path d={line} fill="none" stroke={up ? "#2be4a7" : "#ff5c6c"} strokeWidth="2.2"
+                  strokeLinejoin="round" strokeLinecap="round" />
+              </g>
+            ) : (
+              <g key={`d${range}`} className="animate-fade-in">
+                {pts.map((p, i) => {
+                  const top = Math.min(y(p.pnl), zero);
+                  return (
+                    <rect key={p.day} x={bx(i) - bw / 2} y={top} width={bw} rx={Math.min(3, bw / 3)}
+                      height={Math.max(Math.abs(y(p.pnl) - zero), p.trades ? 1.5 : 0)}
+                      fill={p.pnl >= 0 ? "#2be4a7" : "#ff5c6c"} opacity={hover == null || hover === i ? 0.9 : 0.35} />
+                  );
+                })}
+              </g>
+            )}
+            {h && (
+              <g pointerEvents="none">
+                <line x1={hx} x2={hx} y1={0} y2={H} stroke="rgb(255 255 255 / 0.18)" />
+                {mode === "cum" && (
+                  <circle cx={hx} cy={y(h.cum)} r="5" fill="#070a12" stroke={up ? "#2be4a7" : "#ff5c6c"} strokeWidth="2.5" />
+                )}
+              </g>
+            )}
+          </svg>
+        )}
+        {h && (
+          <div className="pointer-events-none absolute top-1 z-10 min-w-[150px] -translate-x-1/2 rounded-xl border border-line-strong bg-carbon/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
+            style={{ left: Math.max(80, Math.min(w - 80, hx)) }}>
+            <div className="num text-faint">{h.day}</div>
+            <div className={`num mt-0.5 text-sm font-semibold ${pctClass(h.pnl)}`}>{money(h.pnl, true)}</div>
+            <div className="text-muted">{h.trades} trade{h.trades === 1 ? "" : "s"}</div>
+            <div className="mt-1 border-t border-line pt-1 text-muted">
+              running <span className={`num ${pctClass(h.cum)}`}>{money(h.cum, true)}</span>
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="mt-2 flex justify-between text-[11px] text-faint">
+        <span className="num">{rows[0]?.day}</span>
+        <span className="num">{rows[rows.length - 1]?.day}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Ring gauge, 0..100. */
+function Ring({ value, size = 64, stroke = 7, tone = "#2be4a7", children }: {
+  value: number | null;
+  size?: number;
+  stroke?: number;
+  tone?: string;
+  children?: React.ReactNode;
+}) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const v = useTween(value ?? 0, 900);
+  return (
+    <div className="relative grid shrink-0 place-items-center" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="-rotate-90">
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgb(255 255 255 / 0.07)" strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={tone} strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - Math.max(0, Math.min(100, v)) / 100)} />
+      </svg>
+      <div className="absolute inset-0 grid place-items-center">{children}</div>
+    </div>
+  );
+}
+
+/** Thin segmented bar: [value, class][] */
+function Stack({ parts }: { parts: [number, string, string][] }) {
+  const sum = parts.reduce((s, p) => s + Math.max(p[0], 0), 0) || 1;
+  return (
+    <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-raised">
+      {parts.map(([v, c, label]) => v > 0 && (
+        <span key={label} title={`${label}: ${v}`} className={`h-full ${c} transition-all duration-700`}
+          style={{ width: `${(v / sum) * 100}%` }} />
+      ))}
+    </div>
+  );
+}
+
+function Kpi({ icon, label, children, sub, glow }: {
+  icon: React.ReactNode;
+  label: string;
+  children: React.ReactNode;
+  sub?: React.ReactNode;
+  glow?: string;
+}) {
+  return (
+    <div className="card group relative overflow-hidden p-5 transition duration-300 hover:-translate-y-0.5 hover:border-line-strong">
+      <div className={`pointer-events-none absolute -top-16 -right-16 size-40 rounded-full opacity-0 blur-3xl transition duration-500 group-hover:opacity-100 ${glow ?? "bg-mint/10"}`} />
+      <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.1em] text-muted uppercase">
+        <span className="grid size-6 place-items-center rounded-md bg-raised text-ink [&>svg]:size-3.5">{icon}</span>
+        {label}
+      </div>
+      <div className="mt-3">{children}</div>
+      {sub && <div className="mt-2 text-xs leading-relaxed text-muted">{sub}</div>}
+    </div>
+  );
+}
+
+function Pulse({ state }: { state: "ok" | "stale" | "off" | "paused" }) {
+  const c = { ok: "bg-mint", stale: "bg-bear", off: "bg-faint", paused: "bg-gold" }[state];
+  return (
+    <span className="relative inline-flex size-2.5 shrink-0">
+      {(state === "ok" || state === "stale") && (
+        <span className={`absolute inset-0 rounded-full ${c} animate-pulse-ring`} />
+      )}
+      <span className={`relative inline-flex size-2.5 rounded-full ${c}`} />
+    </span>
+  );
+}
+
+function engineState(a: OverviewAccount, now: number): "ok" | "stale" | "off" | "paused" {
+  if (!a.enabled) return "off";
+  const m = minutesSince(a.heartbeat_at, now);
+  if (m == null || m > STALE_MIN) return "stale";
+  return a.paused ? "paused" : "ok";
+}
+
+/** One glance per engine: heartbeat, last trade, today. */
+function HealthStrip({ accounts, now }: { accounts: OverviewAccount[]; now: number }) {
+  const label = { ok: "running", stale: "not stepping", off: "off", paused: "paused" };
+  return (
+    <div className="card flex flex-col p-0">
+      <div className="flex items-center gap-2 border-b border-line px-5 py-3.5">
+        <Cpu className="size-4 text-mint" />
+        <h3 className="text-sm font-semibold">Engines</h3>
+        <span className="text-xs text-muted">heartbeat every few seconds</span>
+      </div>
+      <ul className="divide-y divide-line">
+        {accounts.map((a) => {
+          const st = engineState(a, now);
+          return (
+            <li key={a.name} className="flex items-center gap-3 px-5 py-2.5 text-sm">
+              <Pulse state={st} />
+              <span className="num min-w-0 flex-1 truncate font-medium">{a.name}</span>
+              <span className={`text-xs ${st === "stale" ? "text-bear" : st === "ok" ? "text-mint" : "text-muted"}`}>
+                {label[st]}
+              </span>
+              <span className="w-16 text-right text-[11px] text-faint">{since(a.heartbeat_at, now)}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** Account as a card: result, today, money at work, hit rate. */
+function AccountCard({ a, now, best }: { a: OverviewAccount; now: number; best: number }) {
+  const st = engineState(a, now);
+  const work = a.open_value_usd ?? a.open_cost_usd;
+  const cap = a.max_open_usd || Math.max(work, 1);
+  const share = best > 0 ? Math.max(0, a.realized_all) / best : 0;
+  return (
+    <div className="card group relative flex flex-col gap-4 overflow-hidden p-5 transition duration-300 hover:-translate-y-0.5 hover:border-line-strong">
+      <div className={`absolute inset-x-0 top-0 h-[2px] ${a.realized_all >= 0 ? "bg-gradient-to-r from-mint/0 via-mint/70 to-mint/0" : "bg-gradient-to-r from-bear/0 via-bear/70 to-bear/0"}`} />
+      <div className="flex items-start gap-3">
+        <span className={`grid size-10 shrink-0 place-items-center rounded-xl text-sm font-bold uppercase ${a.realized_all >= 0 ? "bg-mint-soft text-mint" : "bg-bear-soft text-bear"}`}>
+          {a.name.slice(0, 2)}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="num truncate font-semibold">{a.name}</span>
+            <Pulse state={st} />
+          </div>
+          <div className="truncate text-xs text-faint">
+            {a.owner ? a.owner.email : "admin"}
+            {a.pubkey && (
+              <a className="ms-1.5 inline-flex items-center gap-0.5 hover:text-ink" target="_blank" rel="noreferrer"
+                href={`https://solscan.io/account/${a.pubkey}`} title="Wallet on Solscan">
+                {short(a.pubkey)} <ExternalLink className="size-3" />
+              </a>
+            )}
+          </div>
+        </div>
+        <Status a={a} now={now} />
+      </div>
+
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <div className="text-[11px] tracking-wider text-muted uppercase">All time</div>
+          <Money v={a.realized_all} signed className={`text-2xl font-medium ${pctClass(a.realized_all)}`} />
+        </div>
+        <div className="text-right text-xs">
+          <div className="text-muted">24h <span className={`num ${pctClass(a.realized_24h)}`}>{money(a.realized_24h, true)}</span></div>
+          <div className="text-muted">7d <span className={`num ${pctClass(a.realized_7d)}`}>{money(a.realized_7d, true)}</span></div>
+        </div>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-raised" title="Share of the best account's result">
+        <div className="h-full rounded-full bg-mint/70 transition-all duration-700" style={{ width: `${share * 100}%` }} />
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="rounded-lg bg-carbon/50 p-2.5">
+          <div className="text-faint">Wallet</div>
+          <div className="num mt-0.5 text-ink">{money(a.sol_balance_usd)}</div>
+        </div>
+        <div className="rounded-lg bg-carbon/50 p-2.5">
+          <div className="text-faint">At work · {a.open_count}</div>
+          <div className="num mt-0.5 text-ink">{a.open_count ? money(work) : "—"}</div>
+          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-raised">
+            <div className="h-full rounded-full bg-sky" style={{ width: `${Math.min(100, (work / cap) * 100)}%` }} />
+          </div>
+        </div>
+        <div className="rounded-lg bg-carbon/50 p-2.5">
+          <div className="text-faint">Win rate</div>
+          <div className="num mt-0.5 text-ink">{a.win_rate == null ? "—" : `${a.win_rate.toFixed(0)}%`}</div>
+          <div className="text-[10px] text-faint">{a.wins}/{a.trades}{a.failed_24h > 0 && <span className="text-bear"> · {a.failed_24h} failed</span>}</div>
+        </div>
+      </div>
+      <div className="-mt-1 flex items-center justify-between text-[11px] text-faint">
+        <span>last trade {since(a.last_trade_at, now)}</span>
+        {a.open_count > 0 && a.unrealized_usd != null && (
+          <span>open <span className={`num ${pctClass(a.unrealized_usd)}`}>{money(a.unrealized_usd, true)}</span></span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type TradeFilter = "all" | "wins" | "losses" | "failed";
+
+/** Closed and failed trades as a feed with filters. */
+function TradesFeed({ items, now, limit }: { items: AdminOverview["recent"]; now: number; limit?: number }) {
+  const [f, setF] = useState<TradeFilter>("all");
+  const [acct, setAcct] = useState("");
+  const [q, setQ] = useState("");
+  const accounts = useMemo(() => [...new Set(items.map((p) => p.account))].sort(), [items]);
+  const rows = items.filter((p) => {
+    if (acct && p.account !== acct) return false;
+    if (q && !(p.symbol ?? p.token_address).toLowerCase().includes(q.toLowerCase())) return false;
+    if (f === "failed") return p.status === "failed";
+    if (f === "wins") return p.status !== "failed" && (p.pnl_usd ?? 0) > 0;
+    if (f === "losses") return p.status !== "failed" && (p.pnl_usd ?? 0) <= 0;
+    return true;
+  });
+  const shown = limit ? rows.slice(0, limit) : rows;
+  const closed = rows.filter((p) => p.status !== "failed");
+  const net = closed.reduce((s, p) => s + (p.pnl_usd ?? 0), 0);
+  const counts: Record<TradeFilter, number> = {
+    all: items.length,
+    wins: items.filter((p) => p.status !== "failed" && (p.pnl_usd ?? 0) > 0).length,
+    losses: items.filter((p) => p.status !== "failed" && (p.pnl_usd ?? 0) <= 0).length,
+    failed: items.filter((p) => p.status === "failed").length,
+  };
+
+  return (
+    <Panel icon={<Activity />} title="Trades" meta={limit ? "latest" : `${rows.length} shown · net ${money(net, true)}`}
+      flush actions={!limit && (
+        <>
+          <div className="relative">
+            <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-faint" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Token"
+              className="w-28 rounded-lg border border-line bg-carbon py-1 ps-7 pe-2 text-xs outline-none focus:border-mint/60" />
+          </div>
+          <select value={acct} onChange={(e) => setAcct(e.target.value)} aria-label="Account"
+            className="rounded-lg border border-line bg-carbon px-2 py-1 text-xs outline-none focus:border-mint/60">
+            <option value="">All accounts</option>
+            {accounts.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </>
+      )}>
+      {!limit && (
+        <div className="flex gap-1 overflow-x-auto border-b border-line px-4 py-2">
+          {(["all", "wins", "losses", "failed"] as TradeFilter[]).map((k) => (
+            <button key={k} type="button" onClick={() => setF(k)}
+              className={`rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap capitalize transition ${
+                f === k ? "bg-ink text-carbon" : "text-muted hover:bg-raised hover:text-ink"}`}>
+              {k} <span className="num opacity-60">{counts[k]}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {shown.length === 0 ? <Empty>No trades match.</Empty> : (
+        <ul className="divide-y divide-line">
+          {shown.map((p, i) => {
+            const failed = p.status === "failed";
+            const win = !failed && (p.pnl_usd ?? 0) > 0;
+            return (
+              <li key={p.id} className="group flex animate-rise items-center gap-3 px-4 py-3 transition hover:bg-white/[0.025] sm:px-5"
+                style={{ animationDelay: `${Math.min(i, 12) * 25}ms` }}>
+                <span className={`grid size-9 shrink-0 place-items-center rounded-full text-xs font-bold ${
+                  failed ? "bg-raised text-faint" : win ? "bg-mint-soft text-mint" : "bg-bear-soft text-bear"}`}>
+                  {failed ? <XCircle className="size-4" /> : win ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <a className="truncate font-medium hover:text-mint" target="_blank" rel="noreferrer"
+                      href={`https://dexscreener.com/solana/${p.token_address}`}>${p.symbol || short(p.token_address)}</a>
+                    <Badge tone="muted" className="num">{p.account}</Badge>
+                  </div>
+                  <div className="truncate text-xs text-faint">
+                    {failed
+                      ? <span className="text-bear/80" title={p.error ?? ""}>failed{p.error ? `: ${p.error}` : ""}</span>
+                      : <>{(p.exit_reason ?? "closed").replace(/_/g, " ")} · in {money(p.cost_usd)}</>}
+                  </div>
+                </div>
+                <div className="text-right">
+                  {failed ? <span className="text-faint">—</span> : (
+                    <>
+                      <div className={`num text-sm font-medium ${pctClass(p.pnl_usd)}`}>{money(p.pnl_usd, true)}</div>
+                      <div className={`num text-[11px] ${pctClass(p.pnl_pct)}`}>{pct(p.pnl_pct)}</div>
+                    </>
+                  )}
+                </div>
+                <div className="hidden w-16 text-right text-[11px] text-faint sm:block">{since(p.at, now)}</div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+
+type Tab = "overview" | "accounts" | "trades" | "scout" | "billing" | "alerts";
+const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
+  { key: "overview", label: "Overview", icon: <LayoutDashboard /> },
+  { key: "accounts", label: "Accounts", icon: <Wallet /> },
+  { key: "trades", label: "Trades", icon: <Activity /> },
+  { key: "scout", label: "Wallet scout", icon: <Radar /> },
+  { key: "billing", label: "Billing", icon: <Receipt /> },
+  { key: "alerts", label: "Telegram", icon: <Bell /> },
+];
+
+type Period = "24h" | "7d" | "30d" | "all";
+
 export function AdminView() {
   const [password, setPassword] = useState("");
-  const [inputPw, setInputPw] = useState("");
   const [data, setData] = useState<AdminOverview | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [tab, setTabState] = useState<Tab>("overview");
+  const [period, setPeriod] = useState<Period>("24h");
+  const [acctView, setAcctView] = useState<"cards" | "table">("cards");
 
   useAdminResume(setPassword);
+
+  useEffect(() => {
+    const read = () => {
+      const h = window.location.hash.slice(1) as Tab;
+      if (TABS.some((t) => t.key === h)) setTabState(h);
+    };
+    read();
+    window.addEventListener("hashchange", read);
+    return () => window.removeEventListener("hashchange", read);
+  }, []);
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    history.replaceState(null, "", t === "overview" ? window.location.pathname : `#${t}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   const load = useCallback(async (pw: string) => {
     setLoading(true);
@@ -842,6 +1236,11 @@ export function AdminView() {
     return () => clearInterval(t);
   }, [password, load]);
 
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
   if (!password) {
     return (
       <>
@@ -853,97 +1252,256 @@ export function AdminView() {
 
   const t = data?.totals;
   const u = data?.users;
-  const stale = data?.accounts.filter((a) => {
-    const m = minutesSince(a.heartbeat_at, now);
-    return a.enabled && (m == null || m > STALE_MIN);
-  }) ?? [];
+  const stale = data?.accounts.filter((a) => engineState(a, now) === "stale") ?? [];
+  const realized = t ? { "24h": t.realized_24h, "7d": t.realized_7d, "30d": t.realized_30d, all: t.realized_all }[period] : 0;
+  const atWork = t ? t.open_value_usd ?? t.open_cost_usd : 0;
+  const equity = t ? (t.sol_balance_usd ?? 0) + atWork : 0;
+  const best = Math.max(0, ...(data?.accounts.map((a) => a.realized_all) ?? [0]));
+  const sorted = [...(data?.accounts ?? [])].sort((a, b) => Number(b.enabled) - Number(a.enabled) || b.realized_all - a.realized_all);
+  const badgeCount: Partial<Record<Tab, number>> = {
+    accounts: u?.pending ?? 0,
+    trades: t?.failed_24h ?? 0,
+  };
 
   return (
     <>
     <AppNav />
-    <main className="mx-auto max-w-[1400px] px-4 pt-5 pb-12 sm:px-6">
-      <PageHeader icon={<LayoutDashboard className="size-5" />} title="Admin overview"
-        subtitle="Every account, user and trade at a glance. Read-only; changes happen on Accounts and Live."
-        badges={data && (
-          <>
-            <Badge tone={data.mode === "live" ? "mint" : "gold"} dot>{data.mode.toUpperCase()}</Badge>
-            {data.paused && <Badge tone="gold">ALL PAUSED</Badge>}
-          </>
-        )}
-        actions={
-          <button type="button" onClick={() => load(password)} className={button("secondary")} disabled={loading}>
-            <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
-            {data ? `Updated ${since(data.updated_at, now)}` : "Refresh"}
-          </button>
-        } />
-
-      {error && <p className="mb-4 text-sm text-bear">{error}</p>}
-      {!data && !error && <p className="text-sm text-muted">Loading…</p>}
-
-      {data && t && u && (
-        <div className="flex flex-col gap-6">
-          {(stale.length > 0 || t.failed_24h > 0) && (
-            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-bear/30 bg-bear-soft px-4 py-3 text-sm">
-              <AlertTriangle className="size-4 text-bear" />
-              {stale.length > 0 && (
-                <span>Engine not stepping for: <b>{stale.map((a) => a.name).join(", ")}</b>.</span>
-              )}
-              {t.failed_24h > 0 && (
-                <span>{t.failed_24h} failed trade{t.failed_24h > 1 ? "s" : ""} in the last 24h.</span>
-              )}
+    <div className="relative">
+      <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[520px] bg-[radial-gradient(60%_60%_at_15%_0%,rgb(43_228_167/0.10),transparent_70%),radial-gradient(45%_50%_at_90%_10%,rgb(79_179_255/0.08),transparent_70%)]" />
+      <main className="mx-auto max-w-[1400px] px-4 pt-6 pb-16 sm:px-6">
+        {/* header */}
+        <header className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-3 animate-fade-in">
+          <span className="grid size-11 shrink-0 place-items-center rounded-2xl border border-mint/25 bg-mint-soft text-mint shadow-[0_0_30px_-8px_rgb(43_228_167/0.6)]">
+            <LayoutDashboard className="size-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="font-display text-xl font-semibold tracking-tight sm:text-2xl">Command center</h1>
+              {data && <Badge tone={data.mode === "live" ? "mint" : "gold"} dot>{data.mode.toUpperCase()}</Badge>}
+              {data?.paused && <Badge tone="gold">ALL PAUSED</Badge>}
             </div>
-          )}
-
-          {u.pending > 0 && (
-            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-mint/30 bg-mint-soft/60 px-4 py-3 text-sm">
-              <UserPlus className="size-4 text-accent" />
-              <span>
-                {u.pending} sign-up{u.pending > 1 ? "s" : ""} waiting for approval:{" "}
-                <span className="text-muted">{u.pending_list.map((p) => p.email).join(", ")}</span>
-              </span>
-              <a href="/accounts" className={`${navBtn} ms-auto`}>Review on Accounts</a>
-            </div>
-          )}
-
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Tile icon={<Wallet className="size-3.5" />} label="Wallets (SOL)" value={money(t.sol_balance_usd)}
-              sub={<>{sol(t.sol_balance)} · {t.enabled}/{t.accounts} accounts on{t.paused ? `, ${t.paused} paused` : ""}</>} />
-            <Tile icon={<Activity className="size-3.5" />} label="Open positions"
-              value={money(t.open_value_usd ?? t.open_cost_usd)}
-              sub={<>
-                {t.open_count} open · {money(t.open_cost_usd)} in ·{" "}
-                <span className={pctClass(t.unrealized_usd)}>{money(t.unrealized_usd, true)}</span>
-              </>} />
-            <Tile icon={<BarChart3 className="size-3.5" />} label="Realized 24h" value={money(t.realized_24h, true)}
-              tone={pctClass(t.realized_24h)}
-              sub={<>
-                7d <span className={pctClass(t.realized_7d)}>{money(t.realized_7d, true)}</span> · 30d{" "}
-                <span className={pctClass(t.realized_30d)}>{money(t.realized_30d, true)}</span> · all{" "}
-                <span className={pctClass(t.realized_all)}>{money(t.realized_all, true)}</span>
-              </>} />
-            <Tile icon={<Users className="size-3.5" />} label="Users" value={String(u.active)}
-              sub={<>active · {u.pending} pending · {u.blocked} blocked · +{u.new_7d} this week</>} />
+            <p className="mt-0.5 text-sm text-muted">Every account, engine, user and trade in one place.</p>
           </div>
+          <div className="flex items-center gap-2">
+            <a href="/live" className={button("ghost")}>Live <ArrowUpRight className="size-3.5" /></a>
+            <a href="/accounts" className={button("ghost")}>Accounts <ArrowUpRight className="size-3.5" /></a>
+            <button type="button" onClick={() => load(password)} className={button("secondary", "relative overflow-hidden")} disabled={loading}>
+              <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+              {data ? since(data.updated_at, now) : "Refresh"}
+              {data && !loading && (
+                <span key={data.updated_at} className="absolute inset-x-0 bottom-0 h-[2px] origin-left bg-mint/60"
+                  style={{ animation: `admin-progress ${REFRESH_MS}ms linear both` }} />
+              )}
+            </button>
+          </div>
+        </header>
 
-          <Panel icon={<BarChart3 />} title="Realized P&L per day · all accounts"
-            meta={`30d: ${t.trades_30d} trades · win rate ${t.win_rate_30d == null ? "—" : `${t.win_rate_30d.toFixed(0)}%`}`}
-            actions={<span className="text-xs text-muted">Scanner: {data.signals.last_24h} signals in 24h · last {since(data.signals.last_at, now)}</span>}>
-            <DailyBars days={data.daily} />
-            <div className="mt-2 flex justify-between text-[11px] text-faint">
-              <span className="num">{data.daily[0]?.day}</span>
-              <span className="num">{data.daily[data.daily.length - 1]?.day}</span>
-            </div>
-          </Panel>
+        {/* section tabs */}
+        <nav className="glass sticky top-[57px] z-30 -mx-4 mb-6 border-y border-line px-4 sm:mx-0 sm:rounded-2xl sm:border sm:px-1.5"
+          aria-label="Admin sections">
+          <div className="flex gap-1 overflow-x-auto py-1.5 [scrollbar-width:none]">
+            {TABS.map((x) => {
+              const on = tab === x.key;
+              const n = badgeCount[x.key];
+              return (
+                <button key={x.key} type="button" onClick={() => setTab(x.key)} aria-current={on ? "page" : undefined}
+                  className={`relative inline-flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition [&>svg]:size-4 ${
+                    on ? "bg-raised text-ink shadow-[inset_0_0_0_1px_rgb(255_255_255/0.08)]" : "text-muted hover:bg-raised/60 hover:text-ink"}`}>
+                  {x.icon}{x.label}
+                  {!!n && <span className="num grid min-w-5 place-items-center rounded-full bg-bear px-1 text-[10px] font-bold text-carbon">{n}</span>}
+                  {on && <span className="absolute inset-x-3 -bottom-1.5 h-[2px] rounded-full bg-mint" />}
+                </button>
+              );
+            })}
+          </div>
+        </nav>
 
-          <AccountsTable accounts={data.accounts} now={now} />
-          <ScoutPanel password={password} />
-          <TelegramPanel password={password} />
-          <BillingPanel password={password} now={now} />
-          <CouponsPanel password={password} now={now} />
-          <Recent items={data.recent} now={now} />
-        </div>
-      )}
-    </main>
+        {error && <p className="mb-4 rounded-xl border border-bear/30 bg-bear-soft px-4 py-3 text-sm text-bear">{error}</p>}
+        {!data && !error && (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => <div key={i} className="card h-32 animate-pulse" />)}
+          </div>
+        )}
+
+        {data && t && u && (
+          <div key={tab} className="flex animate-rise flex-col gap-6">
+            {/* alerts are shown on every section */}
+            {(stale.length > 0 || t.failed_24h > 0 || u.pending > 0) && (
+              <div className="flex flex-wrap gap-2">
+                {stale.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-full border border-bear/30 bg-bear-soft px-3.5 py-1.5 text-xs">
+                    <AlertTriangle className="size-4 text-bear" />
+                    <span>Engine not stepping for <b>{stale.map((a) => a.name).join(", ")}</b>.</span>
+                  </div>
+                )}
+                {t.failed_24h > 0 && (
+                  <button type="button" onClick={() => setTab("trades")}
+                    className="flex flex-wrap items-center gap-2 rounded-full border border-gold/30 bg-gold-soft px-3.5 py-1.5 text-left text-xs hover:border-gold/50">
+                    <AlertTriangle className="size-4 text-gold" />
+                    <span>{t.failed_24h} failed trade{t.failed_24h > 1 ? "s" : ""} in the last 24h.</span>
+                    <span className="text-gold">See trades →</span>
+                  </button>
+                )}
+                {u.pending > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-full border border-mint/30 bg-mint-soft/60 px-3.5 py-1 text-xs">
+                    <UserPlus className="size-4 text-accent" />
+                    <span>
+                      {u.pending} sign-up{u.pending > 1 ? "s" : ""} waiting:{" "}
+                      <span className="text-muted">{u.pending_list.map((p) => p.email).join(", ")}</span>
+                    </span>
+                    <a href="/accounts" className="text-mint hover:underline">Review →</a>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {tab === "overview" && (
+              <>
+                {/* hero */}
+                <section className="card relative overflow-hidden">
+                  <div className="pointer-events-none absolute -top-24 -left-24 size-72 rounded-full bg-mint/10 blur-3xl" />
+                  <div className="relative grid gap-6 p-5 sm:p-6 lg:grid-cols-[minmax(260px,340px)_1fr]">
+                    <div className="flex flex-col gap-5">
+                      <div>
+                        <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.12em] text-muted uppercase">
+                          <Sparkles className="size-3.5 text-mint" /> Total equity
+                        </div>
+                        <Money v={equity} className="mt-1 block text-4xl font-medium tracking-tight sm:text-[44px]" />
+                        <div className="mt-1 text-xs text-muted">
+                          {money(t.sol_balance_usd)} in wallets · {money(atWork)} in {t.open_count} positions
+                          {data.sol_usd ? <> · SOL {money(data.sol_usd)}</> : null}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-[11px] font-semibold tracking-[0.12em] text-muted uppercase">Realized</span>
+                          <div className="flex rounded-lg border border-line bg-carbon/60 p-0.5">
+                            {(["24h", "7d", "30d", "all"] as Period[]).map((p) => (
+                              <button key={p} type="button" onClick={() => setPeriod(p)}
+                                className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${period === p ? "bg-raised text-ink" : "text-muted hover:text-ink"}`}>
+                                {p}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <Money v={realized} signed className={`text-3xl font-medium ${pctClass(realized)}`} />
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                          <div className="rounded-xl border border-line bg-carbon/40 p-3">
+                            <div className="text-faint">Open P&L</div>
+                            <div className={`num mt-0.5 text-sm ${pctClass(t.unrealized_usd)}`}>{money(t.unrealized_usd, true)}</div>
+                          </div>
+                          <div className="rounded-xl border border-line bg-carbon/40 p-3">
+                            <div className="text-faint">Trades 30d</div>
+                            <div className="num mt-0.5 text-sm text-ink">{t.trades_30d}</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="min-w-0 lg:border-s lg:border-line lg:ps-6">
+                      <div className="mb-1 flex items-center gap-2">
+                        <BarChart3 className="size-4 text-mint" />
+                        <h2 className="text-sm font-semibold">Realized P&L · all accounts</h2>
+                      </div>
+                      <PnlChart days={data.daily} />
+                    </div>
+                  </div>
+                </section>
+
+                {/* KPIs */}
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  <Kpi icon={<Wallet />} label="Wallets" sub={<>{sol(t.sol_balance)} · {t.enabled}/{t.accounts} accounts on{t.paused ? `, ${t.paused} paused` : ""}</>}>
+                    <Money v={t.sol_balance_usd} className="text-[26px] font-medium" />
+                  </Kpi>
+                  <Kpi icon={<Layers />} label="Open positions" glow="bg-sky/15"
+                    sub={<>{t.open_count} open · {money(t.open_cost_usd)} in</>}>
+                    <div className="flex items-baseline gap-2">
+                      <Money v={atWork} className="text-[26px] font-medium" />
+                      <span className={`num text-sm ${pctClass(t.unrealized_usd)}`}>{money(t.unrealized_usd, true)}</span>
+                    </div>
+                  </Kpi>
+                  <Kpi icon={<Target />} label="Win rate · 30d">
+                    <div className="flex items-center gap-4">
+                      <Ring value={t.win_rate_30d}>
+                        <span className="num text-sm font-semibold">{t.win_rate_30d == null ? "—" : `${t.win_rate_30d.toFixed(0)}%`}</span>
+                      </Ring>
+                      <div className="text-xs text-muted">
+                        <div><span className="num text-mint">{t.wins_30d}</span> wins</div>
+                        <div><span className="num text-bear">{Math.max(0, t.trades_30d - t.wins_30d)}</span> losses</div>
+                        <div className="text-faint">{t.trades_30d} closed</div>
+                      </div>
+                    </div>
+                  </Kpi>
+                  <Kpi icon={<Users />} label="Users" glow="bg-gold/10"
+                    sub={<>+{u.new_7d} this week · {u.pending} pending · {u.blocked} blocked</>}>
+                    <div className="num text-[26px] font-medium">{u.active}<span className="ms-1 text-sm text-muted">active</span></div>
+                    <div className="mt-2">
+                      <Stack parts={[[u.active, "bg-mint", "active"], [u.pending, "bg-gold", "pending"], [u.blocked, "bg-bear", "blocked"]]} />
+                    </div>
+                  </Kpi>
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
+                  <TradesFeed items={data.recent} now={now} limit={8} />
+                  <div className="flex flex-col gap-6">
+                    <HealthStrip accounts={sorted} now={now} />
+                    <div className="card flex items-center gap-3 p-5">
+                      <span className="grid size-10 place-items-center rounded-xl bg-sky/15 text-sky"><Radar className="size-5" /></span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold">Scanner</div>
+                        <div className="text-xs text-muted">{data.signals.last_24h} signals in 24h · last {since(data.signals.last_at, now)}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-3 flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Accounts</h2>
+                    <button type="button" className="text-xs text-muted hover:text-ink" onClick={() => setTab("accounts")}>All accounts →</button>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {sorted.slice(0, 6).map((a) => <AccountCard key={a.name} a={a} now={now} best={best} />)}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {tab === "accounts" && (
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-muted">{data.accounts.length} accounts</span>
+                  <div className="ms-auto flex rounded-lg border border-line bg-carbon/60 p-0.5">
+                    {(["cards", "table"] as const).map((v) => (
+                      <button key={v} type="button" onClick={() => setAcctView(v)}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium capitalize transition ${acctView === v ? "bg-raised text-ink" : "text-muted hover:text-ink"}`}>
+                        {v === "cards" ? <LayoutGrid className="size-3.5" /> : <Rows3 className="size-3.5" />}{v}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {acctView === "cards" ? (
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {sorted.map((a) => <AccountCard key={a.name} a={a} now={now} best={best} />)}
+                  </div>
+                ) : (
+                  <AccountsTable accounts={data.accounts} now={now} />
+                )}
+              </>
+            )}
+
+            {tab === "trades" && <TradesFeed items={data.recent} now={now} />}
+            {tab === "scout" && <ScoutPanel password={password} />}
+            {tab === "billing" && (
+              <>
+                <BillingPanel password={password} now={now} />
+                <CouponsPanel password={password} now={now} />
+              </>
+            )}
+            {tab === "alerts" && <TelegramPanel password={password} />}
+          </div>
+        )}
+      </main>
+    </div>
     </>
   );
 }
