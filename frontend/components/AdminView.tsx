@@ -29,7 +29,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, PageHeader, pageMain, Panel, SectionTabs } from "@/components/ui";
+import { Badge, button, Empty, PageHeader, pageMain, Panel, SectionTabs, Toggle } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
 import type {
@@ -971,14 +971,22 @@ function engineState(a: OverviewAccount, now: number): "ok" | "stale" | "off" | 
 }
 
 /** One glance per engine: heartbeat, last trade, today. */
-function HealthStrip({ accounts, now, scanner }: { accounts: OverviewAccount[]; now: number; scanner?: string }) {
+type AcctAct = (a: OverviewAccount, change: { paused?: boolean; enabled?: boolean }) => void;
+
+function HealthStrip({ accounts, now, scanner, onAct, busy }: {
+  accounts: OverviewAccount[];
+  now: number;
+  scanner?: string;
+  onAct?: AcctAct;
+  busy?: string | null;
+}) {
   const label = { ok: "running", stale: "not stepping", off: "off", paused: "paused" };
   return (
     <div className="card flex flex-col p-0">
       <div className="flex items-center gap-2 border-b border-line px-5 py-3.5">
         <Cpu className="size-4 text-mint" />
         <h3 className="text-sm font-semibold">Engines</h3>
-        <span className="text-xs text-muted">heartbeat every few seconds</span>
+        <span className="text-xs text-muted">heartbeat · switch = new buys</span>
       </div>
       <ul className="divide-y divide-line">
         {accounts.map((a) => {
@@ -991,6 +999,10 @@ function HealthStrip({ accounts, now, scanner }: { accounts: OverviewAccount[]; 
                 {label[st]}
               </span>
               <span className="w-16 text-right text-[11px] text-faint">{since(a.heartbeat_at, now)}</span>
+              {onAct && (
+                <Toggle on={a.enabled && !a.paused} busy={busy === a.name || !a.enabled}
+                  label={`New buys on ${a.name}`} onClick={() => onAct(a, { paused: !a.paused })} />
+              )}
             </li>
           );
         })}
@@ -1005,7 +1017,13 @@ function HealthStrip({ accounts, now, scanner }: { accounts: OverviewAccount[]; 
 }
 
 /** Account as a card: result, today, money at work, hit rate. */
-function AccountCard({ a, now, best }: { a: OverviewAccount; now: number; best: number }) {
+function AccountCard({ a, now, best, onAct, busy }: {
+  a: OverviewAccount;
+  now: number;
+  best: number;
+  onAct?: AcctAct;
+  busy?: boolean;
+}) {
   const st = engineState(a, now);
   const work = a.open_value_usd ?? a.open_cost_usd;
   const cap = a.max_open_usd || Math.max(work, 1);
@@ -1073,6 +1091,24 @@ function AccountCard({ a, now, best }: { a: OverviewAccount; now: number; best: 
           <span>open <span className={`num ${pctClass(a.unrealized_usd)}`}>{money(a.unrealized_usd, true)}</span></span>
         )}
       </div>
+      {onAct && (
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line pt-3 text-xs">
+          <label className="flex items-center gap-2" title="Off: no new buys; open positions still sell">
+            <Toggle on={a.enabled && !a.paused} busy={busy || !a.enabled} label={`New buys on ${a.name}`}
+              onClick={() => onAct(a, { paused: !a.paused })} />
+            <span className={a.enabled && !a.paused ? "text-mint" : "text-muted"}>New buys</span>
+          </label>
+          <label className="flex items-center gap-2" title="Off: the account stops completely">
+            <Toggle on={a.enabled} busy={busy} label={`Account ${a.name}`}
+              onClick={() => {
+                if (a.enabled && !confirm(`Stop account ${a.name} completely?`)) return;
+                onAct(a, { enabled: !a.enabled });
+              }} />
+            <span className={a.enabled ? "text-mint" : "text-muted"}>Account</span>
+          </label>
+          <a href="/accounts" className="ms-auto text-muted hover:text-ink">Settings →</a>
+        </div>
+      )}
     </div>
   );
 }
@@ -1193,6 +1229,13 @@ export function AdminView() {
   const [tab, setTabState] = useState<Tab>("overview");
   const [period, setPeriod] = useState<Period>("24h");
   const [acctView, setAcctView] = useState<"cards" | "table">("cards");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    if (!note?.ok) return;                       // errors stay until closed
+    const t = setTimeout(() => setNote(null), 5_000);
+    return () => clearTimeout(t);
+  }, [note]);
 
   useAdminResume(setPassword);
 
@@ -1244,6 +1287,24 @@ export function AdminView() {
     return () => clearInterval(t);
   }, []);
 
+  /** Run a change, show what happened, reload the overview. */
+  async function act(key: string, run: () => Promise<unknown>, okText: string) {
+    setBusy(key);
+    setNote(null);
+    try {
+      await run();
+      setNote({ ok: true, text: okText });
+      await load(password);
+    } catch (e) {
+      setNote({ ok: false, text: e instanceof ApiError ? e.message : "Could not change it." });
+    } finally {
+      setBusy(null);
+    }
+  }
+  const onAct: AcctAct = (a, change) => act(a.name, () => api.editAccount(password, a.name, change),
+    change.enabled === false ? `${a.name} is off` : change.enabled ? `${a.name} is on`
+      : change.paused ? `${a.name}: new buys off · open positions still sell` : `${a.name}: new buys on`);
+
   if (!password) {
     return (
       <>
@@ -1276,10 +1337,18 @@ export function AdminView() {
           badges={data && (
             <>
               <Badge tone={data.mode === "live" ? "mint" : "gold"} dot>{data.mode.toUpperCase()}</Badge>
-              {data.paused && <Badge tone="gold">ALL PAUSED</Badge>}
             </>
           )}
           actions={
+            <>
+            {data && data.mode !== "off" && (
+              <label className="card inline-flex items-center gap-2.5 px-3.5 py-2 text-sm" title="Off: no new buys on any account; open positions still sell">
+                <Toggle on={!data.paused} busy={busy === "all"} label="New buys, all accounts"
+                  onClick={() => act("all", () => api.livePause(password, !data.paused),
+                    data.paused ? "Buying again on every account" : "All new buys paused · open positions still sell")} />
+                <span className={data.paused ? "text-gold" : "text-ink"}>{data.paused ? "All buys paused" : "Buying"}</span>
+              </label>
+            )}
             <button type="button" onClick={() => load(password)} className={button("secondary", "relative overflow-hidden")} disabled={loading}>
               <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
               {data ? since(data.updated_at, now) : "Refresh"}
@@ -1288,12 +1357,20 @@ export function AdminView() {
                   style={{ animation: `admin-progress ${REFRESH_MS}ms linear both` }} />
               )}
             </button>
+            </>
           } />
 
         <SectionTabs label="Admin sections" value={tab} onChange={setTab}
           tabs={TABS.map((x) => ({ ...x, count: badgeCount[x.key] }))} />
 
         {error && <p className="mb-4 rounded-xl border border-bear/30 bg-bear-soft px-4 py-3 text-sm text-bear">{error}</p>}
+        {note && (
+          <div className={`fixed right-4 bottom-20 z-50 flex animate-toast-in items-center gap-2 rounded-xl border px-4 py-2.5 text-sm shadow-2xl sm:bottom-6 ${
+            note.ok ? "border-mint/40 bg-carbon text-mint" : "border-bear/40 bg-carbon text-bear"}`}>
+            {note.text}
+            <button type="button" className="ms-2 text-muted hover:text-ink" onClick={() => setNote(null)} aria-label="Close">×</button>
+          </div>
+        )}
         {!data && !error && (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {[0, 1, 2, 3].map((i) => <div key={i} className="card h-32 animate-pulse" />)}
@@ -1319,16 +1396,28 @@ export function AdminView() {
                     <span className="text-gold">See trades →</span>
                   </button>
                 )}
-                {u.pending > 0 && (
-                  <div className="flex flex-wrap items-center gap-2 rounded-full border border-mint/30 bg-mint-soft/60 px-3.5 py-1 text-xs">
+                {u.pending_list.map((p) => (
+                  <div key={p.id} className="flex flex-wrap items-center gap-2 rounded-full border border-mint/30 bg-mint-soft/60 py-1 ps-3.5 pe-1 text-xs">
                     <UserPlus className="size-4 text-accent" />
-                    <span>
-                      {u.pending} sign-up{u.pending > 1 ? "s" : ""} waiting:{" "}
-                      <span className="text-muted">{u.pending_list.map((p) => p.email).join(", ")}</span>
-                    </span>
-                    <a href="/accounts" className="text-mint hover:underline">Review →</a>
+                    <span>Sign-up waiting: <b className="font-medium">{p.email}</b>{p.name ? ` (${p.name})` : ""}</span>
+                    <button type="button" disabled={busy === `u${p.id}`}
+                      className="rounded-full bg-mint px-2.5 py-0.5 font-semibold text-carbon hover:brightness-110 disabled:opacity-50"
+                      onClick={() => {
+                        if (!confirm(`Approve ${p.email}? They get a trading account with a new wallet.`)) return;
+                        act(`u${p.id}`, () => api.approveUser(password, p.id, {}), `${p.email} approved`);
+                      }}>
+                      Approve
+                    </button>
+                    <button type="button" disabled={busy === `u${p.id}`}
+                      className="rounded-full border border-bear/40 px-2.5 py-0.5 text-bear hover:bg-bear-soft disabled:opacity-50"
+                      onClick={() => {
+                        if (!confirm(`Block ${p.email}?`)) return;
+                        act(`u${p.id}`, () => api.blockUser(password, p.id, true), `${p.email} blocked`);
+                      }}>
+                      Block
+                    </button>
                   </div>
-                )}
+                ))}
               </div>
             )}
 
@@ -1419,7 +1508,7 @@ export function AdminView() {
 
                 <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
                   <TradesFeed items={data.recent} now={now} limit={8} />
-                  <HealthStrip accounts={sorted} now={now}
+                  <HealthStrip accounts={sorted} now={now} onAct={onAct} busy={busy}
                     scanner={`${data.signals.last_24h} signals in 24h · last ${since(data.signals.last_at, now)}`} />
                 </div>
 
@@ -1441,7 +1530,7 @@ export function AdminView() {
                 </div>
                 {acctView === "cards" ? (
                   <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    {sorted.map((a) => <AccountCard key={a.name} a={a} now={now} best={best} />)}
+                    {sorted.map((a) => <AccountCard key={a.name} a={a} now={now} best={best} onAct={onAct} busy={busy === a.name} />)}
                   </div>
                 ) : (
                   <AccountsTable accounts={data.accounts} now={now} />
