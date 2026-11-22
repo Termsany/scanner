@@ -8,10 +8,10 @@ import { useLiveSignals } from "@/lib/useLiveSignals";
 import type { FeedSignal, LiveSignal, PaginatedTokens, ScannerStatus, TokenQuery, TokenRef } from "@/lib/types";
 
 import { ChainPill } from "./Badges";
-import { Radar } from "lucide-react";
+import { Radar, Radio, Table2, Users } from "lucide-react";
 
 import { AppNav } from "./AppNav";
-import { PageHeader, pageMain } from "./ui";
+import { PageHeader, pageMain, SectionTabs } from "./ui";
 import { KpiBar, TelemetryBar } from "./KpiBar";
 import { LiveFeed } from "./LiveFeed";
 import { type RowFlash, ScannerTable } from "./ScannerTable";
@@ -40,6 +40,11 @@ export function Dashboard({ initialToken = null }: { initialToken?: TokenRef | n
   const [history, setHistory] = useState<FeedSignal[]>([]);
   const [fresh, setFresh] = useState<Set<number>>(new Set());
   const [now, setNow] = useState(() => Date.now());
+  type ScanTab = "tokens" | "signals" | "wallets";
+  const [tab, setTab] = useState<ScanTab>("tokens");
+  const [unseen, setUnseen] = useState(0);         // signals that arrived while another tab was open
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
 
   // ---- flash helpers --------------------------------------------------------
   const flashRows = useCallback((entries: [string, RowFlash][]) => {
@@ -154,6 +159,7 @@ export function Dashboard({ initialToken = null }: { initialToken?: TokenRef | n
           return next;
         }), FLASH_MS);
       }
+      if (s.score >= feedMinRef.current && tabRef.current !== "signals") setUnseen((n) => n + 1);
       if (s.score >= feedMinRef.current) {
         setToasts((prev) => [s, ...prev.filter((p) => p.signal_id !== s.signal_id)].slice(0, 3));
         setTimeout(() => setToasts((prev) => prev.filter((p) => p !== s)), 7_000);
@@ -206,20 +212,35 @@ export function Dashboard({ initialToken = null }: { initialToken?: TokenRef | n
         <TelemetryBar status={status} socket={socket} now={now} />
         <KpiBar status={status} now={now} onOpenToken={openToken} />
 
-        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-          <ScannerTable
-            data={tokens}
-            query={query}
-            onQuery={updateQuery}
-            loading={loading}
-            error={tokensError}
-            onRetry={() => loadTokens(debouncedQuery)}
-            onOpen={openToken}
-            selected={selected}
-            flash={flash}
-            now={now}
-          />
-          <aside className="xl:sticky xl:top-[68px] xl:self-start" aria-label="Signals and wallets">
+        <div className="mt-5">
+          <SectionTabs label="Scanner sections" value={tab}
+            onChange={(t) => {
+              setTab(t);
+              if (t === "signals") setUnseen(0);
+            }}
+            tabs={[
+              { key: "tokens", label: tokens ? `Tokens · ${tokens.total}` : "Tokens", icon: <Table2 /> },
+              { key: "signals", label: `Live signals · ${visibleFeed.length}`, icon: <Radio />, count: unseen },
+              { key: "wallets", label: "Smart wallets", icon: <Users /> },
+            ]} />
+        </div>
+
+        <div key={tab} className="animate-fade-in">
+          {tab === "tokens" && (
+            <ScannerTable
+              data={tokens}
+              query={query}
+              onQuery={updateQuery}
+              loading={loading}
+              error={tokensError}
+              onRetry={() => loadTokens(debouncedQuery)}
+              onOpen={openToken}
+              selected={selected}
+              flash={flash}
+              now={now}
+            />
+          )}
+          {tab === "signals" && (
             <LiveFeed
               feed={visibleFeed}
               fresh={fresh}
@@ -228,9 +249,10 @@ export function Dashboard({ initialToken = null }: { initialToken?: TokenRef | n
               onMinScore={setFeedMin}
               onOpen={openToken}
               now={now}
+              wide
             />
-            <SmartWalletsPanel refreshKey={refreshKey} />
-          </aside>
+          )}
+          {tab === "wallets" && <SmartWalletsPanel refreshKey={refreshKey} wide />}
         </div>
       </main>
 

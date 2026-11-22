@@ -17,16 +17,18 @@ interface Props {
   onMinScore: (n: number) => void;
   onOpen: (t: TokenRef) => void;
   now: number;
+  wide?: boolean;      // the Signals tab: full width, cards in a grid
 }
 
 const THRESHOLDS = [60, 75, 80, 90];
 
-export function LiveFeed({ feed, fresh, socket, minScore, onMinScore, onOpen, now }: Props) {
+export function LiveFeed({ feed, fresh, socket, minScore, onMinScore, onOpen, now, wide }: Props) {
   return (
-    <section className="card flex max-h-[calc(100dvh-420px)] min-h-[300px] flex-col" aria-label="Live signals">
+    <section className={`card flex flex-col ${wide ? "" : "max-h-[calc(100dvh-420px)] min-h-[300px]"}`} aria-label="Live signals">
       <div className="flex items-center gap-2 border-b border-line px-4 py-3">
         <Radio className={`size-4 ${socket === "open" ? "text-bull" : "text-faint"}`} />
         <h2 className="text-sm font-semibold">Live signals</h2>
+        {wide && <span className="text-xs text-muted">click one to open the token</span>}
         <div role="radiogroup" aria-label="Minimum signal score" className="ml-auto flex rounded-md border border-line p-0.5">
           {THRESHOLDS.map((v) => (
             <button
@@ -42,16 +44,18 @@ export function LiveFeed({ feed, fresh, socket, minScore, onMinScore, onOpen, no
         </div>
       </div>
 
-      <ol className="flex-1 divide-y divide-line/70 overflow-y-auto" aria-live="polite">
+      <ol className={wide ? "grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3" : "flex-1 divide-y divide-line/70 overflow-y-auto"}
+        aria-live="polite">
         {feed.length === 0 ? (
-          <li className="px-4 py-10 text-center text-xs text-faint">
+          <li className="px-4 py-10 text-center text-xs text-faint sm:col-span-full">
             {socket === "open" ? `No ${minScore}+ signals yet. Waiting for the next one…` : "Connecting to the signal stream…"}
           </li>
         ) : (
           feed.map((s) => (
             <li
               key={s.signal_id ?? `${s.chain}:${s.address}:${s.created_at}`}
-              className={s.signal_id && fresh.has(s.signal_id) ? "flash-up" : ""}
+              className={`${s.signal_id && fresh.has(s.signal_id) ? "flash-up" : ""} ${
+                wide ? "overflow-hidden rounded-xl border border-line bg-surface-2/60 transition hover:-translate-y-0.5 hover:border-line-strong" : ""}`}
             >
               <button
                 onClick={() => onOpen({ chain: s.chain, address: s.address })}

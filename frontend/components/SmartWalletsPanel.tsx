@@ -23,7 +23,7 @@ function walletUrl(chain: Chain, address: string): string {
 }
 
 /** Read-only view of tracked wallets. Managed on the server with `python -m app.smart_money`. */
-export function SmartWalletsPanel({ refreshKey }: { refreshKey: number }) {
+export function SmartWalletsPanel({ refreshKey, wide }: { refreshKey: number; wide?: boolean }) {
   const [data, setData] = useState<SmartWalletList | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -42,7 +42,7 @@ export function SmartWalletsPanel({ refreshKey }: { refreshKey: number }) {
   const total = data ? data.items.length : 0;
 
   return (
-    <section className="card mt-4 flex max-h-[420px] flex-col" aria-label="Smart wallets">
+    <section className={`card flex flex-col ${wide ? "" : "mt-4 max-h-[420px]"}`} aria-label="Smart wallets">
       <div className="flex items-center gap-2 border-b border-line px-4 py-3">
         <Users className="size-4 text-accent" />
         <h2 className="text-sm font-semibold">Smart wallets</h2>
@@ -67,9 +67,9 @@ export function SmartWalletsPanel({ refreshKey }: { refreshKey: number }) {
           (30-day win rate and realized profit), and holders of several signalled tokens that rallied 50%+.
         </p>
       ) : (
-        <ul className="flex-1 divide-y divide-line/70 overflow-y-auto">
+        <ul className={wide ? "grid gap-px bg-line/60 sm:grid-cols-2 xl:grid-cols-3" : "flex-1 divide-y divide-line/70 overflow-y-auto"}>
           {data.items.map((w) => (
-            <li key={`${w.chain}:${w.address}`} className="flex items-center gap-2.5 px-4 py-2.5 text-xs">
+            <li key={`${w.chain}:${w.address}`} className={`flex items-center gap-2.5 px-4 py-2.5 text-xs ${wide ? "bg-surface py-3 transition hover:bg-surface-2" : ""}`}>
               <ChainPill chain={w.chain} />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
