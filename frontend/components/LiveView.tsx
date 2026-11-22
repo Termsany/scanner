@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  Crosshair,
   ExternalLink,
   History,
   Radio,
@@ -123,16 +124,16 @@ function SellButtons({
     );
   }
   return (
-    <span className="mt-1 flex gap-1">
+    <span className="flex gap-1.5">
       <button
         onClick={() => setConfirm(0.5)}
-        className="rounded-md border border-line bg-raised px-2 py-0.5 text-muted hover:text-ink"
+        className="rounded-md border border-line bg-raised px-2.5 py-1 text-muted hover:text-ink"
       >
         Sell 50%
       </button>
       <button
         onClick={() => setConfirm(1)}
-        className="rounded-md border border-bear/50 px-2 py-0.5 text-bear hover:bg-bear-soft"
+        className="rounded-md border border-bear/50 px-2.5 py-1 text-bear hover:bg-bear-soft"
       >
         Sell 100%
       </button>
@@ -163,11 +164,12 @@ function TargetEditor({
   const [tpx, setTpx] = useState(p.target_price != null ? String(p.target_price) : "");
   const [spx, setSpx] = useState(p.stop_price != null ? String(p.stop_price) : "");
   const [share, setShare] = useState(p.target_share != null ? String(Math.round(p.target_share * 100)) : "100");
-  const [mine, setMine] = useState(p.hands_off ?? true);
+  // a new target starts as "I manage it"; an existing one shows what was saved
+  const [mine, setMine] = useState(byPrice || byPct || p.hands_off ? !!p.hands_off : true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const box = "num w-14 rounded border border-line bg-carbon px-1 py-0.5 text-center text-[11px] text-ink outline-none focus:border-accent";
-  const wide = "num w-28 rounded border border-line bg-carbon px-1.5 py-0.5 text-[11px] text-ink outline-none focus:border-accent";
+  const box = "num w-16 rounded-md border border-line bg-carbon px-1.5 py-1 text-center text-xs text-ink outline-none focus:border-gold/70";
+  const wide = "num w-32 rounded-md border border-line bg-carbon px-2 py-1 text-xs text-ink outline-none focus:border-gold/70";
   const has = byPrice || byPct;
   // our average entry price, from the live price and value: price × cost / value × (left / bought)
   const left = Number(p.tokens_left), bought = Number(p.tokens_bought) || left;
@@ -222,67 +224,86 @@ function TargetEditor({
   );
 
   return (
-    <span className="mt-1 block text-[11px]">
+    <>
       {has && !open && (
-        <span className="block text-gold">
-          🎯 {p.target_pct != null && <>sell {Math.round((p.target_share ?? 1) * 100)}% at +{p.target_pct}%</>}
-          {p.target_price != null && <>sell {Math.round((p.target_share ?? 1) * 100)}% at {usdPrice(p.target_price)}</>}
-          {(p.target_pct != null || p.target_price != null) && (p.stop_pct != null || p.stop_price != null) && " · "}
-          {p.stop_pct != null && <>stop {p.stop_pct}%</>}
-          {p.stop_price != null && <>stop {usdPrice(p.stop_price)}</>}
+        <span className="order-first flex basis-full items-center gap-1.5 rounded-md border border-gold/30 bg-gold-soft px-2 py-1 text-[11px] text-gold">
+          <Crosshair className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">
+            {p.target_pct != null && <>sell {Math.round((p.target_share ?? 1) * 100)}% at +{p.target_pct}%</>}
+            {p.target_price != null && <>sell {Math.round((p.target_share ?? 1) * 100)}% at {usdPrice(p.target_price)}</>}
+            {(p.target_pct != null || p.target_price != null) && (p.stop_pct != null || p.stop_price != null) && " · "}
+            {p.stop_pct != null && <>stop {p.stop_pct}%</>}
+            {p.stop_price != null && <>stop {usdPrice(p.stop_price)}</>}
+          </span>
         </span>
       )}
-      {p.hands_off && !open && <span className="block text-sky">✋ you manage it: the bot won&apos;t sell it</span>}
-      {!open ? (
-        <button onClick={() => setOpen(true)} className="mt-0.5 rounded-md border border-line px-2 py-0.5 text-muted hover:text-ink">
-          {has ? "Edit target" : "Target"}
+      {p.hands_off && !open && (
+        <span className="order-first basis-full text-[11px] text-sky">✋ you manage it: the bot won&apos;t sell it</span>
+      )}
+      {!open && (
+        <button onClick={() => setOpen(true)}
+          className="inline-flex items-center gap-1 rounded-md border border-gold/50 bg-gold-soft px-2.5 py-1 font-medium text-gold hover:border-gold">
+          <Crosshair className="size-3.5" /> {has ? "Edit target" : "Sell target"}
         </button>
-      ) : (
-        <span className="mt-1 flex flex-col gap-1.5 rounded-lg border border-line bg-carbon/50 p-2 text-muted">
-          <span className="flex flex-wrap items-center gap-1">
-            <span className="flex rounded border border-line p-0.5">{tab("price", "Coin price $")}{tab("pct", "% from entry")}</span>
-            <span className="text-faint">now {usdPrice(p.price_usd)} · entry {usdPrice(entry)}</span>
+      )}
+      {open && (
+        <span className="order-last flex basis-full flex-col gap-2 rounded-lg border border-gold/30 bg-carbon/60 p-3 text-xs text-muted">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="flex rounded-md border border-line p-0.5">{tab("price", "Coin price $")}{tab("pct", "% from entry")}</span>
+            <span className="text-faint">now <b className="num font-medium text-ink">{usdPrice(p.price_usd)}</b> · entry <b className="num font-medium text-ink">{usdPrice(entry)}</b></span>
           </span>
           {mode === "price" ? (
-            <span className="flex flex-wrap items-center gap-1">
-              <span>Sell</span>
-              <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
-              <span>% at $</span>
-              <input className={wide} inputMode="decimal" placeholder={entry ? String(Number((entry * 2).toPrecision(3))) : "target"}
-                value={tpx} onChange={(e) => setTpx(e.target.value)} />
-              <span>· stop at $</span>
-              <input className={wide} inputMode="decimal" placeholder="—" value={spx} onChange={(e) => setSpx(e.target.value)} />
+            <span className="grid gap-2 sm:grid-cols-[auto_1fr]">
+              <span className="self-center">Sell</span>
+              <span className="flex flex-wrap items-center gap-1.5">
+                <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
+                <span>% when the price reaches $</span>
+                <input className={wide} inputMode="decimal" placeholder={entry ? String(Number((entry * 2).toPrecision(3))) : "target"}
+                  value={tpx} onChange={(e) => setTpx(e.target.value)} />
+              </span>
+              <span className="self-center">Stop</span>
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span>sell everything if it drops to $</span>
+                <input className={wide} inputMode="decimal" placeholder="optional" value={spx} onChange={(e) => setSpx(e.target.value)} />
+              </span>
             </span>
           ) : (
-            <span className="flex flex-wrap items-center gap-1">
-              <span>Sell</span>
-              <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
-              <span>% at +</span>
-              <input className={box} inputMode="decimal" placeholder="100" value={tp} onChange={(e) => setTp(e.target.value)} />
-              <span>% · stop −</span>
-              <input className={box} inputMode="decimal" placeholder="—" value={stop} onChange={(e) => setStop(e.target.value)} />
-              <span>%</span>
+            <span className="grid gap-2 sm:grid-cols-[auto_1fr]">
+              <span className="self-center">Sell</span>
+              <span className="flex flex-wrap items-center gap-1.5">
+                <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
+                <span>% when it is up +</span>
+                <input className={box} inputMode="decimal" placeholder="100" value={tp} onChange={(e) => setTp(e.target.value)} />
+                <span>%</span>
+              </span>
+              <span className="self-center">Stop</span>
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span>sell everything at −</span>
+                <input className={box} inputMode="decimal" placeholder="optional" value={stop} onChange={(e) => setStop(e.target.value)} />
+                <span>%</span>
+              </span>
             </span>
           )}
-          <label className="flex items-center gap-1.5">
-            <input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />
-            I manage it: the bot never sells it (no leader exit, 2x, quick exit, max hold), only my target / stop
+          <label className="flex items-start gap-2">
+            <Toggle on={mine} label="I manage it" onClick={() => setMine(!mine)} />
+            <span>I manage it: the bot never sells it (no leader exit, 2x, quick exit, max hold), only my target / stop</span>
           </label>
-          <span className="flex flex-wrap gap-1">
-            <button disabled={busy} onClick={() => save()} className="rounded-md border border-mint/60 px-2 py-0.5 text-mint disabled:opacity-50">
-              Save
+          <span className="flex flex-wrap gap-1.5">
+            <button disabled={busy} onClick={() => save()}
+              className="rounded-md bg-gold px-3 py-1 font-semibold text-carbon hover:brightness-110 disabled:opacity-50">
+              Save target
             </button>
             {(has || p.hands_off) && (
-              <button disabled={busy} onClick={() => save(true)} className="rounded-md border border-line px-2 py-0.5 text-muted disabled:opacity-50">
+              <button disabled={busy} onClick={() => save(true)} className="rounded-md border border-line px-2.5 py-1 text-muted disabled:opacity-50">
                 Clear (back to the bot)
               </button>
             )}
-            <button onClick={() => setOpen(false)} className="rounded-md border border-line px-2 py-0.5 text-muted">Cancel</button>
+            <button onClick={() => setOpen(false)} className="rounded-md border border-line px-2.5 py-1 text-muted">Cancel</button>
           </span>
         </span>
       )}
-      {msg && <span className="block text-faint">{msg}</span>}
-    </span>
+      {msg && <span className="order-last basis-full text-[11px] text-faint">{msg}</span>}
+    </>
   );
 }
 
@@ -376,8 +397,10 @@ function PositionRows({
               {p.status === "open" ? (
                 <>
                   <Badge tone="mint" dot>Open</Badge>
-                  <SellButtons p={p} onSell={onSell} />
-                  {onTarget && <TargetEditor p={p} onTarget={onTarget} />}
+                  <span className="mt-1 flex flex-wrap items-center gap-1.5">
+                    {onTarget && <TargetEditor p={p} onTarget={onTarget} />}
+                    <SellButtons p={p} onSell={onSell} />
+                  </span>
                 </>
               ) : p.status === "failed" ? (
                 <span className="text-bear" title={p.error ?? ""}>
@@ -720,9 +743,9 @@ function OpenCard({ p, now, onSell, onTarget }: {
         <span className="flex gap-2">{p.fills.filter((f) => f.side !== "sell_failed").slice(-2).map((f, i) => <TxLink key={i} sig={f.sig} />)}</span>
       </div>
       {p.error && <span className="text-[11px] text-bear">sell retrying: {p.error.slice(0, 60)}</span>}
-      <div className="border-t border-line pt-2 text-xs">
-        <SellButtons p={p} onSell={onSell} />
+      <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-3 text-xs">
         {onTarget && <TargetEditor p={p} onTarget={onTarget} />}
+        <SellButtons p={p} onSell={onSell} />
       </div>
     </div>
   );
