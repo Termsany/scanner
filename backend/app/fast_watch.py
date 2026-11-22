@@ -95,7 +95,7 @@ class FastWatcher:
         for i, w in enumerate(self.wallets, start=1):
             self._pending[i] = w
             reqs.append(json.dumps({"jsonrpc": "2.0", "id": i, "method": "logsSubscribe",
-                                    "params": [{"mentions": [w]}, {"commitment": "confirmed"}]}))
+                                    "params": [{"mentions": [w]}, {"commitment": self.s.live_fast_commitment}]}))
         return reqs
 
     async def handle_message(self, raw: str | bytes) -> int:
@@ -121,7 +121,7 @@ class FastWatcher:
             self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
         lock = self._wallet_locks.setdefault(wallet, asyncio.Lock())
         async with lock, self._slots:
-            return await self.process(wallet, sig)
+            return await self.process(wallet, sig, now)     # `now`: when the notification arrived
 
     def dispatch(self, raw: str | bytes) -> None:
         """Handle a notification in the background so the next one is read at once."""
@@ -134,8 +134,9 @@ class FastWatcher:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def process(self, wallet: str, sig: str) -> int:
+    async def process(self, wallet: str, sig: str, notified: float | None = None) -> int:
         t0 = time.monotonic()
+        queued = t0 - notified if notified else 0.0
         tx = await self._fetch_tx(sig)
         if not tx:
             return 0
@@ -165,8 +166,9 @@ class FastWatcher:
             return 0
         self.handled += 1
         wake_engines()
-        log.info("fast: %s %s %s recorded %.1fs after the block (%.1fs to fetch + record)", wallet[:6], sides,
-                 sig[:12], lag, time.monotonic() - t0)
+        took = time.monotonic() - t0
+        log.info("fast: %s %s %s recorded %.1fs after the block (notified at %.1fs, %.1fs queued, %.1fs to fetch "
+                 "+ record)", wallet[:6], sides, sig[:12], lag, max(lag - took - queued, 0.0), queued, took)
         return stored
 
     # ---- connection -----------------------------------------------------------

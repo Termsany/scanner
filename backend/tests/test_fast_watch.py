@@ -92,7 +92,7 @@ def test_a_busy_wallet_does_not_hold_up_another_and_one_wallet_stays_in_order():
         fw = FastWatcher([W, "Busy1111111111111111111111111111111111111111"], S, fetch_tx=lambda s: None)
         fw._subs = {1: "Busy1111111111111111111111111111111111111111", 2: W}
 
-        async def process(wallet, sig):
+        async def process(wallet, sig, notified=None):
             if wallet.startswith("Busy"):
                 await asyncio.sleep(0.3)                 # slow: DEX price, retries...
             order.append(sig)
