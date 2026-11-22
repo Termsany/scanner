@@ -244,7 +244,8 @@ export const api = {
     }),
 
   adminStatus: () => request<{ has_admin: boolean }>("/api/live/admin/status"),
-  adminMe: () => request<{ email: string | null; via: string; totp_enabled?: boolean }>("/api/live/admin/me", { credentials: "include" }),
+  adminMe: (password?: string) => request<{ email: string | null; via: string; totp_enabled?: boolean }>("/api/live/admin/me",
+    password ? adm(password) : { credentials: "include" }),
   adminSetup: (current_password: string, email: string, password: string) =>
     request<{ ok: boolean; email: string }>("/api/live/admin/setup", {
       method: "POST", credentials: "include", body: JSON.stringify({ current_password, email, password }),

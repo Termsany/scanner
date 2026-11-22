@@ -21,6 +21,17 @@ function savedShared(): string {
   }
 }
 
+/** Who is signed in as admin: the session cookie, or else the old shared password saved in this browser. */
+export async function adminWho() {
+  try {
+    return await api.adminMe();
+  } catch (e) {
+    const saved = savedShared();
+    if (saved) return await api.adminMe(saved);
+    throw e;
+  }
+}
+
 /** On load: an admin session cookie signs the page in; otherwise an old saved shared password is tried. */
 export function useAdminResume(setPassword: (v: string) => void) {
   useEffect(() => {
@@ -182,7 +193,7 @@ export function AdminMenu() {
   const [pkOpen, setPkOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const load = () => api.adminMe().then(setMe).catch(() => setMe(null));
+    const load = () => adminWho().then(setMe).catch(() => setMe(null));
     load();
     window.addEventListener(AUTH_EVENT, load);
     return () => window.removeEventListener(AUTH_EVENT, load);

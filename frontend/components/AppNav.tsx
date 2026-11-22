@@ -4,10 +4,9 @@ import { Activity, BarChart3, FlaskConical, LayoutDashboard, Radar, Users } from
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { AdminMenu } from "@/components/AdminAuth";
+import { AdminMenu, adminWho } from "@/components/AdminAuth";
 import { SirbLockup } from "@/components/brand/Logo";
 import { page } from "@/components/ui";
-import { api } from "@/lib/api";
 
 /** Operator pages (admin sign-in) and the public data pages share one top bar. */
 const ADMIN = [
@@ -37,7 +36,7 @@ export function AppNav({ kind = "admin", right }: { kind?: "admin" | "public"; r
     if (kind === "admin") return;
     if (rememberedAdmin()) setAdmin(true);
     let alive = true;
-    api.adminMe()
+    adminWho()
       .then(() => {
         if (!alive) return;
         setAdmin(true);
