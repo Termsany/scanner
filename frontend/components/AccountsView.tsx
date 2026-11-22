@@ -458,6 +458,8 @@ function AccountCard({
     if (!local.current) setD(toDraft(a));
   }, [a]);
 
+  const saved = useRef(onSaved);              // the parent's callback changes each render: keep flush stable
+  saved.current = onSaved;
   const flush = useCallback(async () => {
     if (timer.current) {
       clearTimeout(timer.current);
@@ -476,7 +478,7 @@ function AccountCard({
     try {
       const r = await api.editAccount(password, latest.current.name, fullBody(next));
       if (!pending.current) local.current = false;
-      onSaved({ ...r.account, open_by_leader: latest.current.open_by_leader });
+      saved.current({ ...r.account, open_by_leader: latest.current.open_by_leader });
       setSt({ kind: "saved", text: "Saved · the bot picks it up within 30 s" });
     } catch (e) {
       setSt({ kind: "error", text: e instanceof ApiError ? e.message : "Could not save" });
@@ -484,7 +486,7 @@ function AccountCard({
       inflight.current = false;
       if (pending.current) void flush();
     }
-  }, [password, onSaved]);
+  }, [password]);
 
   // typing: save 0.9 s after the last key (or when the field loses focus); switches: save at once
   const edit = useCallback((next: Draft, at_once = false) => {

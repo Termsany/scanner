@@ -58,7 +58,7 @@ export function AppNav({ kind = "admin", right }: { kind?: "admin" | "public"; r
   return (
     <>
     <nav className="glass sticky top-0 z-40 border-b border-line" aria-label="Main">
-      <div className={`${page} flex items-center gap-4 py-2.5 sm:gap-6`}>
+      <div className={`${page} flex h-14 items-center gap-4 sm:gap-6`}>
         <SirbLockup size={26} href={admin ? "/admin" : "/"} sub={false} />
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink sm:hidden">{current?.label}</span>
         <div className="-mx-1 hidden min-w-0 flex-1 gap-1 overflow-x-auto px-1 [scrollbar-width:none] sm:flex">
@@ -70,7 +70,7 @@ export function AppNav({ kind = "admin", right }: { kind?: "admin" | "public"; r
                   on ? "bg-raised font-medium text-ink" : "text-muted hover:bg-raised/60 hover:text-ink"}`}>
                 <span className={`inline-flex [&>svg]:size-4 ${on ? "text-mint" : ""}`}>{it.icon}</span>
                 {it.label}
-                {on && <span className="absolute inset-x-3 -bottom-[11px] h-[2px] rounded-full bg-mint" />}
+                {on && <span className="absolute inset-x-3 -bottom-3 h-[2px] rounded-full bg-mint" />}
               </a>
             );
           })}

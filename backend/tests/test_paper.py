@@ -260,3 +260,36 @@ def test_follow_sees_a_leader_sell_made_before_the_paper_entry():
     p = _db(body)
     assert p.status == "closed" and p.exit_reason == "leader_sold"     # not a +200% take profit
     assert -4 < p.pnl_pct < 0                                          # in and straight out: fees only
+
+
+def test_a_wild_price_jump_is_ignored_until_it_repeats():
+    """2026-11-23: a wrong pair priced hSOL ($81) at $396,965 and booked +$470k of paper profit."""
+    import app.paper as paper
+
+    s = _settings()
+    paper._suspect.clear()
+
+    async def body(sess):
+        tok = Token(chain=Chain.solana, address=MINT, symbol="TOK")
+        sess.add(tok)
+        await sess.flush()
+        await process_entries(sess, s)
+        await sess.commit()
+        sess.add(Signal(token_id=tok.id, score=86, badge=Badge.strong_alpha, price_usd=1.0, payload={}))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        await process_exits(sess, _prices({MINT: 4900.0}), s)    # 4900x: a bad read
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition))).scalars().all()
+        assert all(r.status == "open" and r.last_price == 1.0 for r in rows)
+        await process_exits(sess, _prices({MINT: 1.05}), s)      # back to normal: nothing happened
+        await sess.commit()
+        assert all(r.status == "open" for r in rows)
+        for _ in range(3):                                       # a real 30x that holds is accepted
+            await process_exits(sess, _prices({MINT: 30.0}), s)
+            await sess.commit()
+        rows = (await sess.execute(select(PaperPosition))).scalars().all()
+        return [r.exit_reason for r in rows]
+
+    assert set(_db(body)) == {"take_profit"}

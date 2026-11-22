@@ -401,6 +401,59 @@ async def holdings_target(body: HoldTargetIn, request: Request, session: Session
     return {"ok": True, "message": note}
 
 
+class PeakIn(BaseModel):
+    mint: str
+    since: int          # unix seconds: the high from then until now (when the position was opened)
+
+
+async def _pool_of(http: httpx.AsyncClient, mint: str) -> str | None:
+    """The pair the scanner would price this coin on (DexScreener), cached an hour."""
+    from app.scanner_worker import select_primary_pair
+
+    async def fetch() -> str | None:
+        r = await http.get(f"https://api.dexscreener.com/tokens/v1/solana/{mint}", timeout=8)
+        pairs = r.json() if r.status_code == 200 and isinstance(r.json(), list) else []
+        pair = select_primary_pair(Chain.solana, mint, pairs)
+        return pair.get("pairAddress") if pair else None
+
+    return await _cached(f"pool:{mint}", 3600.0, fetch)
+
+
+async def peak_since(http: httpx.AsyncClient, mint: str, since: int) -> dict[str, Any] | None:
+    """Highest price (USD per token) since `since`, from GeckoTerminal candles: 5-minute candles for up to 3 days,
+    15-minute up to 10, hourly beyond. None when the pool or its candles can't be read."""
+    pool = await _pool_of(http, mint)
+    if not pool:
+        return None
+    age = max(time.time() - since, 60)
+    frame, agg = ("minute", 5) if age < 3 * 86400 else ("minute", 15) if age < 10 * 86400 else ("hour", 1)
+    r = await http.get(f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool}/ohlcv/{frame}",
+                       params={"aggregate": agg, "limit": 1000, "currency": "usd"},
+                       headers={"Accept": "application/json;version=20230302"}, timeout=10)
+    if r.status_code != 200:
+        return None
+    rows = ((r.json().get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
+    step = agg * (60 if frame == "minute" else 3600)
+    inside = [c for c in rows if isinstance(c, list) and len(c) >= 5 and c[0] + step > since]
+    if not inside:
+        return None
+    best = max(inside, key=lambda c: float(c[2] or 0))
+    return {"price": float(best[2]), "at": datetime.fromtimestamp(int(best[0]), timezone.utc).isoformat()}
+
+
+@router.post("/peaks")
+async def peaks(body: list[PeakIn], request: Request, _: Auth) -> dict[str, Any]:
+    """{mint: {"price", "at"}}: each coin's highest price since the given time (at most 25 coins, cached a minute)."""
+    http: httpx.AsyncClient = request.app.state.http
+    out: dict[str, Any] = {}
+    for item in body[:25]:
+        since = item.since - item.since % 300              # same cache key within 5 minutes
+        val = await _cached(f"peak:{item.mint}:{since}", 60.0, lambda i=item, t=since: peak_since(http, i.mint, t))
+        if val:
+            out[item.mint] = val
+    return {"peaks": out}
+
+
 class PauseIn(BaseModel):
     paused: bool
 

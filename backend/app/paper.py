@@ -287,6 +287,30 @@ def _close(pos: PaperPosition, price: float, reason: str, at: datetime, s: Setti
              reason, pos.pnl_pct, pos.pnl_usd)
 
 
+# A price more than JUMP times (or under 1/JUMP of) the last one is a bad read until it repeats: a wrong pair once
+# priced hSOL (~$81) at $396,965 and booked +$470k of paper profit (2026-11-23).
+JUMP = 20.0
+JUMP_CONFIRM = 3
+_suspect: dict[int, tuple[float, int]] = {}
+
+
+def _sane(p: PaperPosition, px: float) -> bool:
+    """False while a huge jump against the last price has not repeated JUMP_CONFIRM readings in a row."""
+    ref = p.last_price or p.entry_price
+    if not ref or 1 / JUMP <= px / ref <= JUMP:
+        _suspect.pop(p.id, None)
+        return True
+    prev = _suspect.get(p.id)
+    n = prev[1] + 1 if prev and 0.8 <= px / prev[0] <= 1.25 else 1
+    if n >= JUMP_CONFIRM:
+        _suspect.pop(p.id, None)
+        return True
+    _suspect[p.id] = (px, n)
+    log.warning("paper: %s price %.6g is %.0fx its last %.6g: ignored until it repeats (%d/%d)",
+                p.symbol or p.token_address[:8], px, px / ref, ref, n, JUMP_CONFIRM)
+    return False
+
+
 async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings | None = None) -> int:
     s = s or get_settings()
     open_pos = (await session.execute(select(PaperPosition).where(
@@ -315,6 +339,8 @@ async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings
     for p in open_pos:
         entry_time = utc(p.entry_time)
         px = live.get((p.chain, p.token_address))
+        if px is not None and not _sane(p, px):
+            px = None
         if px is not None:
             p.last_price, p.last_priced_at = px, now
             pct = (px / p.entry_price - 1) * 100

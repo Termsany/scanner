@@ -140,6 +140,11 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  peaks: (password: string, items: { mint: string; since: number }[], signal?: AbortSignal) =>
+    request<{ peaks: Record<string, { price: number; at: string }> }>("/api/live/peaks", {
+      method: "POST", ...adm(password), body: JSON.stringify(items), signal,
+    }),
+
   holdings: (password: string, signal?: AbortSignal) =>
     request<Holdings>("/api/live/holdings", { ...adm(password), signal }),
 

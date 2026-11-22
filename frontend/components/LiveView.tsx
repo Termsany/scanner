@@ -3,6 +3,7 @@
 import {
   Activity,
   Coins,
+  TrendingUp,
   Crosshair,
   ExternalLink,
   History,
@@ -154,9 +155,11 @@ function usdPrice(v: number | null | undefined): string {
 function TargetEditor({
   p,
   onTarget,
+  peak,
 }: {
   p: LivePositionOut;
   onTarget: (p: LivePositionOut, body: TargetBody) => Promise<string>;
+  peak?: Peak;
 }) {
   const byPrice = p.target_price != null || p.stop_price != null;
   const byPct = p.target_pct != null || p.stop_pct != null;
@@ -255,6 +258,17 @@ function TargetEditor({
             <span className="flex rounded-md border border-line p-0.5">{tab("price", "Coin price $")}{tab("pct", "% from entry")}</span>
             <span className="text-faint">now <b className="num font-medium text-ink">{usdPrice(p.price_usd)}</b> · entry <b className="num font-medium text-ink">{usdPrice(entry)}</b></span>
           </span>
+          {peak && (
+            <span className="flex flex-wrap items-center gap-2 rounded-md bg-mint-soft/50 px-2 py-1 text-mint">
+              <TrendingUp className="size-3.5" />
+              high since you bought <b className="num font-medium">{usdPrice(peak.price)}</b>
+              {entry ? <span className="num text-mint/80">({pct((peak.price / entry - 1) * 100)})</span> : null}
+              <button type="button" className="ms-auto rounded border border-mint/50 px-1.5 py-0.5 hover:bg-mint-soft"
+                onClick={() => { setMode("price"); setTpx(String(Number(peak.price.toPrecision(4)))); }}>
+                Use it
+              </button>
+            </span>
+          )}
           {mode === "price" ? (
             <span className="grid gap-2 sm:grid-cols-[auto_1fr]">
               <span className="self-center">Sell</span>
@@ -441,6 +455,32 @@ function PositionRows({
 
 type LiveTab = "open" | "coins" | "history" | "wallets";
 
+type Peak = { price: number; at: string };
+
+/** Each coin's highest price since the given time (GeckoTerminal candles), refreshed every minute. */
+function usePeaks(password: string, items: { mint: string; since: number }[]): Record<string, Peak> {
+  const [peaks, setPeaks] = useState<Record<string, Peak>>({});
+  const key = items.map((i) => `${i.mint}:${i.since}`).sort().join(",");
+  useEffect(() => {
+    if (!password || !key) return;
+    const list = key.split(",").map((k) => {
+      const [mint, since] = k.split(":");
+      return { mint, since: Number(since) };
+    });
+    const ctl = new AbortController();
+    const run = () => api.peaks(password, list, ctl.signal).then((r) => setPeaks((p) => ({ ...p, ...r.peaks }))).catch(() => undefined);
+    run();
+    const id = setInterval(() => !document.hidden && run(), 60_000);
+    return () => {
+      clearInterval(id);
+      ctl.abort();
+    };
+  }, [password, key]);
+  return peaks;
+}
+
+const sinceOf = (iso: string | null) => Math.floor(new Date(iso ?? Date.now()).getTime() / 1000);
+
 export function LiveView() {
   const [password, setPassword] = useState("");
   const [data, setData] = useState<LiveStatus | null>(null);
@@ -516,6 +556,9 @@ export function LiveView() {
     const id = setInterval(() => setTick(Date.now()), 1_000);
     return () => clearInterval(id);
   }, []);
+
+  const peaks = usePeaks(password, (data?.accounts ?? []).flatMap((a) => a.open)
+    .map((p) => ({ mint: p.token_address, since: sinceOf(p.opened_at) })).slice(0, 25));
 
   async function setTarget(p: LivePositionOut, body: TargetBody) {
     try {
@@ -637,7 +680,7 @@ export function LiveView() {
 
           <div key={tab} className="flex animate-fade-in flex-col gap-6">
             {tab === "open" && data.accounts.map((a) => (
-              <OpenAccount key={a.name} a={a} now={tick} busy={busy === a.name} globalPaused={data.paused}
+              <OpenAccount key={a.name} a={a} now={tick} busy={busy === a.name} globalPaused={data.paused} peaks={peaks}
                 onToggle={() => toggleAccount(a)} onSell={sellPosition} onTarget={setTarget} />
             ))}
             {tab === "coins" && <WalletCoins password={password} onSell={sellPosition} onTarget={setTarget} />}
@@ -655,11 +698,12 @@ export function LiveView() {
 }
 
 /** One account on the Open tab: a compact header with its switch, then its open trades as cards. */
-function OpenAccount({ a, now, busy, globalPaused, onToggle, onSell, onTarget }: {
+function OpenAccount({ a, now, busy, globalPaused, onToggle, onSell, onTarget, peaks }: {
   a: LiveAccount;
   now: number;
   busy: boolean;
   globalPaused: boolean;
+  peaks: Record<string, Peak>;
   onToggle: () => void;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
   onTarget?: (p: LivePositionOut, body: TargetBody) => Promise<string>;
@@ -702,16 +746,17 @@ function OpenAccount({ a, now, busy, globalPaused, onToggle, onSell, onTarget }:
         <Empty>No open trades. {a.failed.length ? `${a.failed.length} buys didn't go through (nothing spent).` : ""}</Empty>
       ) : (
         <div className="grid items-start gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
-          {rows.map((p) => <OpenCard key={p.id} p={p} now={now} onSell={onSell} onTarget={onTarget} />)}
+          {rows.map((p) => <OpenCard key={p.id} p={p} now={now} onSell={onSell} onTarget={onTarget} peak={peaks[p.token_address]} />)}
         </div>
       )}
     </section>
   );
 }
 
-function OpenCard({ p, now, onSell, onTarget }: {
+function OpenCard({ p, now, onSell, onTarget, peak }: {
   p: LivePositionOut;
   now: number;
+  peak?: Peak;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
   onTarget?: (p: LivePositionOut, body: TargetBody) => Promise<string>;
 }) {
@@ -745,11 +790,12 @@ function OpenCard({ p, now, onSell, onTarget }: {
       <div className="flex items-center justify-between text-[11px] text-muted">
         <span>value <b className="num font-medium text-ink">{money(p.value_usd)}</b></span>
         {p.price_usd != null && <span className="num">@ {price(p.price_usd)}</span>}
+        {peak && <span className="num text-mint" title={`highest since you bought, ${new Date(peak.at).toLocaleString()}`}>high {usdPrice(peak.price)}</span>}
         <span className="flex gap-2">{p.fills.filter((f) => f.side !== "sell_failed").slice(-2).map((f, i) => <TxLink key={i} sig={f.sig} />)}</span>
       </div>
       {p.error && <span className="text-[11px] text-bear">sell retrying: {p.error.slice(0, 60)}</span>}
       <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-3 text-xs">
-        {onTarget && <TargetEditor p={p} onTarget={onTarget} />}
+        {onTarget && <TargetEditor p={p} onTarget={onTarget} peak={peak} />}
         <SellButtons p={p} onSell={onSell} />
       </div>
     </div>
@@ -850,6 +896,10 @@ function WalletCoins({ password, onSell, onTarget }: {
   const [data, setData] = useState<Holdings | null>(null);
   const [error, setError] = useState("");
   const [small, setSmall] = useState(false);
+  const day = Math.floor(Date.now() / 1000 / 3600) * 3600 - 86400;        // stable for an hour
+  const peaks = usePeaks(password, (data?.accounts ?? []).flatMap((a) => a.coins
+    .filter((c) => !c.stable && ((c.value_usd ?? 0) >= 1 || c.position))
+    .map((c) => ({ mint: c.mint, since: c.position ? sinceOf(c.position.opened_at) : day }))).slice(0, 25));
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -916,7 +966,7 @@ function WalletCoins({ password, onSell, onTarget }: {
               <div className="grid items-start gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
                 {coins.map((c) => (
                   <CoinCard key={c.mint} c={c} account={a.name} onSell={onSell} onPositionTarget={positionTarget}
-                    onHoldTarget={holdTarget} />
+                    onHoldTarget={holdTarget} peak={peaks[c.mint]} />
                 ))}
               </div>
             )}
@@ -927,8 +977,9 @@ function WalletCoins({ password, onSell, onTarget }: {
   );
 }
 
-function CoinCard({ c, account, onSell, onPositionTarget, onHoldTarget }: {
+function CoinCard({ c, account, onSell, onPositionTarget, onHoldTarget, peak }: {
   c: HoldingCoin;
+  peak?: Peak;
   account: string;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
   onPositionTarget: (p: LivePositionOut, body: TargetBody) => Promise<string>;
@@ -949,6 +1000,7 @@ function CoinCard({ c, account, onSell, onPositionTarget, onHoldTarget }: {
           </div>
           <div className="num text-[11px] text-faint">
             {c.amount.toLocaleString("en-US", { maximumFractionDigits: c.amount < 1 ? 6 : 2 })} · @ {usdPrice(c.price_usd)}
+            {peak && <span className="text-mint"> · {p ? "high since bought" : "24h high"} {usdPrice(peak.price)}</span>}
           </div>
         </div>
         <div className="text-right">
@@ -961,11 +1013,11 @@ function CoinCard({ c, account, onSell, onPositionTarget, onHoldTarget }: {
           {p ? (
             <>
               <TargetEditor p={{ ...p, price_usd: p.price_usd ?? c.price_usd, value_usd: p.value_usd ?? c.value_usd }}
-                onTarget={onPositionTarget} />
+                onTarget={onPositionTarget} peak={peak} />
               <SellButtons p={p} onSell={onSell} />
             </>
           ) : (
-            <HoldTarget c={c} onSave={(body) => onHoldTarget(account, c, body)} />
+            <HoldTarget c={c} peak={peak} onSave={(body) => onHoldTarget(account, c, body)} />
           )}
         </div>
       )}
@@ -974,8 +1026,9 @@ function CoinCard({ c, account, onSell, onPositionTarget, onHoldTarget }: {
 }
 
 /** Sell price / stop for a coin the bot does not hold yet (price only: there is no entry to count % from). */
-function HoldTarget({ c, onSave }: {
+function HoldTarget({ c, onSave, peak }: {
   c: HoldingCoin;
+  peak?: Peak;
   onSave: (body: { share: number; target_price: number | null; stop_price: number | null }) => Promise<string>;
 }) {
   const [open, setOpen] = useState(false);
@@ -1015,6 +1068,15 @@ function HoldTarget({ c, onSave }: {
       ) : (
         <span className="flex basis-full flex-col gap-2 rounded-lg border border-gold/30 bg-carbon/60 p-3 text-xs text-muted">
           <span className="text-faint">now <b className="num font-medium text-ink">{usdPrice(c.price_usd)}</b></span>
+          {peak && (
+            <span className="flex flex-wrap items-center gap-2 rounded-md bg-mint-soft/50 px-2 py-1 text-mint">
+              <TrendingUp className="size-3.5" /> 24h high <b className="num font-medium">{usdPrice(peak.price)}</b>
+              <button type="button" className="ms-auto rounded border border-mint/50 px-1.5 py-0.5 hover:bg-mint-soft"
+                onClick={() => setTpx(String(Number(peak.price.toPrecision(4))))}>
+                Use it
+              </button>
+            </span>
+          )}
           <span className="flex flex-wrap items-center gap-1.5">
             Sell <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
             % when the price reaches $
