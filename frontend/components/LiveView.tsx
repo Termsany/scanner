@@ -1,17 +1,17 @@
 "use client";
 
 import {
+  Activity,
   ExternalLink,
-  Lock,
-  Pause,
-  Play,
+  History,
+  Radio,
   Wallet,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { AdminSignIn, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, PageHeader, pageMain, Panel, StatTile } from "@/components/ui";
+import { Badge, Empty, PageHeader, pageMain, Panel, SectionTabs, Segmented, StatTile, Toggle } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import { ago, pct, price } from "@/lib/format";
 import type {
@@ -291,11 +291,17 @@ function PositionRows({
   now,
   onSell,
   onTarget,
+  accountOf,
+  showAccount,
+  closedOnly,
 }: {
   rows: LivePositionOut[];
   now: number;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
   onTarget?: (p: LivePositionOut, body: TargetBody) => Promise<string>;
+  accountOf?: (p: LivePositionOut) => string;
+  showAccount?: boolean;
+  closedOnly?: boolean;      // history: no "value now" column
 }) {
   return (
     <>
@@ -327,6 +333,9 @@ function PositionRows({
                   DRY
                 </span>
               )}
+              {showAccount && accountOf && (
+                <span className="ml-1.5"><Badge tone="muted" className="num">{accountOf(p)}</Badge></span>
+              )}
             </td>
             <td className="num px-3 py-2 text-right text-muted">
               {ago(p.opened_at, now)}
@@ -340,7 +349,7 @@ function PositionRows({
             <td className="num px-3 py-2 text-right">
               {p.proceeds_usd ? money(p.proceeds_usd) : "—"}
             </td>
-            <td className="num px-3 py-2 text-right">
+            {!closedOnly && <td className="num px-3 py-2 text-right">
               {live ? (
                 <>
                   {money(p.value_usd)}
@@ -353,7 +362,7 @@ function PositionRows({
               ) : (
                 "—"
               )}
-            </td>
+            </td>}
             <td className={`num px-3 py-2 text-right ${tone(pnl)}`}>
               {money(pnl, true)}
               {pnlPct != null && (
@@ -404,14 +413,31 @@ function PositionRows({
   );
 }
 
+type LiveTab = "open" | "history" | "wallets";
+
 export function LiveView() {
   const [password, setPassword] = useState("");
   const [data, setData] = useState<LiveStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [tab, setTabState] = useState<LiveTab>("open");
 
   useAdminResume(setPassword);
+
+  useEffect(() => {
+    const read = () => {
+      const h = window.location.hash.slice(1);
+      if (h === "history" || h === "wallets" || h === "open") setTabState(h);
+    };
+    read();
+    window.addEventListener("hashchange", read);
+    return () => window.removeEventListener("hashchange", read);
+  }, []);
+  const setTab = (t: LiveTab) => {
+    setTabState(t);
+    history.replaceState(null, "", t === "open" ? window.location.pathname : `#${t}`);
+  };
 
   const load = useCallback(async (pw: string, signal?: AbortSignal) => {
     try {
@@ -484,14 +510,30 @@ export function LiveView() {
     await load(password);
   }
 
-  async function togglePause() {
+  /** New buys on every account (global switch). */
+  async function toggleAll() {
     if (!data) return;
-    setBusy(true);
+    setBusy("all");
     try {
       await api.livePause(password, !data.paused);
       await load(password);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not change it.");
     } finally {
-      setBusy(false);
+      setBusy(null);
+    }
+  }
+
+  /** New buys on one account (same switch as on /accounts). */
+  async function toggleAccount(a: LiveAccount) {
+    setBusy(a.name);
+    try {
+      await api.editAccount(password, a.name, { paused: !a.paused });
+      await load(password);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not change it.");
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -510,42 +552,36 @@ export function LiveView() {
   const totalOpen = data ? data.accounts.reduce((s, a) => s + a.open_cost_usd, 0) : null;
   const totalSol = data ? data.accounts.reduce((s, a) => s + (a.sol_balance ?? 0), 0) : null;
   const totalSolUsd = data ? data.accounts.reduce((s, a) => s + (a.sol_balance_usd ?? 0), 0) : null;
+  const openCount = data ? data.accounts.reduce((s, a) => s + a.open.length, 0) : 0;
+  const closedCount = data ? data.accounts.reduce((s, a) => s + a.closed.length, 0) : 0;
   const fresh = tick - now < REFRESH_MS * 3;
 
   return (
     <>
     <AppNav />
     <main className={pageMain}>
-      <PageHeader icon={<Wallet className="size-5" />} title="Live copy trading"
+      <PageHeader icon={<Wallet />} title="Live copy trading"
         badges={data && (
-          <>
-            <Badge tone={data.mode === "live" ? "mint" : data.mode === "dry" ? "gold" : "muted"} dot>
-              {data.mode === "live" ? "LIVE" : data.mode === "dry" ? "DRY-RUN" : "OFF"}
-            </Badge>
-            {data.paused && <Badge tone="gold">ALL BUYS PAUSED</Badge>}
-          </>
+          <Badge tone={data.mode === "live" ? "mint" : data.mode === "dry" ? "gold" : "muted"} dot>
+            {data.mode === "live" ? "LIVE" : data.mode === "dry" ? "DRY-RUN" : "OFF"}
+          </Badge>
         )}
         subtitle={data && (
           <span className="inline-flex flex-wrap items-center gap-x-2">
             <span className={`size-1.5 rounded-full ${fresh ? "animate-pulse bg-mint" : "bg-warn"}`} />
             updated {Math.max(0, Math.round((tick - now) / 1000))}s ago
             {data.sol_usd ? <span>· SOL <span className="num">{money(data.sol_usd)}</span></span> : null}
-            <span className="text-faint">
-              · {data.mode === "dry" ? "Dry-run: real quotes, nothing is sent." : data.mode === "live" ? "Real money." : "Copy trading is off on the server."}
-              {" "}Pausing stops new buys on every account; open positions still sell.
-            </span>
+            {data.mode !== "live" && (
+              <span className="text-faint">· {data.mode === "dry" ? "Dry-run: real quotes, nothing is sent." : "Copy trading is off on the server."}</span>
+            )}
           </span>
         )}
-        actions={
-          <>
-            {data && data.mode !== "off" && (
-              <button onClick={togglePause} disabled={busy} className={button(data.paused ? "good" : "danger")}>
-                {data.paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
-                {data.paused ? "Resume buys" : "Pause buys"}
-              </button>
-            )}
-          </>
-        } />
+        actions={data && data.mode !== "off" && (
+          <label className="card inline-flex items-center gap-2.5 px-3.5 py-2 text-sm" title="Off: no new buys on any account; open positions still sell">
+            <Toggle on={!data.paused} busy={busy === "all"} label="New buys, all accounts" onClick={toggleAll} />
+            <span className={data.paused ? "text-gold" : "text-ink"}>{data.paused ? "All buys paused" : "Buying"}</span>
+          </label>
+        )} />
 
       {error && <p className="card mb-4 border-bear/40 p-4 text-sm text-bear">{error}</p>}
 
@@ -554,113 +590,201 @@ export function LiveView() {
           {[0, 1, 2, 3].map((i) => <span key={i} className="skeleton h-28 rounded-2xl" />)}
         </div>
       ) : (
-        <div className="flex flex-col gap-6">
-          <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <>
+          <section className="mb-6 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
             <StatTile label="Live P&L · all accounts" value={money(totalLive, true)} tone={tone(totalLive) || "text-ink"}
               sub={`realized ${money(totalReal, true)} · open ${money((totalLive ?? 0) - (totalReal ?? 0), true)}`} />
             <StatTile label="Realized · 24h" value={money(total24, true)} tone={tone(total24) || "text-ink"}
-              sub={`${data.accounts.reduce((s, a) => s + a.closed.length, 0)} closed trades shown`} />
+              sub={`${closedCount} closed trades in history`} />
             <StatTile label="In open trades" value={money(totalOpen)}
-              sub={`${data.accounts.reduce((s, a) => s + a.open.length, 0)} open across ${data.accounts.length} accounts`} />
+              sub={`${openCount} open across ${data.accounts.length} accounts`} />
             <StatTile label="Wallets" value={`${(totalSol ?? 0).toFixed(3)} SOL`} sub={`≈ ${money(totalSolUsd)} free to trade`} />
           </section>
-          <LeaderFeed rows={data.leader_activity} now={tick} />
-          {data.accounts.map((a) => (
-            <AccountSection key={a.name} a={a} now={now} onSell={sellPosition} onTarget={setTarget} />
-          ))}
-        </div>
+
+          <SectionTabs label="Live sections" value={tab} onChange={setTab}
+            tabs={[
+              { key: "open", label: `Open trades · ${openCount}`, icon: <Activity /> },
+              { key: "history", label: `History · ${closedCount}`, icon: <History /> },
+              { key: "wallets", label: "Wallet activity", icon: <Radio /> },
+            ]} />
+
+          <div key={tab} className="flex animate-fade-in flex-col gap-6">
+            {tab === "open" && data.accounts.map((a) => (
+              <OpenAccount key={a.name} a={a} now={tick} busy={busy === a.name} globalPaused={data.paused}
+                onToggle={() => toggleAccount(a)} onSell={sellPosition} onTarget={setTarget} />
+            ))}
+            {tab === "history" && <HistoryPanel accounts={data.accounts} now={tick} onSell={sellPosition} />}
+            {tab === "wallets" && (
+              data.leader_activity.length ? <LeaderFeed rows={data.leader_activity} now={tick} />
+                : <Panel title="Copied wallet activity"><Empty>No activity yet.</Empty></Panel>
+            )}
+          </div>
+        </>
       )}
     </main>
     </>
   );
 }
 
-function AccountSection({
-  a: data,
-  now,
-  onSell,
-  onTarget,
-}: {
+/** One account on the Open tab: a compact header with its switch, then its open trades as cards. */
+function OpenAccount({ a, now, busy, globalPaused, onToggle, onSell, onTarget }: {
   a: LiveAccount;
   now: number;
+  busy: boolean;
+  globalPaused: boolean;
+  onToggle: () => void;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
   onTarget?: (p: LivePositionOut, body: TargetBody) => Promise<string>;
 }) {
-  // failed buys spent nothing: they stay out of the table (count only, in the Budget tile)
-  const all = [...data.open, ...data.closed].sort((x, y) =>
-    (y.opened_at ?? "").localeCompare(x.opened_at ?? ""),
-  );
-  const livePnl = data.realized_usd + (data.unrealized_usd ?? 0);
-  const unpriced = data.open.filter((p) => p.unrealized_usd == null).length;
+  const livePnl = a.realized_usd + (a.unrealized_usd ?? 0);
+  const used = Math.min(100, (a.open_cost_usd / Math.max(a.max_open_usd, 1)) * 100);
+  const rows = [...a.open].sort((x, y) => (y.opened_at ?? "").localeCompare(x.opened_at ?? ""));
   return (
-    <section className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2">
-        <h2 className="text-lg font-semibold tracking-tight">Account</h2>
-        <Badge tone="muted" className="num text-[12px] text-ink">{data.name}</Badge>
-        {!data.active && <Badge tone="gold">idle: no key on the server yet</Badge>}
-        {data.paused && <Badge tone="gold">paused</Badge>}
-        <span className="text-xs text-muted">
-          {money(data.size_usd)} per buy · max {money(data.max_open_usd)} open · buys pause after {money(data.max_daily_loss_usd)} loss in 24h
-          {data.pubkey && (
-            <> · wallet{" "}
-              <a href={`https://solscan.io/account/${data.pubkey}`} target="_blank" rel="noreferrer" className="num text-mint hover:underline">
-                {short(data.pubkey)}
-              </a>
-            </>
+    <section className="card overflow-hidden">
+      <header className="flex flex-wrap items-center gap-x-5 gap-y-3 border-b border-line px-5 py-4">
+        <div className="flex items-center gap-2">
+          <h2 className="num text-[15px] font-semibold">{a.name}</h2>
+          {!a.active && <Badge tone="gold">idle: no key on the server</Badge>}
+          {a.pubkey && (
+            <a href={`https://solscan.io/account/${a.pubkey}`} target="_blank" rel="noreferrer"
+              className="num inline-flex items-center gap-1 text-xs text-muted hover:text-ink">
+              {short(a.pubkey)} <ExternalLink className="size-3" />
+            </a>
           )}
-          {data.wallets.length > 0 && <> · copying {data.wallets.map(short).join(", ")}</>}
-        </span>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile label="Wallet" value={data.sol_balance != null ? `${data.sol_balance.toFixed(3)} SOL` : "—"}
-          sub={data.sol_balance_usd != null ? `≈ ${money(data.sol_balance_usd)} free to trade` : "balance unavailable"} />
-        <StatTile label="Live P&L now" value={money(livePnl, true)} tone={tone(livePnl) || "text-ink"}
-          sub={`realized ${money(data.realized_usd, true)} · open ${money(data.unrealized_usd ?? null, true)}${unpriced ? ` · ${unpriced} without a price` : ""}`} />
-        <StatTile label="Realized P&L" value={money(data.realized_usd, true)} tone={tone(data.realized_usd) || "text-ink"}
-          sub={`${data.closed.length} closed · 24h ${money(data.realized_24h, true)}`} />
-        <StatTile label="Budget" value={<>{money(data.open_cost_usd)} <span className="text-base text-muted">/ {money(data.max_open_usd)}</span></>}
-          sub={<>
-            <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-raised">
-              <span className="block h-full rounded-full bg-mint" style={{ width: `${Math.min(100, (data.open_cost_usd / Math.max(data.max_open_usd, 1)) * 100)}%` }} />
+        </div>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted">
+          <span>Wallet <b className="num font-medium text-ink">{a.sol_balance != null ? `${a.sol_balance.toFixed(3)} SOL` : "—"}</b></span>
+          <span>P&amp;L <b className={`num font-medium ${tone(livePnl) || "text-ink"}`}>{money(livePnl, true)}</b></span>
+          <span>24h <b className={`num font-medium ${tone(a.realized_24h) || "text-ink"}`}>{money(a.realized_24h, true)}</b></span>
+          <span className="flex items-center gap-2">
+            Budget <b className="num font-medium text-ink">{money(a.open_cost_usd)}</b>/{money(a.max_open_usd)}
+            <span className="h-1.5 w-20 overflow-hidden rounded-full bg-raised">
+              <span className="block h-full rounded-full bg-mint transition-all duration-700" style={{ width: `${used}%` }} />
             </span>
-            <span className="mt-1.5 block">{money(data.size_usd)} per buy{data.failed.length ? ` · ${data.failed.length} buys didn't go through (nothing spent)` : ""}</span>
-          </>} />
-      </div>
-
-      <Panel title="Trades" meta={`${data.open.length} open · ${data.closed.length} closed`} flush>
-        {all.length === 0 ? (
-          <Empty>No trades yet. The first one happens on the copied wallet&apos;s next buy.</Empty>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="data-table min-w-[900px]">
-              <thead>
-                <tr>
-                  <th className="text-left">Token</th>
-                  <th className="text-right">Opened</th>
-                  <th className="text-right">Cost</th>
-                  <th className="text-right">Sold for</th>
-                  <th className="text-right">Value now</th>
-                  <th className="text-right">P&amp;L</th>
-                  <th className="text-left">Status</th>
-                  <th className="text-left">Fills</th>
-                </tr>
-              </thead>
-              <tbody>
-                <PositionRows rows={all} now={now} onSell={onSell} onTarget={onTarget} />
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Panel>
+          </span>
+        </div>
+        <label className="ms-auto flex items-center gap-2 text-xs" title="Off: no new buys on this account; open positions still sell">
+          <Toggle on={!a.paused && !globalPaused} busy={busy || globalPaused} label={`New buys on ${a.name}`} onClick={onToggle} />
+          <span className={!a.paused && !globalPaused ? "text-mint" : "text-muted"}>
+            {globalPaused ? "Paused (all)" : a.paused ? "Buys paused" : "Buying"}
+          </span>
+        </label>
+      </header>
+      {rows.length === 0 ? (
+        <Empty>No open trades. {a.failed.length ? `${a.failed.length} buys didn't go through (nothing spent).` : ""}</Empty>
+      ) : (
+        <div className="grid items-start gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
+          {rows.map((p) => <OpenCard key={p.id} p={p} now={now} onSell={onSell} onTarget={onTarget} />)}
+        </div>
+      )}
     </section>
   );
 }
 
-function LeaderFeed({ rows, now }: { rows: LeaderTrade[]; now: number }) {
-  if (!rows.length) return null;
+function OpenCard({ p, now, onSell, onTarget }: {
+  p: LivePositionOut;
+  now: number;
+  onSell: (p: LivePositionOut, share: number) => Promise<void>;
+  onTarget?: (p: LivePositionOut, body: TargetBody) => Promise<string>;
+}) {
+  const pnl = p.unrealized_usd ?? null;
+  const pp = p.unrealized_pct ?? null;
+  const up = (pnl ?? 0) >= 0;
   return (
-    <Panel title="Copied wallet activity" meta="latest buys and sells of the wallets being copied" flush>
+    <div className="group relative flex flex-col gap-3 overflow-hidden rounded-xl border border-line bg-surface-2/60 p-4 transition hover:border-line-strong">
+      <span className={`absolute inset-y-0 start-0 w-[3px] ${pnl == null ? "bg-faint" : up ? "bg-mint" : "bg-bear"}`} />
+      <div className="flex items-start gap-3">
+        <span className={`grid size-9 shrink-0 place-items-center rounded-full text-xs font-bold ${pnl == null ? "bg-raised text-muted" : up ? "bg-mint-soft text-mint" : "bg-bear-soft text-bear"}`}>
+          {(p.symbol || "?").slice(0, 2).toUpperCase()}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <a href={`/token/solana/${p.token_address}`} className="truncate font-semibold hover:text-mint">
+              ${p.symbol || short(p.token_address)}
+            </a>
+            {p.mode === "dry" && <span className="rounded border border-line px-1 text-[10px] text-faint">DRY</span>}
+            {p.hands_off && <Badge tone="sky">✋ yours</Badge>}
+          </div>
+          <div className="text-[11px] text-faint">
+            {ago(p.opened_at, now)} · in {money(p.cost_usd)}{p.proceeds_usd ? ` · out ${money(p.proceeds_usd)}` : ""}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className={`num text-base font-semibold ${tone(pnl)}`}>{money(pnl, true)}</div>
+          <div className={`num text-[11px] ${tone(pp)}`}>{pp != null ? pct(pp) : "no price yet"}</div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between text-[11px] text-muted">
+        <span>value <b className="num font-medium text-ink">{money(p.value_usd)}</b></span>
+        {p.price_usd != null && <span className="num">@ {price(p.price_usd)}</span>}
+        <span className="flex gap-2">{p.fills.filter((f) => f.side !== "sell_failed").slice(-2).map((f, i) => <TxLink key={i} sig={f.sig} />)}</span>
+      </div>
+      {p.error && <span className="text-[11px] text-bear">sell retrying: {p.error.slice(0, 60)}</span>}
+      <div className="border-t border-line pt-2 text-xs">
+        <SellButtons p={p} onSell={onSell} />
+        {onTarget && <TargetEditor p={p} onTarget={onTarget} />}
+      </div>
+    </div>
+  );
+}
+
+type HistFilter = "all" | "wins" | "losses";
+
+/** Closed trades of every account, newest first, with filters. */
+function HistoryPanel({ accounts, now, onSell }: {
+  accounts: LiveAccount[];
+  now: number;
+  onSell: (p: LivePositionOut, share: number) => Promise<void>;
+}) {
+  const [acct, setAcct] = useState("");
+  const [f, setF] = useState<HistFilter>("all");
+  const all = accounts.flatMap((a) => a.closed.map((p) => ({ ...p, account: a.name })))
+    .sort((x, y) => (y.closed_at ?? y.opened_at ?? "").localeCompare(x.closed_at ?? x.opened_at ?? ""));
+  const rows = all.filter((p) => (!acct || p.account === acct)
+    && (f === "all" || (f === "wins" ? (p.pnl_usd ?? 0) > 0 : (p.pnl_usd ?? 0) <= 0)));
+  const net = rows.reduce((s, p) => s + (p.pnl_usd ?? 0), 0);
+  const wins = rows.filter((p) => (p.pnl_usd ?? 0) > 0).length;
+  return (
+    <Panel icon={<History />} title="History"
+      meta={<>{rows.length} trades · net <span className={tone(net)}>{money(net, true)}</span>{rows.length ? ` · ${Math.round((wins / rows.length) * 100)}% wins` : ""}</>}
+      actions={
+        <>
+          <Segmented label="Result" value={f} onChange={setF}
+            options={[{ value: "all", label: "All" }, { value: "wins", label: "Wins" }, { value: "losses", label: "Losses" }]} />
+          {accounts.length > 1 && (
+            <Segmented label="Account" value={acct} onChange={setAcct}
+              options={[{ value: "", label: "All" }, ...accounts.map((a) => ({ value: a.name, label: a.name }))]} />
+          )}
+        </>
+      } flush>
+      {rows.length === 0 ? <Empty>No closed trades yet.</Empty> : (
+        <div className="overflow-x-auto">
+          <table className="data-table min-w-[900px]">
+            <thead>
+              <tr>
+                <th className="text-left">Token</th>
+                <th className="text-right">Opened</th>
+                <th className="text-right">Cost</th>
+                <th className="text-right">Sold for</th>
+                <th className="text-right">P&amp;L</th>
+                <th className="text-left">Exit</th>
+                <th className="text-left">Fills</th>
+              </tr>
+            </thead>
+            <tbody>
+              <PositionRows rows={rows} now={now} onSell={onSell} accountOf={(p) => (p as LivePositionOut & { account: string }).account}
+                showAccount={accounts.length > 1} closedOnly />
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function LeaderFeed({ rows, now }: { rows: LeaderTrade[]; now: number }) {
+  return (
+    <Panel icon={<Radio />} title="Copied wallet activity" meta="latest buys and sells of the wallets being copied" flush>
       <div className="overflow-x-auto">
         <table className="data-table compact min-w-[640px]">
           <tbody>

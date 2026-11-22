@@ -72,6 +72,17 @@ export function PageHeader({ icon, title, subtitle, badges, actions }: {
   );
 }
 
+/** On/off switch that acts at once (no Save button). */
+export function Toggle({ on, busy, onClick, label }: { on: boolean; busy?: boolean; onClick: () => void; label: string }) {
+  return (
+    <button type="button" role="switch" aria-checked={on} aria-label={label} disabled={busy} onClick={onClick}
+      className={cls("relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition disabled:opacity-50",
+        on ? "bg-mint" : "bg-raised ring-1 ring-line-strong")}>
+      <span className={cls("inline-block size-4 rounded-full bg-ink shadow transition", on ? "translate-x-[18px]" : "translate-x-0.5")} />
+    </button>
+  );
+}
+
 /** Small pill switch (time windows, chart types). */
 export function Segmented<T extends string | number>({ value, options, onChange, label, className = "" }: {
   value: T;
