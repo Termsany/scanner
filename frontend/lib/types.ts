@@ -390,6 +390,16 @@ export interface LiveFill {
   at: string;
 }
 
+/** The owner's target for one position: in % over the entry, or by the coin's price (USD per token). */
+export interface TargetBody {
+  target_pct: number | null;
+  share: number;
+  stop_pct: number | null;
+  target_price?: number | null;
+  stop_price?: number | null;
+  hands_off?: boolean;
+}
+
 export interface LivePositionOut {
   id: number;
   mode: "dry" | "live";
@@ -410,6 +420,9 @@ export interface LivePositionOut {
   target_pct?: number | null;     // owner's target: sell target_share at +target_pct
   target_share?: number | null;
   stop_pct?: number | null;       // owner's stop: sell all at this (negative) %
+  target_price?: number | null;   // or by the coin's price (USD per token)
+  stop_price?: number | null;
+  hands_off?: boolean;            // no bot rule sells it, only the owner's target / stop
   fills: LiveFill[];
   exit_reason: string | null;
   error: string | null;

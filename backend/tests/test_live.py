@@ -2075,3 +2075,42 @@ def test_owner_target_sells_its_share_then_stop_takes_the_rest():
 
     p = _db(body)
     assert p.status == "closed" and p.exit_reason == "your_stop"
+
+
+def test_price_target_hands_off_ignores_the_leader_and_sells_at_the_owners_prices():
+    from app.live import set_position_target
+
+    x = PricedExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0,
+                               live_take_capital_at_pct=None))
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)                                      # bought: $30 for 1 token
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        bad, _ = await set_position_target(sess, p.id, None, 1.0, None, target_price=20.0, stop_price=25.0)
+        assert not bad                                            # stop above target
+        ok, note = await set_position_target(sess, p.id, None, 0.5, None, target_price=40.0, stop_price=24.0,
+                                             hands_off=True)
+        assert ok and "$40" in note and p.hands_off and p.target_pct is None
+        sess.add(_trade(side="sell", pct_sold=100, remaining=0))  # the leader sells everything: ignored
+        await sess.commit()
+        await eng.step(sess)
+        await sess.refresh(p)
+        assert p.status == "open" and not [c for c in x.calls if c[0] == "sell"]
+        x.price.update(M1=41.0)                                   # past $40: two readings, sell half
+        await eng.step(sess)
+        await eng.step(sess)
+        await sess.refresh(p)
+        assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 500_000)]
+        assert p.target_price is None and p.stop_price == 24.0
+        x.price.update(M1=23.0)                                   # at/below $24: the rest goes
+        await eng.step(sess)
+        await eng.step(sess)
+        await sess.refresh(p)
+        return p
+
+    p = _db(body)
+    assert p.status == "closed" and p.exit_reason == "your_stop"

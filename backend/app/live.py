@@ -933,11 +933,35 @@ async def request_manual_sell(session: AsyncSession, position_id: int, share: fl
 
 
 async def set_position_target(session: AsyncSession, position_id: int, target_pct: float | None,
-                              share: float | None, stop_pct: float | None) -> tuple[bool, str]:
-    """The owner's sell target for one open position (None clears it). The worker checks it every few seconds."""
+                              share: float | None, stop_pct: float | None, *, target_price: float | None = None,
+                              stop_price: float | None = None, hands_off: bool | None = None) -> tuple[bool, str]:
+    """The owner's sell target for one open position (None clears it), in % over the entry or by the coin's price
+    (USD per token). hands_off: no bot rule sells it, only this target / stop. The worker checks every few seconds."""
     pos = await session.get(LivePosition, position_id)
     if pos is None or pos.status != "open":
         return False, "Position is not open"
+    if target_price is not None or stop_price is not None:
+        if (target_price is not None and not target_price > 0) or (stop_price is not None and not stop_price > 0):
+            return False, "Prices must be above 0"
+        if target_price is not None and stop_price is not None and stop_price >= target_price:
+            return False, "The stop price must be below the target price"
+        share = 1.0 if share is None else share
+        if not 0.05 <= share <= 1.0:
+            return False, "Share must be between 5% and 100%"
+        pos.target_pct = pos.stop_pct = None
+        pos.target_price, pos.stop_price = target_price, stop_price
+        pos.target_share = share if target_price is not None else None
+        pos.hands_off = bool(hands_off)
+        await session.commit()
+        sym = pos.symbol or pos.token_address[:6]
+        parts = []
+        if target_price is not None:
+            parts.append(f"sell {share * 100:.0f}% at ${target_price:.6g}")
+        if stop_price is not None:
+            parts.append(f"sell all at ${stop_price:.6g}")
+        return True, f"${sym}: " + ", ".join(parts) + (" · only your target/stop sell it" if hands_off else "")
+    pos.target_price = pos.stop_price = None
+    pos.hands_off = bool(hands_off) if hands_off is not None else None
     if target_pct is not None and not 1 <= target_pct <= 100_000:
         return False, "Target must be between +1% and +100000%"
     if stop_pct is not None:
@@ -951,13 +975,15 @@ async def set_position_target(session: AsyncSession, position_id: int, target_pc
     await session.commit()
     sym = pos.symbol or pos.token_address[:6]
     if target_pct is None and stop_pct is None:
+        if pos.hands_off:
+            return True, f"Target cleared for ${sym} · only you sell it"
         return True, f"Target cleared for ${sym}"
     parts = []
     if target_pct is not None:
         parts.append(f"sell {share * 100:.0f}% at +{target_pct:g}%")
     if stop_pct is not None:
         parts.append(f"sell all at {stop_pct:g}%")
-    return True, f"${sym}: " + ", ".join(parts)
+    return True, f"${sym}: " + ", ".join(parts) + (" · only your target/stop sell it" if pos.hands_off else "")
 
 
 async def realized_24h(session: AsyncSession, mode: str, account: str = "main") -> float:
@@ -1052,7 +1078,7 @@ class CopyEngine:
     def _quick(self, pos: LivePosition) -> bool:
         """This position's wallet has the quick-exit switch on (and the token is not hold-only)."""
         ld = self.a.leaders.get(pos.leader_wallet or "")
-        return bool(ld and ld.quick_exit) and not self._hold(pos.token_address)
+        return bool(ld and ld.quick_exit) and not self._hold(pos.token_address) and not pos.hands_off
 
     def _take_capital_target(self) -> float | None:
         t = self.a.take_capital_at_pct
@@ -1240,6 +1266,13 @@ class CopyEngine:
                 await self.notify(f"{self._tag()} 🔒 {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
                                   f"${sym}, but ${sym} is hold-only: keeping it (sell by hand if you want)")
             return
+        if pos is not None and pos.hands_off:
+            # the owner manages it: only their target / stop (or a sell from the page) takes it out
+            pos.leader_trade_id = t.id
+            await session.commit()
+            log.info("live: %s is managed by the owner: ignoring leader sell %.0f%%",
+                     pos.symbol or pos.token_address[:6], share * 100)
+            return
         ld = self.a.leaders.get(t.wallet)
         if pos is not None and ld is not None and ld.ignore_sells:
             # the user's rule for fast wallets: its sells are not followed; quick exit / max hold take it out
@@ -1309,6 +1342,8 @@ class CopyEngine:
             what = "you still hold it (not a bot position): sell by hand if you want"
         elif self._hold(t.token_address):
             what = "it is hold-only: the bot keeps it"
+        elif pos.hands_off:
+            what = "you manage it: only your target / stop sell it"
         elif ld is not None and ld.ignore_sells:
             what = "its sells are ignored: the bot keeps it (quick exit / max hold)"
         else:
@@ -1662,6 +1697,7 @@ class CopyEngine:
         capped = self.s.live_trim_cap_pct is not None
         todo = [p for p in opened
                 if not self._hold(p.token_address)
+                and not p.hands_off                                            # the owner manages it
                 and not self._quick(p)                                         # quick exit has its own targets
                 and not taken(p)
                 and not (self.s.live_follow_after_trim and self._following(p))   # following the leader instead
@@ -1791,7 +1827,8 @@ class CopyEngine:
         self._target_at = time.monotonic()
         rows = [p for p in (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine(),
-            or_(LivePosition.target_pct.is_not(None), LivePosition.stop_pct.is_not(None))))).scalars().all()
+            or_(LivePosition.target_pct.is_not(None), LivePosition.stop_pct.is_not(None),
+                LivePosition.target_price.is_not(None), LivePosition.stop_price.is_not(None))))).scalars().all()
             if int(p.tokens_raw) > 0 and not p.manual_sell_frac
             and not any(x.get("side") == "sell_failed" for x in (p.fills or []))]
         if not rows or not hasattr(self.x, "token_prices"):
@@ -1817,11 +1854,16 @@ class CopyEngine:
             bought = int(p.tokens_bought_raw or p.tokens_raw) / 10 ** int(px["decimals"])
             if bought <= 0:
                 continue
-            r = float(px["usd"]) / (p.cost_usd / bought)
+            now_px = float(px["usd"])
+            r = now_px / (p.cost_usd / bought)
             hit = None
             if p.stop_pct is not None and r <= 1 + p.stop_pct / 100:
                 hit = "stop"
+            elif p.stop_price is not None and now_px <= p.stop_price:
+                hit = "stop"
             elif p.target_pct is not None and r >= 1 + p.target_pct / 100:
+                hit = "target"
+            elif p.target_price is not None and now_px >= p.target_price:
                 hit = "target"
             if hit is None:
                 self._target_seen.pop(p.id, None)
@@ -1833,9 +1875,9 @@ class CopyEngine:
             share = 1.0 if hit == "stop" else (p.target_share or 1.0)
             if await self._sell(session, p, share, "your_target" if hit == "target" else "your_stop"):
                 if hit == "target":
-                    p.target_pct = p.target_share = None        # done; a stop, if set, stays for the rest
+                    p.target_pct = p.target_price = p.target_share = None   # done; a stop, if set, stays
                 else:
-                    p.target_pct = p.target_share = p.stop_pct = None
+                    p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
             await session.commit()
 
     async def _housekeeping(self, session: AsyncSession) -> None:
@@ -1864,13 +1906,14 @@ class CopyEngine:
                 continue
             age = _now() - utc(pos.opened_at)
             if (age >= timedelta(hours=self.a.max_hold_hours or self.s.live_max_hold_hours)
-                    and not failed and not self._hold(pos.token_address) and pos.leader_wallet != MANUAL):
+                    and not failed and not self._hold(pos.token_address) and pos.leader_wallet != MANUAL
+                    and not pos.hands_off):
                 await self._sell(session, pos, 1.0, "max_hold")
                 await session.commit()
                 continue
             stop = self.s.live_time_stop_minutes
             if (stop and age >= timedelta(minutes=stop) and not failed and not self._capital_back(pos)
-                    and not self._hold(pos.token_address) and pos.leader_wallet != MANUAL):
+                    and not self._hold(pos.token_address) and pos.leader_wallet != MANUAL and not pos.hands_off):
                 # its capital never came back: the trades that sit for hours are where the losses gathered
                 await self._sell(session, pos, 1.0, "time_stop")
                 await session.commit()

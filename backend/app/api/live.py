@@ -158,6 +158,7 @@ def _pos(p: LivePosition) -> dict[str, Any]:
         "tokens_left": p.tokens_raw, "tokens_bought": p.tokens_bought_raw,
         "buy_signature": p.buy_signature, "manual_sell_frac": p.manual_sell_frac, "fills": p.fills or [], "exit_reason": p.exit_reason, "error": p.error,
         "target_pct": p.target_pct, "target_share": p.target_share, "stop_pct": p.stop_pct,
+        "target_price": p.target_price, "stop_price": p.stop_price, "hands_off": bool(p.hands_off),
         "opened_at": utc(p.opened_at).isoformat() if p.opened_at else None,
         "closed_at": utc(p.closed_at).isoformat() if p.closed_at else None,
     }
@@ -320,13 +321,18 @@ class TargetIn(BaseModel):
     target_pct: float | None = None   # sell `share` once the position is up this % (None = no target)
     share: float | None = 1.0         # 0.05 .. 1.0 of what is left
     stop_pct: float | None = None     # sell everything once it is down this % (negative or positive, read as down)
+    target_price: float | None = None  # or by the coin's price, USD per token: sell `share` at this price
+    stop_price: float | None = None    # ... and everything at or below this price
+    hands_off: bool | None = None      # no bot rule sells it, only the owner's target / stop
 
 
 @router.post("/positions/{position_id}/target")
 async def position_target(position_id: int, body: TargetIn, session: Session, _: Auth) -> dict[str, Any]:
     from app.live import set_position_target
 
-    ok, note = await set_position_target(session, position_id, body.target_pct, body.share, body.stop_pct)
+    ok, note = await set_position_target(session, position_id, body.target_pct, body.share, body.stop_pct,
+                                         target_price=body.target_price, stop_price=body.stop_price,
+                                         hands_off=body.hands_off)
     if not ok:
         raise HTTPException(400, note)
     return {"ok": True, "message": note}

@@ -20,6 +20,7 @@ import type {
   LeaderTrade,
   LiveAccount,
   LivePositionOut,
+  TargetBody,
   LiveStatus,
 } from "@/lib/types";
 
@@ -141,38 +142,73 @@ function SellButtons({
   );
 }
 
-/** The owner's own sell target / stop for one open position. */
+/** A coin price, USD per token, without exponents: 0.0000042, 0.01234, 1.234. */
+function usdPrice(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `$${v.toLocaleString("en-US", { maximumSignificantDigits: 4, maximumFractionDigits: 12 })}`;
+}
+
+/** The owner's own sell target / stop for one open position: by the coin's price or in % over the entry. */
 function TargetEditor({
   p,
   onTarget,
 }: {
   p: LivePositionOut;
-  onTarget: (p: LivePositionOut, body: { target_pct: number | null; share: number; stop_pct: number | null }) => Promise<string>;
+  onTarget: (p: LivePositionOut, body: TargetBody) => Promise<string>;
 }) {
+  const byPrice = p.target_price != null || p.stop_price != null;
+  const byPct = p.target_pct != null || p.stop_pct != null;
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<"price" | "pct">(byPct ? "pct" : "price");
   const [tp, setTp] = useState(p.target_pct != null ? String(p.target_pct) : "");
-  const [share, setShare] = useState(p.target_share != null ? String(Math.round(p.target_share * 100)) : "100");
   const [stop, setStop] = useState(p.stop_pct != null ? String(Math.abs(p.stop_pct)) : "");
+  const [tpx, setTpx] = useState(p.target_price != null ? String(p.target_price) : "");
+  const [spx, setSpx] = useState(p.stop_price != null ? String(p.stop_price) : "");
+  const [share, setShare] = useState(p.target_share != null ? String(Math.round(p.target_share * 100)) : "100");
+  const [mine, setMine] = useState(p.hands_off ?? true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const box = "num w-14 rounded border border-line bg-carbon px-1 py-0.5 text-center text-[11px] text-ink outline-none focus:border-accent";
-  const has = p.target_pct != null || p.stop_pct != null;
+  const wide = "num w-28 rounded border border-line bg-carbon px-1.5 py-0.5 text-[11px] text-ink outline-none focus:border-accent";
+  const has = byPrice || byPct;
+  // our average entry price, from the live price and value: price × cost / value × (left / bought)
+  const left = Number(p.tokens_left), bought = Number(p.tokens_bought) || left;
+  const entry = p.price_usd && p.value_usd && left > 0 ? (p.price_usd * p.cost_usd / p.value_usd) * (left / bought) : null;
 
   async function save(clear = false) {
     setBusy(true);
     setMsg("");
     try {
-      const t = clear || tp.trim() === "" ? null : Number(tp);
-      const st = clear || stop.trim() === "" ? null : -Math.abs(Number(stop.replace("-", "")));
+      const num = (v: string) => (clear || v.trim() === "" ? null : Number(v.replace(/[$,\s]/g, "")));
       const sh = Math.min(Math.max(Number(share) || 100, 5), 100) / 100;
-      if ((t != null && !Number.isFinite(t)) || (st != null && !Number.isFinite(st))) {
-        setMsg("Numbers only");
-        return;
+      let body: TargetBody;
+      if (mode === "price") {
+        const t = num(tpx), st = num(spx);
+        if ((t != null && !(t > 0)) || (st != null && !(st > 0))) {
+          setMsg("Prices must be numbers above 0");
+          return;
+        }
+        if (t != null && st != null && st >= t) {
+          setMsg("The stop price must be below the target price");
+          return;
+        }
+        body = { target_pct: null, stop_pct: null, share: sh, target_price: t, stop_price: st, hands_off: !clear && mine };
+      } else {
+        const t = num(tp);
+        const s0 = num(stop.replace("-", ""));
+        const st = s0 == null ? null : -Math.abs(s0);
+        if ((t != null && !Number.isFinite(t)) || (st != null && !Number.isFinite(st))) {
+          setMsg("Numbers only");
+          return;
+        }
+        body = { target_pct: t, share: sh, stop_pct: st, hands_off: !clear && mine };
       }
-      setMsg(await onTarget(p, { target_pct: t, share: sh, stop_pct: st }));
+      setMsg(await onTarget(p, body));
       if (clear) {
         setTp("");
         setStop("");
+        setTpx("");
+        setSpx("");
       }
       setOpen(false);
     } catch (e) {
@@ -182,37 +218,69 @@ function TargetEditor({
     }
   }
 
+  const tab = (m: "price" | "pct", label: string) => (
+    <button type="button" onClick={() => setMode(m)}
+      className={`rounded px-1.5 py-0.5 ${mode === m ? "bg-raised text-ink" : "text-muted hover:text-ink"}`}>{label}</button>
+  );
+
   return (
     <span className="mt-1 block text-[11px]">
       {has && !open && (
         <span className="block text-gold">
           🎯 {p.target_pct != null && <>sell {Math.round((p.target_share ?? 1) * 100)}% at +{p.target_pct}%</>}
-          {p.target_pct != null && p.stop_pct != null && " · "}
+          {p.target_price != null && <>sell {Math.round((p.target_share ?? 1) * 100)}% at {usdPrice(p.target_price)}</>}
+          {(p.target_pct != null || p.target_price != null) && (p.stop_pct != null || p.stop_price != null) && " · "}
           {p.stop_pct != null && <>stop {p.stop_pct}%</>}
+          {p.stop_price != null && <>stop {usdPrice(p.stop_price)}</>}
         </span>
       )}
+      {p.hands_off && !open && <span className="block text-sky">✋ you manage it: the bot won&apos;t sell it</span>}
       {!open ? (
         <button onClick={() => setOpen(true)} className="mt-0.5 rounded-md border border-line px-2 py-0.5 text-muted hover:text-ink">
           {has ? "Edit target" : "Target"}
         </button>
       ) : (
-        <span className="mt-1 flex flex-wrap items-center gap-1 text-muted">
-          <span>Sell</span>
-          <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
-          <span>% at +</span>
-          <input className={box} inputMode="decimal" placeholder="100" value={tp} onChange={(e) => setTp(e.target.value)} />
-          <span>% · stop −</span>
-          <input className={box} inputMode="decimal" placeholder="—" value={stop} onChange={(e) => setStop(e.target.value)} />
-          <span>%</span>
-          <button disabled={busy} onClick={() => save()} className="rounded-md border border-mint/60 px-2 py-0.5 text-mint disabled:opacity-50">
-            Save
-          </button>
-          {has && (
-            <button disabled={busy} onClick={() => save(true)} className="rounded-md border border-line px-2 py-0.5 text-muted disabled:opacity-50">
-              Clear
-            </button>
+        <span className="mt-1 flex flex-col gap-1.5 rounded-lg border border-line bg-carbon/50 p-2 text-muted">
+          <span className="flex flex-wrap items-center gap-1">
+            <span className="flex rounded border border-line p-0.5">{tab("price", "Coin price $")}{tab("pct", "% from entry")}</span>
+            <span className="text-faint">now {usdPrice(p.price_usd)} · entry {usdPrice(entry)}</span>
+          </span>
+          {mode === "price" ? (
+            <span className="flex flex-wrap items-center gap-1">
+              <span>Sell</span>
+              <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
+              <span>% at $</span>
+              <input className={wide} inputMode="decimal" placeholder={entry ? String(Number((entry * 2).toPrecision(3))) : "target"}
+                value={tpx} onChange={(e) => setTpx(e.target.value)} />
+              <span>· stop at $</span>
+              <input className={wide} inputMode="decimal" placeholder="—" value={spx} onChange={(e) => setSpx(e.target.value)} />
+            </span>
+          ) : (
+            <span className="flex flex-wrap items-center gap-1">
+              <span>Sell</span>
+              <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
+              <span>% at +</span>
+              <input className={box} inputMode="decimal" placeholder="100" value={tp} onChange={(e) => setTp(e.target.value)} />
+              <span>% · stop −</span>
+              <input className={box} inputMode="decimal" placeholder="—" value={stop} onChange={(e) => setStop(e.target.value)} />
+              <span>%</span>
+            </span>
           )}
-          <button onClick={() => setOpen(false)} className="rounded-md border border-line px-2 py-0.5 text-muted">Cancel</button>
+          <label className="flex items-center gap-1.5">
+            <input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />
+            I manage it: the bot never sells it (no leader exit, 2x, quick exit, max hold), only my target / stop
+          </label>
+          <span className="flex flex-wrap gap-1">
+            <button disabled={busy} onClick={() => save()} className="rounded-md border border-mint/60 px-2 py-0.5 text-mint disabled:opacity-50">
+              Save
+            </button>
+            {(has || p.hands_off) && (
+              <button disabled={busy} onClick={() => save(true)} className="rounded-md border border-line px-2 py-0.5 text-muted disabled:opacity-50">
+                Clear (back to the bot)
+              </button>
+            )}
+            <button onClick={() => setOpen(false)} className="rounded-md border border-line px-2 py-0.5 text-muted">Cancel</button>
+          </span>
         </span>
       )}
       {msg && <span className="block text-faint">{msg}</span>}
@@ -229,7 +297,7 @@ function PositionRows({
   rows: LivePositionOut[];
   now: number;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
-  onTarget?: (p: LivePositionOut, body: { target_pct: number | null; share: number; stop_pct: number | null }) => Promise<string>;
+  onTarget?: (p: LivePositionOut, body: TargetBody) => Promise<string>;
 }) {
   return (
     <>
@@ -400,7 +468,7 @@ export function LiveView() {
     return () => clearInterval(id);
   }, []);
 
-  async function setTarget(p: LivePositionOut, body: { target_pct: number | null; share: number; stop_pct: number | null }) {
+  async function setTarget(p: LivePositionOut, body: TargetBody) {
     try {
       const r = await api.liveTarget(password, p.id, body);
       await load(password);
@@ -522,7 +590,7 @@ function AccountSection({
   a: LiveAccount;
   now: number;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
-  onTarget?: (p: LivePositionOut, body: { target_pct: number | null; share: number; stop_pct: number | null }) => Promise<string>;
+  onTarget?: (p: LivePositionOut, body: TargetBody) => Promise<string>;
 }) {
   // failed buys spent nothing: they stay out of the table (count only, in the Budget tile)
   const all = [...data.open, ...data.closed].sort((x, y) =>

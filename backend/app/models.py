@@ -331,6 +331,12 @@ class LivePosition(Base):
     target_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     target_share: Mapped[float | None] = mapped_column(Float, nullable=True)
     stop_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Or by the coin's price (USD per token): sell target_share at target_price, everything at stop_price.
+    target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The owner manages this position: no bot rule sells it (leader sells, 2x, quick exit, max hold, time stop),
+    # only the owner's target / stop or a sell from the page.
+    hands_off: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class SignalOutcome(Base):
