@@ -1,19 +1,17 @@
 "use client";
 
 import {
-  ArrowLeft,
   ExternalLink,
   Lock,
-  LogOut,
   Pause,
   Play,
   Wallet,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
-import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
+import { AdminSignIn, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, PageHeader, Panel, StatTile } from "@/components/ui";
+import { Badge, button, Empty, PageHeader, pageMain, Panel, StatTile } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import { ago, pct, price } from "@/lib/format";
 import type {
@@ -408,7 +406,6 @@ function PositionRows({
 
 export function LiveView() {
   const [password, setPassword] = useState("");
-  const [input, setInput] = useState("");
   const [data, setData] = useState<LiveStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -518,7 +515,7 @@ export function LiveView() {
   return (
     <>
     <AppNav />
-    <main className="mx-auto max-w-[1400px] px-4 pt-6 pb-14 sm:px-6">
+    <main className={pageMain}>
       <PageHeader icon={<Wallet className="size-5" />} title="Live copy trading"
         badges={data && (
           <>
@@ -547,9 +544,6 @@ export function LiveView() {
                 {data.paused ? "Resume buys" : "Pause buys"}
               </button>
             )}
-            <button onClick={async () => { await adminSignOut(); setPassword(""); setInput(""); setData(null); }} className={button("ghost")}>
-              <LogOut className="size-3.5" /> Sign out
-            </button>
           </>
         } />
 

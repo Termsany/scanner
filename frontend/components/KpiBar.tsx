@@ -1,4 +1,4 @@
-import { Activity, BarChart3, FlaskConical, HeartPulse, Radar, ShieldCheck, Timer, Trophy, Wifi, WifiOff, Zap } from "lucide-react";
+import { Activity, HeartPulse, Radar, ShieldCheck, Timer, Trophy, Wifi, WifiOff, Zap } from "lucide-react";
 
 import { ago, pct } from "@/lib/format";
 import type { SocketState } from "@/lib/useLiveSignals";
@@ -10,8 +10,8 @@ export function TelemetryBar({ status, socket, now }: { status: ScannerStatus | 
   const state = status === null ? "Connecting" : live ? "Running" : "Stalled";
   const cov = status?.security_coverage_pct;
   return (
-    <header className="border-b border-line bg-surface/40">
-      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5 sm:px-6">
+    <div className="card mb-4">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5">
         <span className="text-[11px] font-medium tracking-[0.12em] text-faint uppercase">SOL · ETH · BASE · BSC</span>
 
         <div className="flex items-center gap-2 text-xs" title="Scanner state">
@@ -34,12 +34,6 @@ export function TelemetryBar({ status, socket, now }: { status: ScannerStatus | 
         </Metric>
 
         <div className="ml-auto flex items-center gap-3">
-          <a href="/performance" className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink">
-            <BarChart3 className="size-3.5" /> Performance
-          </a>
-          <a href="/paper" className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink">
-            <FlaskConical className="size-3.5" /> Paper
-          </a>
           <p className="hidden text-[11px] text-faint lg:block">Automated heuristics, not financial advice.</p>
           <span
             className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10.5px] font-bold tracking-[0.14em] ${
@@ -55,7 +49,7 @@ export function TelemetryBar({ status, socket, now }: { status: ScannerStatus | 
           </span>
         </div>
       </div>
-    </header>
+    </div>
   );
 }
 

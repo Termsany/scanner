@@ -1,9 +1,10 @@
 "use client";
 
-import { ArrowLeft, BarChart3, Info } from "lucide-react";
+import { BarChart3, Info } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { AppNav } from "@/components/AppNav";
+import { PageHeader, pageMain, Segmented } from "@/components/ui";
 import { api } from "@/lib/api";
 import { ago, pct, pctClass, price } from "@/lib/format";
 import type { Performance, PerfStats } from "@/lib/types";
@@ -97,26 +98,12 @@ export function PerformanceView() {
   return (
     <>
     <AppNav kind="public" />
-    <main className="mx-auto max-w-[1400px] px-4 pt-6 pb-14 sm:px-6">
-      <header className="mb-2 flex flex-wrap items-center gap-3">
-        <BarChart3 className="size-5 text-accent" />
-        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Signal performance</h1>
-        <div role="radiogroup" aria-label="Window" className="ml-auto flex rounded-lg border border-line bg-carbon/60 p-0.5">
-          {WINDOWS.map((w) => (
-            <button
-              key={w.hours}
-              role="radio"
-              aria-checked={hours === w.hours}
-              onClick={() => setHours(w.hours)}
-              className={`num rounded-md px-2.5 py-1 text-xs ${hours === w.hours ? "bg-raised text-ink" : "text-muted hover:text-ink"}`}
-            >
-              {w.label}
-            </button>
-          ))}
-        </div>
-      </header>
+    <main className={pageMain}>
+      <PageHeader icon={<BarChart3 />} title="Signal performance"
+        actions={<Segmented label="Window" value={hours} onChange={setHours}
+          options={WINDOWS.map((w) => ({ value: w.hours, label: w.label }))} />} />
 
-      <p className="mt-3 flex items-start gap-1.5 text-xs text-faint">
+      <p className="-mt-2 flex items-start gap-1.5 text-xs text-faint">
         <Info className="mt-px size-3.5 shrink-0" />
         Price change after each signal, from the pool&apos;s 15-minute candles (GeckoTerminal), including tokens that
         crashed and left the scanner. Signals are measured when they are 1h, 6h and 24h old. Peaks are highs, not

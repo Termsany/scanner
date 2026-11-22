@@ -8,7 +8,10 @@ import { useLiveSignals } from "@/lib/useLiveSignals";
 import type { FeedSignal, LiveSignal, PaginatedTokens, ScannerStatus, TokenQuery, TokenRef } from "@/lib/types";
 
 import { ChainPill } from "./Badges";
+import { Radar } from "lucide-react";
+
 import { AppNav } from "./AppNav";
+import { PageHeader, pageMain } from "./ui";
 import { KpiBar, TelemetryBar } from "./KpiBar";
 import { LiveFeed } from "./LiveFeed";
 import { type RowFlash, ScannerTable } from "./ScannerTable";
@@ -196,9 +199,11 @@ export function Dashboard({ initialToken = null }: { initialToken?: TokenRef | n
   return (
     <>
       <AppNav kind="public" />
-      <TelemetryBar status={status} socket={socket} now={now} />
 
-      <main className="mx-auto max-w-[1600px] px-4 pt-4 pb-10 sm:px-6">
+      <main className={pageMain}>
+        <PageHeader icon={<Radar />} title="Token scanner"
+          subtitle="New tokens scored live: security, momentum and smart money. A signal fires at 75." />
+        <TelemetryBar status={status} socket={socket} now={now} />
         <KpiBar status={status} now={now} onOpenToken={openToken} />
 
         <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">

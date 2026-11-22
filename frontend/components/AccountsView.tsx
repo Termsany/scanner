@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  ArrowLeft,
   Copy,
   ExternalLink,
   KeyRound,
@@ -19,7 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, PageHeader } from "@/components/ui";
+import { Badge, button, PageHeader, pageMain } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import type { AccountsList, AuditEntry, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
 
@@ -945,7 +944,7 @@ export function AccountsView() {
   return (
     <>
     <AppNav />
-    <main className="mx-auto max-w-[1200px] px-4 pt-6 pb-14 sm:px-6">
+    <main className={pageMain}>
       <PageHeader icon={<Users className="size-5" />} title="Trading accounts"
         subtitle={<>Each account: its own wallet, smart wallets, entry, budget and loss limit. Edits apply within {data?.defaults.reload_seconds ?? 30}s, no restart.</>}
         badges={data && <Badge tone="muted">{data.accounts.length} accounts</Badge>} />

@@ -3,7 +3,6 @@
 import {
   Activity,
   AlertTriangle,
-  ArrowUpRight,
   BarChart3,
   Bell,
   Cpu,
@@ -30,7 +29,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, Panel } from "@/components/ui";
+import { Badge, button, Empty, PageHeader, pageMain, Panel, SectionTabs } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
 import type {
@@ -112,7 +111,6 @@ function Status({ a, now }: { a: OverviewAccount; now: number }) {
   const chips: [string, string][] = [];
   if (!a.enabled) chips.push(["off", "bg-raised text-faint"]);
   else if (a.paused) chips.push(["paused", "bg-warn-soft text-warn"]);
-  else chips.push(["on", "bg-bull-soft text-bull"]);
   if (a.enabled && (beat == null || beat > STALE_MIN)) chips.push(["engine stale", "bg-bear-soft text-bear"]);
   if (a.billing_hold) chips.push(["unpaid: buys held", "bg-bear-soft text-bear"]);
   if (a.owner?.status === "blocked") chips.push(["blocked", "bg-bear-soft text-bear"]);
@@ -973,7 +971,7 @@ function engineState(a: OverviewAccount, now: number): "ok" | "stale" | "off" | 
 }
 
 /** One glance per engine: heartbeat, last trade, today. */
-function HealthStrip({ accounts, now }: { accounts: OverviewAccount[]; now: number }) {
+function HealthStrip({ accounts, now, scanner }: { accounts: OverviewAccount[]; now: number; scanner?: string }) {
   const label = { ok: "running", stale: "not stepping", off: "off", paused: "paused" };
   return (
     <div className="card flex flex-col p-0">
@@ -997,6 +995,11 @@ function HealthStrip({ accounts, now }: { accounts: OverviewAccount[]; now: numb
           );
         })}
       </ul>
+      {scanner && (
+        <div className="flex items-center gap-2 border-t border-line px-5 py-3 text-xs text-muted">
+          <Radar className="size-3.5 text-sky" /> Scanner: {scanner}
+        </div>
+      )}
     </div>
   );
 }
@@ -1266,25 +1269,17 @@ export function AdminView() {
   return (
     <>
     <AppNav />
-    <div className="relative">
-      <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[520px] bg-[radial-gradient(60%_60%_at_15%_0%,rgb(43_228_167/0.10),transparent_70%),radial-gradient(45%_50%_at_90%_10%,rgb(79_179_255/0.08),transparent_70%)]" />
-      <main className="mx-auto max-w-[1400px] px-4 pt-6 pb-16 sm:px-6">
-        {/* header */}
-        <header className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-3 animate-fade-in">
-          <span className="grid size-11 shrink-0 place-items-center rounded-2xl border border-mint/25 bg-mint-soft text-mint shadow-[0_0_30px_-8px_rgb(43_228_167/0.6)]">
-            <LayoutDashboard className="size-5" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="font-display text-xl font-semibold tracking-tight sm:text-2xl">Command center</h1>
-              {data && <Badge tone={data.mode === "live" ? "mint" : "gold"} dot>{data.mode.toUpperCase()}</Badge>}
-              {data?.paused && <Badge tone="gold">ALL PAUSED</Badge>}
-            </div>
-            <p className="mt-0.5 text-sm text-muted">Every account, engine, user and trade in one place.</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <a href="/live" className={button("ghost")}>Live <ArrowUpRight className="size-3.5" /></a>
-            <a href="/accounts" className={button("ghost")}>Accounts <ArrowUpRight className="size-3.5" /></a>
+    <div>
+      <main className={pageMain}>
+        <PageHeader icon={<LayoutDashboard />} title="Command center"
+          subtitle="Every account, engine, user and trade in one place."
+          badges={data && (
+            <>
+              <Badge tone={data.mode === "live" ? "mint" : "gold"} dot>{data.mode.toUpperCase()}</Badge>
+              {data.paused && <Badge tone="gold">ALL PAUSED</Badge>}
+            </>
+          )}
+          actions={
             <button type="button" onClick={() => load(password)} className={button("secondary", "relative overflow-hidden")} disabled={loading}>
               <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
               {data ? since(data.updated_at, now) : "Refresh"}
@@ -1293,28 +1288,10 @@ export function AdminView() {
                   style={{ animation: `admin-progress ${REFRESH_MS}ms linear both` }} />
               )}
             </button>
-          </div>
-        </header>
+          } />
 
-        {/* section tabs */}
-        <nav className="glass sticky top-[57px] z-30 -mx-4 mb-6 border-y border-line px-4 sm:mx-0 sm:rounded-2xl sm:border sm:px-1.5"
-          aria-label="Admin sections">
-          <div className="flex gap-1 overflow-x-auto py-1.5 [scrollbar-width:none]">
-            {TABS.map((x) => {
-              const on = tab === x.key;
-              const n = badgeCount[x.key];
-              return (
-                <button key={x.key} type="button" onClick={() => setTab(x.key)} aria-current={on ? "page" : undefined}
-                  className={`relative inline-flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition [&>svg]:size-4 ${
-                    on ? "bg-raised text-ink shadow-[inset_0_0_0_1px_rgb(255_255_255/0.08)]" : "text-muted hover:bg-raised/60 hover:text-ink"}`}>
-                  {x.icon}{x.label}
-                  {!!n && <span className="num grid min-w-5 place-items-center rounded-full bg-bear px-1 text-[10px] font-bold text-carbon">{n}</span>}
-                  {on && <span className="absolute inset-x-3 -bottom-1.5 h-[2px] rounded-full bg-mint" />}
-                </button>
-              );
-            })}
-          </div>
-        </nav>
+        <SectionTabs label="Admin sections" value={tab} onChange={setTab}
+          tabs={TABS.map((x) => ({ ...x, count: badgeCount[x.key] }))} />
 
         {error && <p className="mb-4 rounded-xl border border-bear/30 bg-bear-soft px-4 py-3 text-sm text-bear">{error}</p>}
         {!data && !error && (
@@ -1442,27 +1419,10 @@ export function AdminView() {
 
                 <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
                   <TradesFeed items={data.recent} now={now} limit={8} />
-                  <div className="flex flex-col gap-6">
-                    <HealthStrip accounts={sorted} now={now} />
-                    <div className="card flex items-center gap-3 p-5">
-                      <span className="grid size-10 place-items-center rounded-xl bg-sky/15 text-sky"><Radar className="size-5" /></span>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-semibold">Scanner</div>
-                        <div className="text-xs text-muted">{data.signals.last_24h} signals in 24h · last {since(data.signals.last_at, now)}</div>
-                      </div>
-                    </div>
-                  </div>
+                  <HealthStrip accounts={sorted} now={now}
+                    scanner={`${data.signals.last_24h} signals in 24h · last ${since(data.signals.last_at, now)}`} />
                 </div>
 
-                <div>
-                  <div className="mb-3 flex items-center justify-between">
-                    <h2 className="text-sm font-semibold">Accounts</h2>
-                    <button type="button" className="text-xs text-muted hover:text-ink" onClick={() => setTab("accounts")}>All accounts →</button>
-                  </div>
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    {sorted.slice(0, 6).map((a) => <AccountCard key={a.name} a={a} now={now} best={best} />)}
-                  </div>
-                </div>
               </>
             )}
 
