@@ -691,13 +691,13 @@ class JupiterExecutor:
                 slip = max(min(bps, int(self.s.live_direct_slippage_cap_pct * 100)), 100)
             tok0 = sol0 = None
 
-            async def build_and_simulate(slip_bps: int):
+            async def build_and_simulate(slip_bps: int, amount: int | None = None):
                 nonlocal tok0, sol0
                 t1 = time.monotonic()
                 try:
                     resp = await self.http.post(PUMPPORTAL_TRADE, data={
                         "publicKey": self.pubkey, "action": "buy", "mint": mint,
-                        "amount": f"{lamports / LAMPORTS:.9f}", "denominatedInSol": "true",
+                        "amount": f"{(amount or lamports) / LAMPORTS:.9f}", "denominatedInSol": "true",
                         "slippage": f"{slip_bps / 100:.2f}",
                         "priorityFee": f"{self.s.live_direct_priority_fee_sol:.6f}", "pool": "auto"}, timeout=8)
                 except Exception as exc:
@@ -728,8 +728,8 @@ class JupiterExecutor:
             if err and "6004" in str(err):
                 # PumpPortal misprices some PumpSwap pools (its own slippage check fails): build once more with a
                 # wider limit; what we really get is read from the simulation and checked against the chase limit
-                r, raw, (tok_after, lam_after, err) = await build_and_simulate(
-                    max(slip, int(self.s.live_direct_retry_slippage_pct * 100)))
+                slip = max(slip, int(self.s.live_direct_retry_slippage_pct * 100))
+                r, raw, (tok_after, lam_after, err) = await build_and_simulate(slip)
                 _took("direct_retry", 1)
             if err:     # nothing was sent: Jupiter tries it
                 if "6063" in str(err):                   # pump.fun coin quoted in another token: not for PumpPortal
@@ -739,6 +739,21 @@ class JupiterExecutor:
             spent = sol0 - lam_after / LAMPORTS
             if got <= 0 or spent <= 0:
                 raise DirectUnavailable("simulation shows no tokens")
+            # PumpPortal buys a fixed number of tokens with "max SOL = amount + slippage": on pools it misprices the
+            # simulation spends up to that much more (+33% seen). Ask again for less until it costs what we set.
+            want = lamports / LAMPORTS
+            amount = lamports
+            for _ in range(2):
+                if spent <= want * (1 + self.s.live_direct_max_overspend_pct / 100):
+                    break
+                amount = int(amount * want / spent * 0.995)
+                r, raw, (tok_after, lam_after, err) = await build_and_simulate(slip, amount)
+                _took("direct_resize", 1)
+                if err:
+                    raise DirectUnavailable(f"simulation error after resizing: {err}")
+                got, spent = tok_after - tok0, sol0 - lam_after / LAMPORTS
+            if spent > want * (1 + self.s.live_direct_max_overspend_pct / 100) or got <= 0:
+                raise DirectUnavailable(f"PumpPortal would spend {spent:.4f} SOL for {want:.4f}")
             if max_price:
                 decimals = await self.decimals(mint)
                 pay = spent * px / (got / 10 ** decimals)

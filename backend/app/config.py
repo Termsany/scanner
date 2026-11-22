@@ -154,6 +154,7 @@ class Settings(BaseSettings):
     live_direct_priority_fee_sol: float = 0.0005
     live_direct_slippage_cap_pct: float = 15.0      # direct buys with a chase limit: slippage at most this
     live_direct_retry_slippage_pct: float = 40.0    # one retry when PumpPortal's own slippage check fails (6004)
+    live_direct_max_overspend_pct: float = 3.0      # simulated cost above the entry size: rebuild smaller / use Jupiter
     live_min_liquidity_usd: float = 10_000.0
     # Skip a copy buy when the live quote's price per token is more than this % above the price recorded with
     # the leader's buy (we would be buying the leader's pump). None = no limit.

@@ -2022,3 +2022,25 @@ def test_stop_loss_typed_as_a_plain_number_is_saved_negative():
     from app.accounts import clean_leaders
     out = clean_leaders([{"wallet": LEADER, "quick_exit": True, "quick_sl_pct": 15}])
     assert out[0]["quick_sl_pct"] == -15.0
+
+
+def test_direct_buy_that_would_overspend_is_rebuilt_smaller():
+    async def go():
+        # first simulation spends 0.4 SOL ($40) for a $30 buy; the resized one 0.3 SOL
+        x, calls = _direct_exec(sim=[(100_000_000, int(1.6e9), None), (75_000_000, int(1.7e9), None)])
+        amounts = []
+        orig = x.http.post
+
+        async def post(url, **kw):
+            amounts.append(float(kw["data"]["amount"]))
+            return await orig(url, **kw)
+        x.http.post = post
+        try:
+            f = await x.buy(MINT_PUMP, 30.0, max_price=1.0)
+        finally:
+            await x.close()
+        return f, calls, amounts
+
+    f, calls, amounts = asyncio.run(go())
+    assert f.timing["route"] == "pumpportal" and calls["sent"] == 1
+    assert amounts[0] == 0.3 and amounts[1] < 0.23            # asked for less SOL the second time
