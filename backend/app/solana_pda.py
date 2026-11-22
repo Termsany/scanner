@@ -58,7 +58,16 @@ def is_on_curve(b: bytes) -> bool:
     return x2 == 0 or pow(x2, (_P - 1) // 2, _P) == 1
 
 
+try:                                    # Rust implementation: ~100x faster than the pure-Python one below
+    from solders.pubkey import Pubkey as _Pubkey
+except Exception:                       # pragma: no cover - solders is installed with the trading extras
+    _Pubkey = None
+
+
 def find_program_address(seeds: list[bytes], program_id: str) -> tuple[str, int]:
+    if _Pubkey is not None:
+        key, bump = _Pubkey.find_program_address(seeds, _Pubkey.from_string(program_id))
+        return str(key), bump
     prog = pubkey_bytes(program_id)
     for bump in range(255, -1, -1):
         h = hashlib.sha256(b"".join(seeds) + bytes([bump]) + prog + b"ProgramDerivedAddress").digest()

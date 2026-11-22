@@ -63,16 +63,25 @@ class HoldingsChecker:
         return resp.json()
 
     # ---- Solana ---------------------------------------------------------
-    async def _solana(self, tokens: list[MarketMetrics], wallets: dict[str, str], out: Holdings) -> int:
-        lookups: list[tuple[str, MarketMetrics, str]] = []  # (ata, token, wallet)
+    def _lookups(self, tokens: list[MarketMetrics], wallets: dict[str, str]) -> list[tuple[str, MarketMetrics, str]]:
+        """(ata, token, wallet) for each pair, stopping at HOLDINGS_MAX_ACCOUNTS (only those are queried)."""
+        out: list[tuple[str, MarketMetrics, str]] = []
+        cap = self.s.holdings_max_accounts
         for m in tokens:
             for w in wallets:
                 for prog in (TOKEN_PROGRAM, TOKEN_2022_PROGRAM):
                     try:
-                        lookups.append((associated_token_address(w, m.address, prog), m, w))
+                        out.append((associated_token_address(w, m.address, prog), m, w))
                     except (ValueError, KeyError):
                         break  # malformed address
-        lookups = lookups[: self.s.holdings_max_accounts]
+                    if len(out) >= cap:
+                        return out
+        return out
+
+    async def _solana(self, tokens: list[MarketMetrics], wallets: dict[str, str], out: Holdings) -> int:
+        # deriving thousands of addresses is CPU work: off the event loop, or it froze the whole worker (copy
+        # trading, WebSocket watchers) for 35-47 s a minute (2026-11-22)
+        lookups = await asyncio.to_thread(self._lookups, tokens, wallets)
         calls = 0
         for i in range(0, len(lookups), SOLANA_BATCH):
             chunk = lookups[i:i + SOLANA_BATCH]
