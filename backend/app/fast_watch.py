@@ -72,12 +72,18 @@ class FastWatcher:
         await self.tracker.close()
 
     async def _get_transaction(self, sig: str) -> dict[str, Any] | None:
-        """The node announces at "confirmed"; getTransaction can lag a moment behind, so retry briefly."""
-        for attempt in range(10):
+        """Notifications come at "processed"; getTransaction answers once confirmed (usually < 1 s later). Wait at
+        most LIVE_FAST_FETCH_SECONDS: a transaction that never confirms must not hold up the wallet's next ones
+        (2026-11-22: 33 s queued); the poller still picks up anything real that is missed here."""
+        deadline = time.monotonic() + self.s.live_fast_fetch_seconds
+        for attempt in range(40):
+            if time.monotonic() > deadline:
+                log.info("fast: %s not confirmed in %.0fs; leaving it to the poller", sig[:12], self.s.live_fast_fetch_seconds)
+                return None
             r = await self.http.post(self.rpc, json={"jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [
                 sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1, "commitment": "confirmed"}]})
             if r.status_code == 429:
-                await asyncio.sleep(0.5 * (attempt + 1))
+                await asyncio.sleep(0.5)
                 continue
             r.raise_for_status()
             body = r.json()
@@ -86,7 +92,7 @@ class FastWatcher:
             if body.get("error"):
                 log.warning("getTransaction %s: %s", sig[:12], body["error"])
                 return None
-            await asyncio.sleep(0.3 + 0.2 * attempt)
+            await asyncio.sleep(0.25)
         return None
 
     # ---- messages -------------------------------------------------------------

@@ -110,3 +110,24 @@ def test_a_busy_wallet_does_not_hold_up_another_and_one_wallet_stays_in_order():
 
     asyncio.run(go())
     assert order == ["LEADER", "BUSY-A", "BUSY-B"]       # the leader isn't queued behind; the busy one keeps its order
+
+
+def test_unconfirmed_transaction_is_given_up_quickly():
+    import time as _t
+
+    def rpc(req):
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": None})   # never confirms
+
+    async def go():
+        s = Settings(live_rpc_url="https://rpc.test/?api-key=x", live_fast_fetch_seconds=0.6)
+        fw = FastWatcher([W], s)
+        await fw.http.aclose()
+        fw.http = httpx.AsyncClient(transport=httpx.MockTransport(rpc))
+        t0 = _t.monotonic()
+        tx = await fw._get_transaction("SIGX")
+        took = _t.monotonic() - t0
+        await fw.close()
+        return tx, took
+
+    tx, took = asyncio.run(go())
+    assert tx is None and took < 1.2
