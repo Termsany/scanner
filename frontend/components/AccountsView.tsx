@@ -10,6 +10,8 @@ import {
   Check,
   Loader2,
   ScrollText,
+  UserCog,
+  Wallet,
   Trash2,
   Users,
 } from "lucide-react";
@@ -17,7 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, PageHeader, pageMain } from "@/components/ui";
+import { Badge, button, PageHeader, pageMain, SectionTabs } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import type { AccountsList, AuditEntry, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
 
@@ -602,13 +604,15 @@ function NewAccount({
   canStore,
   defaultHold,
   onCreated,
+  startOpen,
 }: {
   password: string;
   canStore: boolean;
   defaultHold: number;
   onCreated: (a: TradingAccountCfg, secret: string | null) => void;
+  startOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(!!startOpen);
   const [d, setD] = useState<Draft>(EMPTY);
   const [mode, setMode] = useState<"generate" | "import">("generate");
   const [key, setKey] = useState("");
@@ -898,7 +902,7 @@ function details(e: AuditEntry): string {
 function ActivityPanel({ password }: { password: string }) {
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<AuditEntry[] | null>(null);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);   // its own tab: open right away
   const load = useCallback(async (query: string) => {
     try {
       setRows((await api.audit(password, query)).entries);
@@ -972,8 +976,21 @@ export function AccountsView() {
   const [data, setData] = useState<AccountsList | null>(null);
   const [error, setError] = useState("");
   const [secret, setSecret] = useState<{ name: string; pubkey: string | null; secret: string } | null>(null);
+  const [tab, setTabState] = useState("");
+  const [pending, setPending] = useState(0);
 
   useAdminResume(setPassword);
+
+  useEffect(() => {
+    const read = () => setTabState(decodeURIComponent(window.location.hash.slice(1)));
+    read();
+    window.addEventListener("hashchange", read);
+    return () => window.removeEventListener("hashchange", read);
+  }, []);
+  const setTab = (t: string) => {
+    setTabState(t);
+    history.replaceState(null, "", `#${encodeURIComponent(t)}`);
+  };
 
   const load = useCallback(async (pw: string) => {
     try {
@@ -996,7 +1013,10 @@ export function AccountsView() {
   const [owners, setOwners] = useState<Record<number, string>>({});
   useEffect(() => {
     if (!password || !data) return;
-    api.users(password).then((r) => setOwners(Object.fromEntries(r.users.map((u) => [u.id, u.email])))).catch(() => undefined);
+    api.users(password).then((r) => {
+      setOwners(Object.fromEntries(r.users.map((u) => [u.id, u.email])));
+      setPending(r.users.filter((u) => u.status === "pending").length);
+    }).catch(() => undefined);
   }, [password, data]);
 
   useEffect(() => {
@@ -1024,26 +1044,47 @@ export function AccountsView() {
     <AppNav />
     <main className={pageMain}>
       <PageHeader icon={<Users className="size-5" />} title="Trading accounts"
-        subtitle={<>Each account: its own wallet, smart wallets, entry, budget and loss limit. Edits apply within {data?.defaults.reload_seconds ?? 30}s, no restart.</>}
+        subtitle={<>Each account: its own wallet, smart wallets, entry, budget and loss limit. Changes save by themselves and apply within {data?.defaults.reload_seconds ?? 30}s.</>}
         badges={data && <Badge tone="muted">{data.accounts.length} accounts</Badge>} />
       {error && <p className="mb-4 text-sm text-bear">{error}</p>}
-      <div className="flex flex-col gap-6">
-        {secret && <SecretOnce {...secret} onClose={() => setSecret(null)} />}
-        {data && <UsersPanel password={password} onChange={() => load(password)} />}
-        {data && <ActivityPanel password={password} />}
-        {data?.accounts.map((a) => (
-          <AccountCard key={a.name} a={a} password={password} defaultHold={hold} onSaved={replace}
-            owner={a.user_id != null ? (owners[a.user_id] ?? `#${a.user_id}`) : undefined} />
-        ))}
-        {data && (
-          <NewAccount password={password} canStore={data.can_store_keys} defaultHold={hold}
-            onCreated={(a, s) => {
-              setData((d) => d && { ...d, accounts: [...d.accounts, a] });
-              if (s) setSecret({ name: a.name, pubkey: a.pubkey, secret: s });
-            }} />
-        )}
-        {!data && !error && <p className="text-sm text-muted">Loading…</p>}
-      </div>
+      {secret && <div className="mb-6"><SecretOnce {...secret} onClose={() => setSecret(null)} /></div>}
+      {!data && !error && <p className="text-sm text-muted">Loading…</p>}
+      {data && (() => {
+        const names = data.accounts.map((a) => a.name);
+        const current = tab && (names.includes(tab) || ["users", "activity", "new"].includes(tab)) ? tab : names[0] ?? "new";
+        const acct = data.accounts.find((a) => a.name === current);
+        return (
+          <>
+            <SectionTabs label="Accounts" value={current} onChange={setTab}
+              tabs={[
+                ...data.accounts.map((a) => ({
+                  key: a.name,
+                  label: `${a.name}${!a.enabled ? " · off" : a.paused ? " · paused" : ""}`,
+                  icon: <Wallet className={a.enabled && !a.paused ? "text-mint" : "text-faint"} />,
+                })),
+                { key: "users", label: "Users", icon: <UserCog />, count: pending },
+                { key: "activity", label: "Activity log", icon: <ScrollText /> },
+                { key: "new", label: "New account", icon: <Plus /> },
+              ]} />
+            <div key={current} className="flex animate-fade-in flex-col gap-6">
+              {acct && (
+                <AccountCard a={acct} password={password} defaultHold={hold} onSaved={replace}
+                  owner={acct.user_id != null ? (owners[acct.user_id] ?? `#${acct.user_id}`) : undefined} />
+              )}
+              {current === "users" && <UsersPanel password={password} onChange={() => load(password)} />}
+              {current === "activity" && <ActivityPanel password={password} />}
+              {current === "new" && (
+                <NewAccount password={password} canStore={data.can_store_keys} defaultHold={hold} startOpen
+                  onCreated={(a, s) => {
+                    setData((d) => d && { ...d, accounts: [...d.accounts, a] });
+                    if (s) setSecret({ name: a.name, pubkey: a.pubkey, secret: s });
+                    setTab(a.name);
+                  }} />
+              )}
+            </div>
+          </>
+        );
+      })()}
     </main>
     </>
   );
