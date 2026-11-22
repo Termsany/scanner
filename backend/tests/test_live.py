@@ -2114,3 +2114,34 @@ def test_price_target_hands_off_ignores_the_leader_and_sells_at_the_owners_price
 
     p = _db(body)
     assert p.status == "closed" and p.exit_reason == "your_stop"
+
+
+def test_target_on_a_coin_the_bot_does_not_hold_sells_it_at_the_owners_price():
+    from app.live import MANUAL, hold_with_target
+
+    x = PricedExec()
+    x.balances["M1"] = 1_000_000                                  # bought elsewhere: 1 token in the wallet
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0,
+                               live_take_capital_at_pct=None))
+        await eng.step(sess)
+        bad, _ = await hold_with_target(sess, "main", x.mode, "M1", 1_000_000, "M1", 30.0, 1.0, None, None)
+        assert not bad                                            # no price given
+        bad, _ = await hold_with_target(sess, "main", x.mode, "M1", 1_000_000, "M1", None, 1.0, 40.0, None)
+        assert not bad                                            # no value: can't be watched
+        ok, note = await hold_with_target(sess, "main", x.mode, "M1", 1_000_000, "M1", 30.0, 1.0, 40.0, 20.0)
+        assert ok, note
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        assert p.leader_wallet == MANUAL and p.hands_off and p.target_price == 40.0 and p.stop_price == 20.0
+        again, _ = await hold_with_target(sess, "main", x.mode, "M1", 1_000_000, "M1", 30.0, 0.5, 45.0, None)
+        assert again and len((await sess.execute(select(LivePosition))).scalars().all()) == 1   # same position
+        x.price.update(M1=46.0)
+        await eng.step(sess)
+        await eng.step(sess)
+        await sess.refresh(p)
+        return p
+
+    p = _db(body)
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 500_000)]
+    assert p.status == "open" and p.target_price is None

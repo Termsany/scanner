@@ -380,7 +380,7 @@ export interface PaperSummary {
 }
 
 export interface LiveFill {
-  side: "buy" | "sell" | "sell_failed";
+  side: "buy" | "buy_hand" | "held" | "sell" | "sell_failed";
   sig?: string;
   sol?: number;
   usd?: number;
@@ -446,6 +446,24 @@ export interface LeaderTrade {
   pct_sold: number | null;
   tx: string;
   at: string;
+}
+
+/** A coin in an account's wallet (/live, Wallet coins tab). */
+export interface HoldingCoin {
+  mint: string;
+  symbol: string;
+  raw: string;
+  amount: number;
+  price_usd: number | null;
+  value_usd: number | null;
+  stable: boolean;
+  position: LivePositionOut | null;   // the bot's open position of this coin, if any
+}
+
+export interface Holdings {
+  mode: string;
+  updated_at: string;
+  accounts: { name: string; pubkey: string; coins: HoldingCoin[] }[];
 }
 
 export interface LiveStatus {

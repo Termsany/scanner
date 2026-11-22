@@ -27,6 +27,7 @@ import type {
   TokenDetail,
   TokenQuery,
   TargetBody,
+  Holdings,
 } from "./types";
 
 // Empty string = same origin (production behind nginx: /api and /ws are proxied to the backend).
@@ -134,6 +135,17 @@ export const api = {
 
   liveTarget: (password: string, id: number, body: TargetBody) =>
     request<{ ok: boolean; message: string }>(`/api/live/positions/${id}/target`, {
+      method: "POST",
+      ...adm(password),
+      body: JSON.stringify(body),
+    }),
+
+  holdings: (password: string, signal?: AbortSignal) =>
+    request<Holdings>("/api/live/holdings", { ...adm(password), signal }),
+
+  holdingsTarget: (password: string, body: { account: string; mint: string; share: number;
+    target_price: number | null; stop_price: number | null }) =>
+    request<{ ok: boolean; message: string }>("/api/live/holdings/target", {
       method: "POST",
       ...adm(password),
       body: JSON.stringify(body),

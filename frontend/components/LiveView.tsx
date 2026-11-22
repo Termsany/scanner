@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  Coins,
   Crosshair,
   ExternalLink,
   History,
@@ -16,6 +17,8 @@ import { Badge, Empty, PageHeader, pageMain, Panel, SectionTabs, Segmented, Stat
 import { api, ApiError, SESSION } from "@/lib/api";
 import { ago, pct, price } from "@/lib/format";
 import type {
+  HoldingCoin,
+  Holdings,
   LeaderTrade,
   LiveAccount,
   LivePositionOut,
@@ -423,7 +426,7 @@ function PositionRows({
                   .filter((f) => f.side !== "sell_failed")
                   .map((f, i) => (
                     <span key={i} className="num text-muted">
-                      {f.side === "buy" ? "Buy" : "Sell"} {money(f.usd)}{" "}
+                      {f.side === "buy" || f.side === "buy_hand" ? "Buy" : f.side === "held" ? "Held" : "Sell"} {money(f.usd)}{" "}
                       <TxLink sig={f.sig} />
                     </span>
                   ))}
@@ -436,7 +439,7 @@ function PositionRows({
   );
 }
 
-type LiveTab = "open" | "history" | "wallets";
+type LiveTab = "open" | "coins" | "history" | "wallets";
 
 export function LiveView() {
   const [password, setPassword] = useState("");
@@ -451,7 +454,7 @@ export function LiveView() {
   useEffect(() => {
     const read = () => {
       const h = window.location.hash.slice(1);
-      if (h === "history" || h === "wallets" || h === "open") setTabState(h);
+      if (h === "history" || h === "wallets" || h === "open" || h === "coins") setTabState(h);
     };
     read();
     window.addEventListener("hashchange", read);
@@ -627,6 +630,7 @@ export function LiveView() {
           <SectionTabs label="Live sections" value={tab} onChange={setTab}
             tabs={[
               { key: "open", label: `Open trades · ${openCount}`, icon: <Activity /> },
+              { key: "coins", label: "Wallet coins", icon: <Coins /> },
               { key: "history", label: `History · ${closedCount}`, icon: <History /> },
               { key: "wallets", label: "Wallet activity", icon: <Radio /> },
             ]} />
@@ -636,6 +640,7 @@ export function LiveView() {
               <OpenAccount key={a.name} a={a} now={tick} busy={busy === a.name} globalPaused={data.paused}
                 onToggle={() => toggleAccount(a)} onSell={sellPosition} onTarget={setTarget} />
             ))}
+            {tab === "coins" && <WalletCoins password={password} onSell={sellPosition} onTarget={setTarget} />}
             {tab === "history" && <HistoryPanel accounts={data.accounts} now={tick} onSell={sellPosition} />}
             {tab === "wallets" && (
               data.leader_activity.length ? <LeaderFeed rows={data.leader_activity} now={tick} />
@@ -833,5 +838,204 @@ function LeaderFeed({ rows, now }: { rows: LeaderTrade[]; now: number }) {
         </table>
       </div>
     </Panel>
+  );
+}
+
+/** Every coin in each account's wallet, with a sell price / stop on any of them. */
+function WalletCoins({ password, onSell, onTarget }: {
+  password: string;
+  onSell: (p: LivePositionOut, share: number) => Promise<void>;
+  onTarget: (p: LivePositionOut, body: TargetBody) => Promise<string>;
+}) {
+  const [data, setData] = useState<Holdings | null>(null);
+  const [error, setError] = useState("");
+  const [small, setSmall] = useState(false);
+
+  const load = useCallback(async (signal?: AbortSignal) => {
+    try {
+      setData(await api.holdings(password, signal));
+      setError("");
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") setError(e instanceof ApiError ? e.message : "Could not read the wallets.");
+    }
+  }, [password]);
+
+  useEffect(() => {
+    const ctl = new AbortController();
+    load(ctl.signal);
+    const id = setInterval(() => !document.hidden && load(ctl.signal), 15_000);
+    return () => {
+      clearInterval(id);
+      ctl.abort();
+    };
+  }, [load]);
+
+  async function holdTarget(account: string, c: HoldingCoin, body: { share: number; target_price: number | null; stop_price: number | null }) {
+    try {
+      const r = await api.holdingsTarget(password, { account, mint: c.mint, ...body });
+      await load();
+      return r.message;
+    } catch (e) {
+      throw new Error(e instanceof ApiError ? e.message : "Could not save the target.");
+    }
+  }
+  async function positionTarget(p: LivePositionOut, body: TargetBody) {
+    const m = await onTarget(p, body);
+    await load();
+    return m;
+  }
+
+  if (error) return <p className="card p-4 text-sm text-bear">{error}</p>;
+  if (!data) return <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{[0, 1, 2].map((i) => <span key={i} className="skeleton h-32 rounded-2xl" />)}</div>;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-muted">
+        <span>Every coin in the wallets, read from the chain every 15 s. Set a sell price on any of them: the bot sells it when the price reaches it.</span>
+        <label className="ms-auto flex items-center gap-2">
+          <Toggle on={small} label="Show coins under $1" onClick={() => setSmall(!small)} />
+          Show coins under $1
+        </label>
+      </div>
+      {data.accounts.map((a) => {
+        const coins = a.coins.filter((c) => small || (c.value_usd ?? 0) >= 1 || c.position);
+        const total = a.coins.reduce((s, c) => s + (c.value_usd ?? 0), 0);
+        const hidden = a.coins.length - coins.length;
+        return (
+          <section key={a.name} className="card overflow-hidden">
+            <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line px-5 py-4">
+              <h2 className="num text-[15px] font-semibold">{a.name}</h2>
+              <a href={`https://solscan.io/account/${a.pubkey}`} target="_blank" rel="noreferrer"
+                className="num inline-flex items-center gap-1 text-xs text-muted hover:text-ink">
+                {short(a.pubkey)} <ExternalLink className="size-3" />
+              </a>
+              <span className="text-xs text-muted">{a.coins.length} coins · worth <b className="num font-medium text-ink">{money(total)}</b></span>
+              {hidden > 0 && <span className="text-xs text-faint">{hidden} under $1 hidden</span>}
+            </header>
+            {coins.length === 0 ? <Empty>No coins in this wallet.</Empty> : (
+              <div className="grid items-start gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
+                {coins.map((c) => (
+                  <CoinCard key={c.mint} c={c} account={a.name} onSell={onSell} onPositionTarget={positionTarget}
+                    onHoldTarget={holdTarget} />
+                ))}
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function CoinCard({ c, account, onSell, onPositionTarget, onHoldTarget }: {
+  c: HoldingCoin;
+  account: string;
+  onSell: (p: LivePositionOut, share: number) => Promise<void>;
+  onPositionTarget: (p: LivePositionOut, body: TargetBody) => Promise<string>;
+  onHoldTarget: (account: string, c: HoldingCoin, body: { share: number; target_price: number | null; stop_price: number | null }) => Promise<string>;
+}) {
+  const p = c.position;
+  return (
+    <div className="relative flex flex-col gap-3 overflow-hidden rounded-xl border border-line bg-surface-2/60 p-4 transition hover:border-line-strong">
+      <div className="flex items-start gap-3">
+        <span className={`grid size-9 shrink-0 place-items-center rounded-full text-xs font-bold ${p ? "bg-mint-soft text-mint" : "bg-raised text-ink"}`}>
+          {c.symbol.slice(0, 2).toUpperCase()}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <a href={`/token/solana/${c.mint}`} className="truncate font-semibold hover:text-mint">${c.symbol}</a>
+            {p ? <Badge tone={p.hands_off ? "sky" : "mint"}>{p.hands_off ? "✋ yours" : "bot position"}</Badge>
+              : c.stable ? <Badge tone="muted">stable</Badge> : <Badge tone="muted">not traded by the bot</Badge>}
+          </div>
+          <div className="num text-[11px] text-faint">
+            {c.amount.toLocaleString("en-US", { maximumFractionDigits: c.amount < 1 ? 6 : 2 })} · @ {usdPrice(c.price_usd)}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="num text-base font-semibold text-ink">{c.value_usd != null ? money(c.value_usd) : "—"}</div>
+          {p && p.unrealized_pct != null && <div className={`num text-[11px] ${tone(p.unrealized_pct)}`}>{pct(p.unrealized_pct)}</div>}
+        </div>
+      </div>
+      {!c.stable && (
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-3 text-xs">
+          {p ? (
+            <>
+              <TargetEditor p={{ ...p, price_usd: p.price_usd ?? c.price_usd, value_usd: p.value_usd ?? c.value_usd }}
+                onTarget={onPositionTarget} />
+              <SellButtons p={p} onSell={onSell} />
+            </>
+          ) : (
+            <HoldTarget c={c} onSave={(body) => onHoldTarget(account, c, body)} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Sell price / stop for a coin the bot does not hold yet (price only: there is no entry to count % from). */
+function HoldTarget({ c, onSave }: {
+  c: HoldingCoin;
+  onSave: (body: { share: number; target_price: number | null; stop_price: number | null }) => Promise<string>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [tpx, setTpx] = useState("");
+  const [spx, setSpx] = useState("");
+  const [share, setShare] = useState("100");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const box = "num w-16 rounded-md border border-line bg-carbon px-1.5 py-1 text-center text-xs text-ink outline-none focus:border-gold/70";
+  const wide = "num w-32 rounded-md border border-line bg-carbon px-2 py-1 text-xs text-ink outline-none focus:border-gold/70";
+
+  async function save() {
+    const num = (v: string) => (v.trim() === "" ? null : Number(v.replace(/[$,\s]/g, "")));
+    const t = num(tpx), st = num(spx);
+    if (t == null && st == null) return setMsg("Enter a sell price or a stop price");
+    if ((t != null && !(t > 0)) || (st != null && !(st > 0))) return setMsg("Prices must be numbers above 0");
+    if (t != null && st != null && st >= t) return setMsg("The stop price must be below the sell price");
+    setBusy(true);
+    setMsg("");
+    try {
+      setMsg(await onSave({ share: Math.min(Math.max(Number(share) || 100, 5), 100) / 100, target_price: t, stop_price: st }));
+      setOpen(false);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      {!open ? (
+        <button onClick={() => setOpen(true)}
+          className="inline-flex items-center gap-1 rounded-md border border-gold/50 bg-gold-soft px-2.5 py-1 font-medium text-gold hover:border-gold">
+          <Crosshair className="size-3.5" /> Sell at a price
+        </button>
+      ) : (
+        <span className="flex basis-full flex-col gap-2 rounded-lg border border-gold/30 bg-carbon/60 p-3 text-xs text-muted">
+          <span className="text-faint">now <b className="num font-medium text-ink">{usdPrice(c.price_usd)}</b></span>
+          <span className="flex flex-wrap items-center gap-1.5">
+            Sell <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
+            % when the price reaches $
+            <input className={wide} inputMode="decimal" placeholder={c.price_usd ? String(Number((c.price_usd * 2).toPrecision(3))) : "price"}
+              value={tpx} onChange={(e) => setTpx(e.target.value)} />
+          </span>
+          <span className="flex flex-wrap items-center gap-1.5">
+            Stop: sell everything if it drops to $
+            <input className={wide} inputMode="decimal" placeholder="optional" value={spx} onChange={(e) => setSpx(e.target.value)} />
+          </span>
+          <span className="text-faint">The bot will watch it and sell only at your prices (no other rule touches it).</span>
+          <span className="flex flex-wrap gap-1.5">
+            <button disabled={busy} onClick={save}
+              className="rounded-md bg-gold px-3 py-1 font-semibold text-carbon hover:brightness-110 disabled:opacity-50">
+              Save
+            </button>
+            <button onClick={() => setOpen(false)} className="rounded-md border border-line px-2.5 py-1 text-muted">Cancel</button>
+          </span>
+        </span>
+      )}
+      {msg && <span className="basis-full text-[11px] text-faint">{msg}</span>}
+    </>
   );
 }

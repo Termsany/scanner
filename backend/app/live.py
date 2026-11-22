@@ -986,6 +986,35 @@ async def set_position_target(session: AsyncSession, position_id: int, target_pc
     return True, f"${sym}: " + ", ".join(parts) + (" · only your target/stop sell it" if pos.hands_off else "")
 
 
+async def hold_with_target(session: AsyncSession, account: str, mode: str, mint: str, raw: int, symbol: str | None,
+                           value_usd: float | None, share: float | None, target_price: float | None,
+                           stop_price: float | None) -> tuple[bool, str]:
+    """A sell price / stop price on any coin in an account's wallet (/live, Wallet tab). A coin the bot already holds
+    gets the target on its position; any other coin becomes an owner-managed position (no leader, hands off) worth
+    its value now, so the worker's target check sells it at the owner's prices."""
+    if target_price is None and stop_price is None:
+        return False, "Set a sell price or a stop price"
+    if mint == SOL_MINT:
+        return False, "SOL itself is not sold"
+    pos = (await session.execute(select(LivePosition).where(
+        LivePosition.token_address == mint, LivePosition.status == "open", LivePosition.mode == mode,
+        _acct(account)).order_by(LivePosition.opened_at.desc()))).scalars().first()
+    if pos is None:
+        if raw <= 0:
+            return False, "This wallet no longer holds that coin"
+        if not value_usd or value_usd <= 0:
+            return False, "No price for this coin yet, so it can't be watched"
+        pos = LivePosition(
+            mode=mode, account=account, token_address=mint, symbol=(symbol or mint[:6])[:60], leader_wallet=MANUAL,
+            leader_trade_id=0, status="open", cost_usd=float(value_usd), sol_spent=0.0, tokens_raw=str(raw),
+            tokens_bought_raw=str(raw), hands_off=True,
+            fills=[{"side": "held", "tokens_raw": str(raw), "usd": round(float(value_usd), 2), "at": _now().isoformat()}])
+        session.add(pos)
+        await session.flush()
+    return await set_position_target(session, pos.id, None, share, None, target_price=target_price,
+                                     stop_price=stop_price, hands_off=True)
+
+
 async def realized_24h(session: AsyncSession, mode: str, account: str = "main") -> float:
     since = _now() - timedelta(hours=24)
     v = (await session.execute(select(func.sum(LivePosition.pnl_usd)).where(

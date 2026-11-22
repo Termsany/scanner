@@ -289,6 +289,118 @@ async def live(request: Request, session: Session, _: Auth) -> dict[str, Any]:
     }
 
 
+HOLD_TTL = 15.0
+TOKEN_PROGRAMS = ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+
+
+async def wallet_holdings(http: httpx.AsyncClient, pubkey: str) -> dict[str, dict[str, Any]]:
+    """{mint: {"raw": int, "decimals": int}} of every token one wallet holds (SPL Token and Token-2022)."""
+    s = get_settings()
+    out: dict[str, dict[str, Any]] = {}
+    for program in TOKEN_PROGRAMS:
+        r = await http.post(s.live_rpc_url or s.solana_rpc_url, timeout=10, json={
+            "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+            "params": [pubkey, {"programId": program}, {"encoding": "jsonParsed", "commitment": "confirmed"}]})
+        r.raise_for_status()
+        for acc in ((r.json().get("result") or {}).get("value") or []):
+            info = acc["account"]["data"]["parsed"]["info"]
+            amt = int(info["tokenAmount"]["amount"])
+            if amt <= 0:
+                continue
+            dec = int(info["tokenAmount"]["decimals"])
+            row = out.setdefault(info["mint"], {"raw": 0, "decimals": dec})
+            row["raw"] += amt
+            _decimals.setdefault(info["mint"], dec)
+    return out
+
+
+async def token_meta(http: httpx.AsyncClient, mints: list[str]) -> dict[str, dict[str, Any]]:
+    """{mint: {"symbol", "price"}} from DexScreener (the pair the scanner would pick)."""
+    from app.scanner_worker import _f, select_primary_pair
+
+    out: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(mints), 30):
+        batch = mints[i:i + 30]
+        r = await http.get(f"https://api.dexscreener.com/tokens/v1/solana/{','.join(batch)}", timeout=8)
+        pairs = r.json() if r.status_code == 200 and isinstance(r.json(), list) else []
+        for m in batch:
+            pair = select_primary_pair(Chain.solana, m, pairs)
+            if pair:
+                base = pair.get("baseToken") or {}
+                out[m] = {"symbol": base.get("symbol") if base.get("address") == m else None,
+                          "price": _f(pair.get("priceUsd"))}
+    return out
+
+
+@router.get("/holdings")
+async def holdings(request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    """Every coin in each account's wallet with its value now, and the bot position (and target) it belongs to."""
+    from app.live import STABLES, live_status
+
+    st = await live_status(session, get_settings())
+    http: httpx.AsyncClient = request.app.state.http
+    out = []
+    for a in st["accounts"]:
+        pk = a.get("pubkey")
+        if not pk:
+            continue
+        held = await _cached(f"hold:{pk}", HOLD_TTL, lambda pk=pk: wallet_holdings(http, pk)) or {}
+        mints = sorted(held)
+        meta = (await _cached("meta:" + ",".join(mints), HOLD_TTL, lambda m=mints: token_meta(http, m)) or {}) if mints else {}
+        by_mint = {p.token_address: p for p in a["open"]}
+        coins = []
+        for m, h in held.items():
+            info = meta.get(m) or {}
+            amount = h["raw"] / 10 ** h["decimals"]
+            px = 1.0 if m in STABLES else info.get("price")
+            p = by_mint.get(m)
+            coins.append({
+                "mint": m, "symbol": (p.symbol if p else None) or info.get("symbol") or m[:6],
+                "raw": str(h["raw"]), "amount": amount, "price_usd": px,
+                "value_usd": amount * px if px else None, "stable": m in STABLES,
+                "position": _pos(p) if p else None,
+            })
+        coins.sort(key=lambda c: -(c["value_usd"] or 0))
+        out.append({"name": a["name"], "pubkey": pk, "coins": coins})
+    return {"mode": st["mode"], "accounts": out, "updated_at": datetime.now(timezone.utc).isoformat()}
+
+
+class HoldTargetIn(BaseModel):
+    account: str
+    mint: str
+    share: float | None = 1.0
+    target_price: float | None = None   # sell `share` once the price reaches this (USD per token)
+    stop_price: float | None = None     # sell everything at or below this
+
+
+@router.post("/holdings/target")
+async def holdings_target(body: HoldTargetIn, request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    from app.live import hold_with_target
+
+    s = get_settings()
+    mode = s.live_mode if s.live_mode in ("dry", "live") else None
+    if mode is None:
+        raise HTTPException(400, "Copy trading is off on the server")
+    from app.live import live_status
+
+    st = await live_status(session, s)
+    acct = next((a for a in st["accounts"] if a["name"] == body.account), None)
+    if acct is None or not acct.get("pubkey"):
+        raise HTTPException(404, "No such account")
+    pubkey = acct["pubkey"]
+    http: httpx.AsyncClient = request.app.state.http
+    held = await wallet_holdings(http, pubkey)                 # fresh: the amount the position will hold
+    h = held.get(body.mint)
+    meta = (await token_meta(http, [body.mint])).get(body.mint) or {}
+    value = h["raw"] / 10 ** h["decimals"] * meta["price"] if h and meta.get("price") else None
+    ok, note = await hold_with_target(session, body.account, mode, body.mint, int(h["raw"]) if h else 0, meta.get("symbol"),
+                                      value, body.share, body.target_price, body.stop_price)
+    if not ok:
+        raise HTTPException(400, note)
+    _cache.pop(f"hold:{pubkey}", None)
+    return {"ok": True, "message": note}
+
+
 class PauseIn(BaseModel):
     paused: bool
 
