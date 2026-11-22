@@ -1025,6 +1025,7 @@ async def _main(once: bool) -> None:
             from app.live import LiveTrader
             from app.paper import PaperEngine
             from app.performance import PerformanceTracker
+            from app.loop_watch import watch_loop
 
             await asyncio.gather(scanner.run_forever(), tracker.run_forever(),
                                  PerformanceTracker(scanner.gecko, scanner.settings).run_forever(),
@@ -1033,7 +1034,8 @@ async def _main(once: bool) -> None:
                                  BillingLoop(scanner.settings).run_forever(),
                                  PaperSniper(scanner.settings).run_forever(),
                                  WalletScout(scanner.settings).run_forever(),
-                                 PaperGrad(scanner.settings).run_forever())
+                                 PaperGrad(scanner.settings).run_forever(),
+                                 watch_loop(scanner.settings))
     finally:
         await tracker.close()
         await scanner.close()
