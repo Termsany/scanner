@@ -407,6 +407,9 @@ export interface LivePositionOut {
   tokens_bought: string;
   buy_signature: string | null;
   manual_sell_frac: number | null;
+  target_pct?: number | null;     // owner's target: sell target_share at +target_pct
+  target_share?: number | null;
+  stop_pct?: number | null;       // owner's stop: sell all at this (negative) %
   fills: LiveFill[];
   exit_reason: string | null;
   error: string | null;

@@ -2044,3 +2044,34 @@ def test_direct_buy_that_would_overspend_is_rebuilt_smaller():
     f, calls, amounts = asyncio.run(go())
     assert f.timing["route"] == "pumpportal" and calls["sent"] == 1
     assert amounts[0] == 0.3 and amounts[1] < 0.23            # asked for less SOL the second time
+
+
+def test_owner_target_sells_its_share_then_stop_takes_the_rest():
+    from app.live import set_position_target
+
+    x = PricedExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0,
+                               live_take_capital_at_pct=None))
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)                                      # bought: $30 for 1 token
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        ok, _ = await set_position_target(sess, p.id, 50.0, 0.5, 20)   # sell half at +50%, stop at -20%
+        assert ok and p.stop_pct == -20.0
+        x.price.update(M1=46.0)                                   # +53%: first reading
+        await eng.step(sess)
+        await eng.step(sess)                                      # second reading: sell 50%
+        await sess.refresh(p)
+        half = [c for c in x.calls if c[0] == "sell"]
+        assert half == [("sell", "M1", 500_000)] and p.target_pct is None and p.stop_pct == -20.0
+        x.price.update(M1=20.0)                                   # price -33% from our entry ($30)
+        await eng.step(sess)
+        await eng.step(sess)
+        await sess.refresh(p)
+        return p
+
+    p = _db(body)
+    assert p.status == "closed" and p.exit_reason == "your_stop"

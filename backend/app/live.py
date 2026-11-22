@@ -174,11 +174,11 @@ class Account:
 USER_REASON = {"leader_sold": "exit signal", "leader_trim": "partial exit", "take_capital": "capital taken back",
                "sold_by_hand": "sold by hand", "manual": "sold from your page", "max_hold": "max hold time",
                "time_stop": "time limit, no profit", "take_profit": "profit target", "stop_loss": "stop loss",
-               "quick_time": "time limit"}
+               "quick_time": "time limit", "your_target": "your target", "your_stop": "your stop loss"}
 USER_REASON_AR = {"leader_sold": "إشارة خروج", "leader_trim": "خروج جزئي", "take_capital": "سحب رأس المال",
                   "sold_by_hand": "اتباعت يدوي", "manual": "اتباعت من صفحتك", "max_hold": "انتهت مدة الاحتفاظ",
                   "time_stop": "انتهى الوقت من غير ربح", "take_profit": "وصل هدف الربح", "stop_loss": "وقف الخسارة",
-                  "quick_time": "انتهى الوقت"}
+                  "quick_time": "انتهى الوقت", "your_target": "وصل هدفك", "your_stop": "وقف الخسارة بتاعك"}
 
 
 def user_note(lang: str, key: str, **v) -> str:
@@ -932,6 +932,34 @@ async def request_manual_sell(session: AsyncSession, position_id: int, share: fl
     return True, f"Selling {share * 100:.0f}% of ${pos.symbol or pos.token_address[:6]}…"
 
 
+async def set_position_target(session: AsyncSession, position_id: int, target_pct: float | None,
+                              share: float | None, stop_pct: float | None) -> tuple[bool, str]:
+    """The owner's sell target for one open position (None clears it). The worker checks it every few seconds."""
+    pos = await session.get(LivePosition, position_id)
+    if pos is None or pos.status != "open":
+        return False, "Position is not open"
+    if target_pct is not None and not 1 <= target_pct <= 100_000:
+        return False, "Target must be between +1% and +100000%"
+    if stop_pct is not None:
+        stop_pct = -abs(stop_pct)
+        if not -99 <= stop_pct <= -1:
+            return False, "Stop loss must be between -1% and -99%"
+    share = 1.0 if share is None else share
+    if not 0.05 <= share <= 1.0:
+        return False, "Share must be between 5% and 100%"
+    pos.target_pct, pos.target_share, pos.stop_pct = target_pct, (share if target_pct is not None else None), stop_pct
+    await session.commit()
+    sym = pos.symbol or pos.token_address[:6]
+    if target_pct is None and stop_pct is None:
+        return True, f"Target cleared for ${sym}"
+    parts = []
+    if target_pct is not None:
+        parts.append(f"sell {share * 100:.0f}% at +{target_pct:g}%")
+    if stop_pct is not None:
+        parts.append(f"sell all at {stop_pct:g}%")
+    return True, f"${sym}: " + ", ".join(parts)
+
+
 async def realized_24h(session: AsyncSession, mode: str, account: str = "main") -> float:
     since = _now() - timedelta(hours=24)
     v = (await session.execute(select(func.sum(LivePosition.pnl_usd)).where(
@@ -976,6 +1004,8 @@ class CopyEngine:
         self._quick_at = 0.0                # monotonic time of the last quick-exit check
         self._quick_seen: dict[int, int] = {}   # position id -> quick-exit readings in a row past TP / SL
         self.wake: asyncio.Event | None = None  # set by the WebSocket watcher when a copied wallet trades
+        self._target_at = 0.0                   # last check of owner-set targets
+        self._target_seen: dict[int, int] = {}  # position id -> readings in a row past its target / stop
 
     def update(self, account: Account) -> None:
         """New settings from the /accounts page; takes effect on the next step."""
@@ -1753,10 +1783,65 @@ class CopyEngine:
             await self._sell(session, p, 1.0, "take_profit" if r >= tp else "stop_loss")
             await session.commit()
 
+    async def _targets(self, session: AsyncSession) -> None:
+        """Owner-set targets on single positions (/live): sell the chosen share at +target, everything at the stop.
+        Two readings in a row, like quick exit; Jupiter's price first, DexScreener as a backup."""
+        if time.monotonic() - self._target_at < self.s.live_quick_check_seconds:
+            return
+        self._target_at = time.monotonic()
+        rows = [p for p in (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine(),
+            or_(LivePosition.target_pct.is_not(None), LivePosition.stop_pct.is_not(None))))).scalars().all()
+            if int(p.tokens_raw) > 0 and not p.manual_sell_frac
+            and not any(x.get("side") == "sell_failed" for x in (p.fills or []))]
+        if not rows or not hasattr(self.x, "token_prices"):
+            return
+        mints = sorted({p.token_address for p in rows})
+        prices: dict[str, dict[str, float]] = {}
+        if hasattr(self.x, "token_prices_fast"):
+            try:
+                prices = dict(await self.x.token_prices_fast(mints) or {})
+            except Exception as exc:
+                log.warning("live: target prices failed: %s", exc)
+        missing = [m for m in mints if m not in prices]
+        if missing:
+            try:
+                prices.update(await self.x.token_prices(missing) or {})
+            except Exception as exc:
+                log.warning("live: target backup prices failed: %s", exc)
+        for p in rows:
+            px = prices.get(p.token_address)
+            if not px or not px.get("usd") or not p.cost_usd:
+                continue
+            # price now vs our average entry price (cost / tokens bought): "+50%" means the coin is up 50%
+            bought = int(p.tokens_bought_raw or p.tokens_raw) / 10 ** int(px["decimals"])
+            if bought <= 0:
+                continue
+            r = float(px["usd"]) / (p.cost_usd / bought)
+            hit = None
+            if p.stop_pct is not None and r <= 1 + p.stop_pct / 100:
+                hit = "stop"
+            elif p.target_pct is not None and r >= 1 + p.target_pct / 100:
+                hit = "target"
+            if hit is None:
+                self._target_seen.pop(p.id, None)
+                continue
+            self._target_seen[p.id] = self._target_seen.get(p.id, 0) + 1
+            if self._target_seen[p.id] < 2:
+                continue
+            self._target_seen.pop(p.id, None)
+            share = 1.0 if hit == "stop" else (p.target_share or 1.0)
+            if await self._sell(session, p, share, "your_target" if hit == "target" else "your_stop"):
+                if hit == "target":
+                    p.target_pct = p.target_share = None        # done; a stop, if set, stays for the rest
+                else:
+                    p.target_pct = p.target_share = p.stop_pct = None
+            await session.commit()
+
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
-        for part in (self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits):
+        for part in (self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits, self._targets):
             if self.wake is not None and self.wake.is_set():
                 return
             await part(session)

@@ -326,6 +326,11 @@ class LivePosition(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Owner asked to sell this share by hand (dashboard / Telegram); the worker executes and clears it
     manual_sell_frac: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The owner's own target for this position (set on /live): sell target_share of what is left once the
+    # price is up target_pct over our average entry price; stop_pct (negative) sells everything.
+    target_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class SignalOutcome(Base):

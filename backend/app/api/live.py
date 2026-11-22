@@ -157,6 +157,7 @@ def _pos(p: LivePosition) -> dict[str, Any]:
         "proceeds_usd": p.proceeds_usd, "proceeds_sol": p.proceeds_sol, "pnl_usd": p.pnl_usd,
         "tokens_left": p.tokens_raw, "tokens_bought": p.tokens_bought_raw,
         "buy_signature": p.buy_signature, "manual_sell_frac": p.manual_sell_frac, "fills": p.fills or [], "exit_reason": p.exit_reason, "error": p.error,
+        "target_pct": p.target_pct, "target_share": p.target_share, "stop_pct": p.stop_pct,
         "opened_at": utc(p.opened_at).isoformat() if p.opened_at else None,
         "closed_at": utc(p.closed_at).isoformat() if p.closed_at else None,
     }
@@ -313,6 +314,22 @@ async def sell(position_id: int, body: SellIn, session: Session, _: Auth) -> dic
     if not ok:
         raise HTTPException(409, note)
     return {"queued": True, "message": note}
+
+
+class TargetIn(BaseModel):
+    target_pct: float | None = None   # sell `share` once the position is up this % (None = no target)
+    share: float | None = 1.0         # 0.05 .. 1.0 of what is left
+    stop_pct: float | None = None     # sell everything once it is down this % (negative or positive, read as down)
+
+
+@router.post("/positions/{position_id}/target")
+async def position_target(position_id: int, body: TargetIn, session: Session, _: Auth) -> dict[str, Any]:
+    from app.live import set_position_target
+
+    ok, note = await set_position_target(session, position_id, body.target_pct, body.share, body.stop_pct)
+    if not ok:
+        raise HTTPException(400, note)
+    return {"ok": True, "message": note}
 
 
 # ---- admin overview (/admin page) ---------------------------------------------------

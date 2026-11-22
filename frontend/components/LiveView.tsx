@@ -141,14 +141,95 @@ function SellButtons({
   );
 }
 
+/** The owner's own sell target / stop for one open position. */
+function TargetEditor({
+  p,
+  onTarget,
+}: {
+  p: LivePositionOut;
+  onTarget: (p: LivePositionOut, body: { target_pct: number | null; share: number; stop_pct: number | null }) => Promise<string>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [tp, setTp] = useState(p.target_pct != null ? String(p.target_pct) : "");
+  const [share, setShare] = useState(p.target_share != null ? String(Math.round(p.target_share * 100)) : "100");
+  const [stop, setStop] = useState(p.stop_pct != null ? String(Math.abs(p.stop_pct)) : "");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const box = "num w-14 rounded border border-line bg-carbon px-1 py-0.5 text-center text-[11px] text-ink outline-none focus:border-accent";
+  const has = p.target_pct != null || p.stop_pct != null;
+
+  async function save(clear = false) {
+    setBusy(true);
+    setMsg("");
+    try {
+      const t = clear || tp.trim() === "" ? null : Number(tp);
+      const st = clear || stop.trim() === "" ? null : -Math.abs(Number(stop.replace("-", "")));
+      const sh = Math.min(Math.max(Number(share) || 100, 5), 100) / 100;
+      if ((t != null && !Number.isFinite(t)) || (st != null && !Number.isFinite(st))) {
+        setMsg("Numbers only");
+        return;
+      }
+      setMsg(await onTarget(p, { target_pct: t, share: sh, stop_pct: st }));
+      if (clear) {
+        setTp("");
+        setStop("");
+      }
+      setOpen(false);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span className="mt-1 block text-[11px]">
+      {has && !open && (
+        <span className="block text-gold">
+          🎯 {p.target_pct != null && <>sell {Math.round((p.target_share ?? 1) * 100)}% at +{p.target_pct}%</>}
+          {p.target_pct != null && p.stop_pct != null && " · "}
+          {p.stop_pct != null && <>stop {p.stop_pct}%</>}
+        </span>
+      )}
+      {!open ? (
+        <button onClick={() => setOpen(true)} className="mt-0.5 rounded-md border border-line px-2 py-0.5 text-muted hover:text-ink">
+          {has ? "Edit target" : "Target"}
+        </button>
+      ) : (
+        <span className="mt-1 flex flex-wrap items-center gap-1 text-muted">
+          <span>Sell</span>
+          <input className={box} inputMode="decimal" value={share} onChange={(e) => setShare(e.target.value)} />
+          <span>% at +</span>
+          <input className={box} inputMode="decimal" placeholder="100" value={tp} onChange={(e) => setTp(e.target.value)} />
+          <span>% · stop −</span>
+          <input className={box} inputMode="decimal" placeholder="—" value={stop} onChange={(e) => setStop(e.target.value)} />
+          <span>%</span>
+          <button disabled={busy} onClick={() => save()} className="rounded-md border border-mint/60 px-2 py-0.5 text-mint disabled:opacity-50">
+            Save
+          </button>
+          {has && (
+            <button disabled={busy} onClick={() => save(true)} className="rounded-md border border-line px-2 py-0.5 text-muted disabled:opacity-50">
+              Clear
+            </button>
+          )}
+          <button onClick={() => setOpen(false)} className="rounded-md border border-line px-2 py-0.5 text-muted">Cancel</button>
+        </span>
+      )}
+      {msg && <span className="block text-faint">{msg}</span>}
+    </span>
+  );
+}
+
 function PositionRows({
   rows,
   now,
   onSell,
+  onTarget,
 }: {
   rows: LivePositionOut[];
   now: number;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
+  onTarget?: (p: LivePositionOut, body: { target_pct: number | null; share: number; stop_pct: number | null }) => Promise<string>;
 }) {
   return (
     <>
@@ -221,6 +302,7 @@ function PositionRows({
                 <>
                   <Badge tone="mint" dot>Open</Badge>
                   <SellButtons p={p} onSell={onSell} />
+                  {onTarget && <TargetEditor p={p} onTarget={onTarget} />}
                 </>
               ) : p.status === "failed" ? (
                 <span className="text-bear" title={p.error ?? ""}>
@@ -318,6 +400,16 @@ export function LiveView() {
     return () => clearInterval(id);
   }, []);
 
+  async function setTarget(p: LivePositionOut, body: { target_pct: number | null; share: number; stop_pct: number | null }) {
+    try {
+      const r = await api.liveTarget(password, p.id, body);
+      await load(password);
+      return r.message;
+    } catch (e) {
+      throw new Error(e instanceof ApiError ? e.message : "Could not save the target.");
+    }
+  }
+
   async function sellPosition(p: LivePositionOut, share: number) {
     try {
       await api.liveSell(password, p.id, share);
@@ -412,7 +504,7 @@ export function LiveView() {
           </section>
           <LeaderFeed rows={data.leader_activity} now={tick} />
           {data.accounts.map((a) => (
-            <AccountSection key={a.name} a={a} now={now} onSell={sellPosition} />
+            <AccountSection key={a.name} a={a} now={now} onSell={sellPosition} onTarget={setTarget} />
           ))}
         </div>
       )}
@@ -425,10 +517,12 @@ function AccountSection({
   a: data,
   now,
   onSell,
+  onTarget,
 }: {
   a: LiveAccount;
   now: number;
   onSell: (p: LivePositionOut, share: number) => Promise<void>;
+  onTarget?: (p: LivePositionOut, body: { target_pct: number | null; share: number; stop_pct: number | null }) => Promise<string>;
 }) {
   // failed buys spent nothing: they stay out of the table (count only, in the Budget tile)
   const all = [...data.open, ...data.closed].sort((x, y) =>
@@ -491,7 +585,7 @@ function AccountSection({
                 </tr>
               </thead>
               <tbody>
-                <PositionRows rows={all} now={now} onSell={onSell} />
+                <PositionRows rows={all} now={now} onSell={onSell} onTarget={onTarget} />
               </tbody>
             </table>
           </div>

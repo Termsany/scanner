@@ -131,6 +131,13 @@ export const api = {
       body: JSON.stringify({ share }),
     }),
 
+  liveTarget: (password: string, id: number, body: { target_pct: number | null; share: number; stop_pct: number | null }) =>
+    request<{ ok: boolean; message: string }>(`/api/live/positions/${id}/target`, {
+      method: "POST",
+      ...adm(password),
+      body: JSON.stringify(body),
+    }),
+
   overview: (password: string, signal?: AbortSignal) =>
     request<AdminOverview>("/api/live/overview", { ...adm(password), signal }),
 
