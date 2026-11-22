@@ -92,7 +92,7 @@ def test_a_busy_wallet_does_not_hold_up_another_and_one_wallet_stays_in_order():
         fw = FastWatcher([W, "Busy1111111111111111111111111111111111111111"], S, fetch_tx=lambda s: None)
         fw._subs = {1: "Busy1111111111111111111111111111111111111111", 2: W}
 
-        async def process(wallet, sig, notified=None):
+        async def process(wallet, sig, notified=None, source="helius"):
             if wallet.startswith("Busy"):
                 await asyncio.sleep(0.3)                 # slow: DEX price, retries...
             order.append(sig)
@@ -131,3 +131,23 @@ def test_unconfirmed_transaction_is_given_up_quickly():
 
     tx, took = asyncio.run(go())
     assert tx is None and took < 1.2
+
+
+def test_both_sources_record_a_trade_once():
+    calls = []
+
+    async def go():
+        fw = FastWatcher([W], S, fetch_tx=lambda s: None)
+        fw._subs = {7: W}
+
+        async def process(wallet, sig, notified=None, source="helius"):
+            calls.append((sig, source))
+            return 1
+        fw.process = process
+        assert await fw.handle_signature(W, "SIGP", "pumpportal") == 1                    # PumpPortal first
+        assert await fw.handle_message(json.dumps({"jsonrpc": "2.0", "method": "logsNotification", "params": {
+            "subscription": 7, "result": {"value": {"signature": "SIGP", "err": None}}}})) == 0   # Helius later: skipped
+        await fw.close()
+
+    asyncio.run(go())
+    assert calls == [("SIGP", "pumpportal")]

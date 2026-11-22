@@ -118,6 +118,10 @@ class FastWatcher:
         sig = value.get("signature")
         if not wallet or not sig or value.get("err") is not None:
             return 0                                    # failed transactions move nothing
+        return await self.handle_signature(wallet, sig, "helius")
+
+    async def handle_signature(self, wallet: str, sig: str, source: str) -> int:
+        """A copied wallet's transaction announced by either source; the first one to announce it records it."""
         now = time.monotonic()
         if sig in self._seen:
             return 0
@@ -127,7 +131,7 @@ class FastWatcher:
             self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
         lock = self._wallet_locks.setdefault(wallet, asyncio.Lock())
         async with lock, self._slots:
-            return await self.process(wallet, sig, now)     # `now`: when the notification arrived
+            return await self.process(wallet, sig, now, source)   # `now`: when the notification arrived
 
     def dispatch(self, raw: str | bytes) -> None:
         """Handle a notification in the background so the next one is read at once."""
@@ -140,7 +144,7 @@ class FastWatcher:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def process(self, wallet: str, sig: str, notified: float | None = None) -> int:
+    async def process(self, wallet: str, sig: str, notified: float | None = None, source: str = "helius") -> int:
         t0 = time.monotonic()
         queued = t0 - notified if notified else 0.0
         tx = await self._fetch_tx(sig)
@@ -174,7 +178,7 @@ class FastWatcher:
         wake_engines()
         took = time.monotonic() - t0
         log.info("fast: %s %s %s recorded %.1fs after the block (notified at %.1fs, %.1fs queued, %.1fs to fetch "
-                 "+ record)", wallet[:6], sides, sig[:12], lag, max(lag - took - queued, 0.0), queued, took)
+                 "+ record) via %s", wallet[:6], sides, sig[:12], lag, max(lag - took - queued, 0.0), queued, took, source)
         return stored
 
     # ---- connection -----------------------------------------------------------
@@ -184,6 +188,58 @@ class FastWatcher:
         if not self.rpc or not self.wallets:
             log.info("Fast detection off (needs LIVE_RPC_URL and copied wallets)")
             return
+        loops = [self._helius_loop()]
+        if self.s.pumpportal_api_key and self.s.live_fast_pumpportal:
+            loops.append(self._pumpportal_loop())
+        await asyncio.gather(*loops)
+
+    async def _pumpportal_loop(self) -> None:
+        """PumpPortal's account-trade stream (paid, 0.01 SOL per 10,000 trades): pump.fun and PumpSwap trades of the
+        copied wallets, usually under a second after the block, where Helius's notifications often lag 10-50 s
+        (measured 2026-11-22). Helius stays on for everything else; whichever source is first records the trade."""
+        import websockets
+
+        url, delay = f"wss://pumpportal.fun/api/data?api-key={self.s.pumpportal_api_key}", 1.0
+        wallets = set(self.wallets)
+        while True:
+            try:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2**22,
+                                              open_timeout=15) as ws:
+                    await ws.send(json.dumps({"method": "subscribeAccountTrade", "keys": sorted(wallets)}))
+                    log.info("Fast detection: PumpPortal stream connected for %d wallets", len(wallets))
+                    delay = 1.0
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                        except ValueError:
+                            continue
+                        if msg.get("errors") or (msg.get("message") and "subscribed" not in str(msg["message"])):
+                            log.warning("fast: PumpPortal says %s", str(msg)[:200])
+                            continue
+                        w, sig = msg.get("traderPublicKey"), msg.get("signature")
+                        if w in wallets and sig:
+                            self._spawn(self.handle_signature(w, sig, "pumpportal"))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("fast: PumpPortal stream dropped (%s: %s); reconnecting in %.0fs",
+                            type(exc).__name__, str(exc)[:120], delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60.0)
+
+    def _spawn(self, coro) -> None:
+        async def run() -> None:
+            try:
+                await coro
+            except Exception:
+                log.exception("fast: handling a trade failed")
+        task = asyncio.create_task(run())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _helius_loop(self) -> None:
+        import websockets
+
         url, delay = ws_url(self.rpc), 1.0
         while True:
             try:

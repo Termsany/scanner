@@ -185,6 +185,8 @@ class Settings(BaseSettings):
     live_interval_seconds: float = 3.0
     live_fast_commitment: str = "processed"      # WebSocket notifications: "processed" arrives ~0.5-1 s before "confirmed"
     live_fast_fetch_seconds: float = 3.0          # wait at most this long for a notified transaction to confirm
+    pumpportal_api_key: str | None = None         # PumpPortal data API key (account-trade stream); never logged
+    live_fast_pumpportal: bool = True             # use PumpPortal's stream next to Helius when a key is set
     # Compare open positions with the wallet's real token balance this often; tokens sold by hand (Phantom)
     # are found in the wallet's on-chain history and booked with what they really sold for
     live_reconcile_seconds: float = 120.0
