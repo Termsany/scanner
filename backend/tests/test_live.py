@@ -114,7 +114,7 @@ def test_copy_buy_then_partial_and_full_sell():
     p = pos[0]
     assert p.status == "closed" and p.exit_reason == "leader_sold" and p.tokens_raw == "0"
     assert abs(p.pnl_usd - 30.0) < 1e-6          # bought $30, sold for $60
-    assert any("Bought" in n for n in notes) and any("Closed" in n for n in notes)
+    assert any("Position opened" in n for n in notes) and any("Position closed" in n for n in notes)
 
 
 def test_ignores_other_wallets_old_buys_low_liquidity_and_duplicates():

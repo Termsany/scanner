@@ -15,7 +15,9 @@ import type {
 } from "./types";
 
 // Empty string = same origin (production behind nginx: /api and /ws are proxied to the backend).
-export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
+export const API_URL = (
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
+).replace(/\/$/, "");
 
 export function wsUrl(): string {
   if (process.env.NEXT_PUBLIC_WS_URL) return process.env.NEXT_PUBLIC_WS_URL;
@@ -33,7 +35,10 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: RequestInit & { signal?: AbortSignal },
+): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_URL}${path}`, {
@@ -53,7 +58,10 @@ async function request<T>(path: string, init?: RequestInit & { signal?: AbortSig
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      detail =
+        typeof body.detail === "string"
+          ? body.detail
+          : JSON.stringify(body.detail);
     } catch {
       /* non-JSON error body */
     }
@@ -76,15 +84,24 @@ export const api = {
     request<PaginatedTokens>(`/api/tokens${qs({ ...q })}`, { signal }),
 
   token: (chain: Chain, address: string, signal?: AbortSignal) =>
-    request<TokenDetail>(`/api/tokens/${chain}/${encodeURIComponent(address)}`, { signal }),
+    request<TokenDetail>(
+      `/api/tokens/${chain}/${encodeURIComponent(address)}`,
+      { signal },
+    ),
 
-  chart: (chain: Chain, address: string, interval: ChartInterval, signal?: AbortSignal) =>
+  chart: (
+    chain: Chain,
+    address: string,
+    interval: ChartInterval,
+    signal?: AbortSignal,
+  ) =>
     request<ChartData>(
       `/api/tokens/${chain}/${encodeURIComponent(address)}/chart${qs({ interval, limit: 300 })}`,
       { signal },
     ),
 
-  status: (signal?: AbortSignal) => request<ScannerStatus>("/api/status", { signal }),
+  status: (signal?: AbortSignal) =>
+    request<ScannerStatus>("/api/status", { signal }),
 
   performance: (hours: number, signal?: AbortSignal) =>
     request<Performance>(`/api/performance${qs({ hours })}`, { signal }),
@@ -93,7 +110,10 @@ export const api = {
     request<PaperSummary>(`/api/paper${qs({ hours })}`, { signal }),
 
   live: (password: string, signal?: AbortSignal) =>
-    request<LiveStatus>("/api/live", { headers: { "X-Live-Password": password }, signal }),
+    request<LiveStatus>("/api/live", {
+      headers: { "X-Live-Password": password },
+      signal,
+    }),
 
   livePause: (password: string, paused: boolean) =>
     request<{ paused: boolean }>("/api/live/pause", {
@@ -102,17 +122,41 @@ export const api = {
       body: JSON.stringify({ paused }),
     }),
 
-  liveSell: (password: string, id: number, share: number) =>
-    request<{ queued: boolean; message: string }>(`/api/live/positions/${id}/sell`, {
+  pushKey: () => request<{ public_key: string | null }>("/api/live/push/key"),
+
+  pushSubscribe: (
+    password: string,
+    sub: { endpoint: string; keys: { p256dh: string; auth: string } },
+  ) =>
+    request<{ subscribed: boolean }>("/api/live/push/subscribe", {
       method: "POST",
       headers: { "X-Live-Password": password },
-      body: JSON.stringify({ share }),
+      body: JSON.stringify(sub),
     }),
 
-  signals: (minScore: number, limit = 30, signal?: AbortSignal) =>
-    request<SignalOut[]>(`/api/signals${qs({ min_score: minScore, limit })}`, { signal }),
+  pushTest: (password: string) =>
+    request<{ sent: number }>("/api/live/push/test", {
+      method: "POST",
+      headers: { "X-Live-Password": password },
+    }),
 
-  smartWallets: (signal?: AbortSignal) => request<SmartWalletList>("/api/smart-wallets?limit=50", { signal }),
+  liveSell: (password: string, id: number, share: number) =>
+    request<{ queued: boolean; message: string }>(
+      `/api/live/positions/${id}/sell`,
+      {
+        method: "POST",
+        headers: { "X-Live-Password": password },
+        body: JSON.stringify({ share }),
+      },
+    ),
+
+  signals: (minScore: number, limit = 30, signal?: AbortSignal) =>
+    request<SignalOut[]>(`/api/signals${qs({ min_score: minScore, limit })}`, {
+      signal,
+    }),
+
+  smartWallets: (signal?: AbortSignal) =>
+    request<SmartWalletList>("/api/smart-wallets?limit=50", { signal }),
 
   analyze: (chain: Chain, address: string, signal?: AbortSignal) =>
     request<AIAnalysis>("/api/ai-analyze", {

@@ -3,6 +3,7 @@
 import {
   ArrowLeft,
   ExternalLink,
+  Bell,
   Lock,
   LogOut,
   Pause,
@@ -286,6 +287,65 @@ export function LiveView() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [alerts, setAlerts] = useState<
+    "unknown" | "off" | "on" | "unsupported"
+  >("unknown");
+
+  useEffect(() => {
+    (async () => {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+        setAlerts("unsupported");
+        return;
+      }
+      const reg = await navigator.serviceWorker.getRegistration("/");
+      const sub = await reg?.pushManager.getSubscription();
+      setAlerts(sub ? "on" : "off");
+    })();
+  }, []);
+
+  async function enableAlerts() {
+    setError(null);
+    try {
+      if ((await Notification.requestPermission()) !== "granted") {
+        setError(
+          "The browser blocked notifications. Allow them for this site, then try again.",
+        );
+        return;
+      }
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.ready;
+      const { public_key } = await api.pushKey();
+      if (!public_key) {
+        setError(
+          "Push alerts are not set up on the server yet (VAPID keys missing).",
+        );
+        return;
+      }
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlB64ToBytes(public_key) as BufferSource,
+      });
+      const j = sub.toJSON();
+      await api.pushSubscribe(password, {
+        endpoint: j.endpoint!,
+        keys: { p256dh: j.keys!.p256dh!, auth: j.keys!.auth! },
+      });
+      setAlerts("on");
+    } catch (e) {
+      setError(`Could not turn on alerts: ${(e as Error).message}`);
+    }
+  }
+
+  async function testAlert() {
+    setError(null);
+    try {
+      const r = await api.pushTest(password);
+      if (!r.sent)
+        setError("No device is subscribed yet. Press Enable alerts first.");
+    } catch {
+      setError("Test alert failed.");
+    }
+  }
 
   useEffect(() => {
     const saved = readSaved();
@@ -471,6 +531,15 @@ export function LiveView() {
                 <Pause className="size-3.5" />
               )}
               {data.paused ? "Resume buys" : "Pause buys"}
+            </button>
+          )}
+          {alerts !== "unsupported" && (
+            <button
+              onClick={alerts === "on" ? testAlert : enableAlerts}
+              className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 text-xs text-muted hover:text-ink"
+            >
+              <Bell className="size-3.5" />
+              {alerts === "on" ? "Test alert" : "Enable alerts"}
             </button>
           )}
           <button
@@ -689,4 +758,11 @@ function LeaderFeed({ rows, now }: { rows: LeaderTrade[]; now: number }) {
       </ul>
     </section>
   );
+}
+
+// VAPID public key (base64url) -> bytes for pushManager.subscribe
+function urlB64ToBytes(b64: string): Uint8Array {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }

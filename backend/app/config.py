@@ -108,6 +108,10 @@ class Settings(BaseSettings):
     live_unconditional_wallets: list[str] = Field(default_factory=list)
     # Scanner check before every copy buy (RugCheck + DexScreener, scored like the scanner); see app/screen.py
     live_screen_enabled: bool = True
+    # Web Push alerts for copy trades. Generate once: docker compose exec worker python -m app.push
+    live_vapid_public_key: str | None = None
+    live_vapid_private_key: str | None = None
+    live_vapid_subject: str = "mailto:alerts@example.com"
     live_min_alpha_score: int | None = 70
     live_max_top10_pct: float = 50.0
     live_screen_fail_closed: bool = True          # check unavailable -> skip the buy

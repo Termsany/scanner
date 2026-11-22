@@ -451,8 +451,9 @@ def _share(t: WalletTrade) -> float:
 
 class CopyEngine:
     def __init__(self, executor: Executor, settings: Settings | None = None, notify=None,
-                 account: Account | None = None, screener=None) -> None:
+                 account: Account | None = None, screener=None, push=None) -> None:
         self.x = executor
+        self.push = push or (lambda title, body: asyncio.sleep(0))   # async (title, body): Web Push alerts
         self.screener = screener          # app.screen.TokenScreener, shared by all accounts; None = no check
         self.s = settings or get_settings()
         self.a = account or accounts_from_settings(self.s)[0]
@@ -564,16 +565,20 @@ class CopyEngine:
                                      cost_usd=0.0, error=str(exc)[:300], closed_at=_now()))
             await self.notify(f"{self._tag()} ❌ Buy ${sym} failed: {str(exc)[:200]}")
             return
+        label = t.wallet_label or t.wallet[:6]
         session.add(LivePosition(
             mode=self.x.mode, account=self.a.name, token_address=t.token_address, symbol=t.symbol or "", leader_wallet=t.wallet,
+            leader_label=label[:128],
             leader_trade_id=t.id, status="open", cost_usd=f.usd, sol_spent=f.sol, tokens_raw=str(f.tokens_raw),
             tokens_bought_raw=str(f.tokens_raw), buy_signature=f.signature,
             fills=[{"side": "buy", "sig": f.signature, "sol": f.sol, "tokens_raw": str(f.tokens_raw),
                     "usd": round(f.usd, 2), "at": _now().isoformat()}],
         ))
         log.info("live: BUY %s for %.4f SOL ($%.2f) %s", sym, f.sol, f.usd, f.signature)
-        await self.notify(f"{self._tag()} ✅ Bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
-                          f"Copying {t.wallet_label or t.wallet[:6]}\n{self._tx(f.signature)}")
+        await self.notify(f"{self._tag()} 🆕 Position opened\n"
+                          f"From: {label}\n"
+                          f"${sym} · ${f.usd:,.2f} ({f.sol:.4f} SOL)\n{self._tx(f.signature)}")
+        await self.push(f"🆕 {label}: opened ${sym}", f"${f.usd:,.2f} in · {self.a.name} account")
 
     # ---- sells -------------------------------------------------------------
     async def _on_sell(self, session: AsyncSession, t: WalletTrade) -> None:
@@ -648,10 +653,17 @@ class CopyEngine:
             pos.status, pos.closed_at, pos.exit_reason = "closed", _now(), reason
             pos.pnl_usd = pos.proceeds_usd - pos.cost_usd
         log.info("live: SELL %s %.0f%% for %.4f SOL ($%.2f) %s", sym, share * 100, f.sol, f.usd, f.signature)
-        tail = (f"\nClosed: P&L {'+' if pos.pnl_usd >= 0 else '−'}${abs(pos.pnl_usd):,.2f}" if done
+        label = pos.leader_label or pos.leader_wallet[:6]
+        pnl_txt = f"{'+' if pos.pnl_usd >= 0 else '−'}${abs(pos.pnl_usd):,.2f}" if done else None
+        tail = (f"\nClosed: P&L {pnl_txt}" if done
                 else f"\nStill holding {100 - share * 100:.0f}% of the position")
-        await self.notify(f"{self._tag()} 💰 Sold {share * 100:.0f}% of ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})"
-                          f" · {reason.replace('_', ' ')}{tail}\n{self._tx(f.signature)}")
+        verb = "closed" if done else "reduced"
+        await self.notify(f"{self._tag()} 💰 Position {verb}\n"
+                          f"From: {label}\n"
+                          f"${sym}: sold {share * 100:.0f}% for {f.sol:.4f} SOL (${f.usd:,.2f}) · "
+                          f"{reason.replace('_', ' ')}{tail}\n{self._tx(f.signature)}")
+        await self.push(f"💰 {label}: {verb} ${sym}",
+                        f"sold {share * 100:.0f}% · " + (f"P&L {pnl_txt}" if done else "still holding the rest"))
         return True
 
     async def _housekeeping(self, session: AsyncSession) -> None:
@@ -717,6 +729,14 @@ class LiveTrader:
         except Exception:
             log.warning("live: telegram notify failed", exc_info=True)
 
+    async def _push(self, title: str, body: str) -> None:
+        from app.push import send_all
+
+        try:
+            await send_all(self.s, title, body)
+        except Exception:
+            log.warning("live: push alert failed", exc_info=True)
+
     async def run_forever(self) -> None:
         from app.db import SessionLocal
 
@@ -758,7 +778,7 @@ class LiveTrader:
     async def _run_account(self, a: Account, x: JupiterExecutor, mode: str) -> None:
         from app.db import SessionLocal
 
-        engine = CopyEngine(x, self.s, notify=self._telegram, account=a, screener=self._screener)
+        engine = CopyEngine(x, self.s, notify=self._telegram, account=a, screener=self._screener, push=self._push)
         async with SessionLocal() as session:
             if x.pubkey:
                 await _put(session, _key(PUBKEY, a.name), x.pubkey)

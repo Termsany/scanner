@@ -321,8 +321,21 @@ class LivePosition(Base):
     error: Mapped[str | None] = mapped_column(String(300))
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    leader_label: Mapped[str | None] = mapped_column(String(128), nullable=True)   # e.g. "DULX" for alerts
     # Owner asked to sell this share by hand (dashboard / Telegram); the worker executes and clears it
     manual_sell_frac: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class PushSubscription(Base):
+    """A browser that asked for alerts on /live (Web Push)."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    endpoint: Mapped[str] = mapped_column(String(512), unique=True)
+    p256dh: Mapped[str] = mapped_column(String(128))
+    auth: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class SignalOutcome(Base):

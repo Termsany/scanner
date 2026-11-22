@@ -213,3 +213,45 @@ async def sell(position_id: int, body: SellIn, session: Session, _: Auth) -> dic
     if not ok:
         raise HTTPException(409, note)
     return {"queued": True, "message": note}
+
+
+# ---- Web Push (alerts when a copy trade opens or closes) ----------------------------------------
+@router.get("/push/key")
+async def push_key() -> dict[str, str | None]:
+    """The public VAPID key the browser subscribes with. Not secret."""
+    return {"public_key": get_settings().live_vapid_public_key}
+
+
+class PushKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class PushSubscribeIn(BaseModel):
+    endpoint: str
+    keys: PushKeys
+
+
+@router.post("/push/subscribe")
+async def push_subscribe(body: PushSubscribeIn, session: Session, _: Auth) -> dict[str, bool]:
+    from sqlalchemy import select
+
+    from app.models import PushSubscription
+
+    if not body.endpoint.startswith("https://") or len(body.endpoint) > 512:
+        raise HTTPException(400, "Invalid push endpoint")
+    row = (await session.execute(select(PushSubscription).where(
+        PushSubscription.endpoint == body.endpoint))).scalars().first()
+    if row is None:
+        session.add(PushSubscription(endpoint=body.endpoint, p256dh=body.keys.p256dh[:128], auth=body.keys.auth[:64]))
+    else:
+        row.p256dh, row.auth = body.keys.p256dh[:128], body.keys.auth[:64]
+    await session.commit()
+    return {"subscribed": True}
+
+
+@router.post("/push/test")
+async def push_test(_: Auth) -> dict[str, int]:
+    from app.push import run_test
+
+    return {"sent": await run_test(get_settings())}
