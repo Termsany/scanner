@@ -172,15 +172,33 @@ async def get_performance(
     return await performance_summary(session, hours=hours, min_score=min_score)
 
 
+_PAPER_CACHE: dict[int, tuple[float, dict]] = {}
+_PAPER_LOCKS: dict[int, "asyncio.Lock"] = {}
+PAPER_CACHE_SECONDS = 2.0     # /paper refreshes every 3 s: one build serves every viewer within this window
+
+
 @router.get("/paper")
 async def get_paper(
     session: Session,
     hours: Annotated[int, Query(ge=1, le=24 * 90)] = 24 * 7,
 ) -> dict:
     """Paper-trading results per strategy (simulated $ size per trade, slippage on both fills)."""
+    import asyncio
+    import time
+
     from app.paper import paper_summary
 
-    return await paper_summary(session, hours=hours)
+    hit = _PAPER_CACHE.get(hours)
+    if hit and time.monotonic() - hit[0] < PAPER_CACHE_SECONDS:
+        return hit[1]
+    lock = _PAPER_LOCKS.setdefault(hours, asyncio.Lock())
+    async with lock:                       # concurrent requests wait for one build instead of each running it
+        hit = _PAPER_CACHE.get(hours)
+        if hit and time.monotonic() - hit[0] < PAPER_CACHE_SECONDS:
+            return hit[1]
+        data = await paper_summary(session, hours=hours)
+        _PAPER_CACHE[hours] = (time.monotonic(), data)
+        return data
 
 
 @router.get("/status", response_model=ScannerStatus)

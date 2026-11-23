@@ -16,7 +16,7 @@ const WINDOWS = [
   { hours: 24 * 7, label: "7d" },
   { hours: 24 * 30, label: "30d" },
 ];
-const REFRESH_MS = 20_000;
+const REFRESH_MS = 3_000;      // live: the server caches 2 s, the engine re-prices open trades every few seconds
 
 const REASON: Record<string, string> = {
   take_profit: "Take profit",
@@ -58,16 +58,16 @@ export function PaperView() {
     history.replaceState(null, "", t === "open" ? window.location.pathname : "#history");
   };
 
-  const load = useCallback(async (h: number, signal?: AbortSignal) => {
-    setLoading(true);
+  const load = useCallback(async (h: number, signal?: AbortSignal, quiet = false) => {
+    if (!quiet) setLoading(true);       // the 3 s refresh updates in place, without the loading state
     try {
       setData(await api.paper(h, signal));
       setError(null);
       setNow(Date.now());
     } catch (e) {
-      if ((e as Error).name !== "AbortError") setError("Could not load paper-trading data.");
+      if ((e as Error).name !== "AbortError" && !quiet) setError("Could not load paper-trading data.");
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, []);
 
@@ -75,9 +75,22 @@ export function PaperView() {
     const ctl = new AbortController();
     setData(null);
     load(hours, ctl.signal);
-    const id = setInterval(() => !document.hidden && load(hours, ctl.signal), REFRESH_MS);
+    let busy = false;                   // never stack requests when one is slow
+    const refresh = async () => {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        await load(hours, ctl.signal, true);
+      } finally {
+        busy = false;
+      }
+    };
+    const id = setInterval(refresh, REFRESH_MS);
+    const onVisible = () => { if (!document.hidden) refresh(); };   // back on the tab: refresh at once
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
       ctl.abort();
     };
   }, [hours, load]);

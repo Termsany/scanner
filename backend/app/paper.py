@@ -537,7 +537,9 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
         "hours": hours, "size_usd": s.paper_size_usd, "slippage_pct": s.paper_slippage_pct,
         "generated_at": _now().isoformat(), "strategies": strategies,
         "mirror_wallets": list(s.paper_mirror_wallets),
-        "positions": [_row(r, s) for r in rows[:recent_limit]] if recent_limit else [],
+        # every open trade (the Open tab must show them all), then the newest closed ones
+        "positions": ([_row(r, s) for r in rows if r.status == "open"]
+                      + [_row(r, s) for r in rows if r.status != "open"][:recent_limit]) if recent_limit else [],
     }
 
 
