@@ -1759,7 +1759,7 @@ def _direct_exec(sim=(0, 0, None), pp_status=200, **settings):
 
     kp = Keypair()
     calls = {"quote": 0, "sent": 0, "pp": 0}
-    settings = {"live_best_route": False, "live_best_route_sells": False, **settings}
+    settings = {"live_best_route": False, "live_best_route_sells": False, "live_local_pump_tx": False, **settings}
     x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/",
                                  live_direct_pump_buys=True, **settings), live=True, private_key=str(kp))
     unsigned = bytes(VersionedTransaction(MessageV0.try_compile(kp.pubkey(), [], [], Hash.default()), [kp]))

@@ -201,6 +201,9 @@ class Settings(BaseSettings):
     live_sender_url: str = "https://sender.helius-rpc.com/fast"
     live_sender_swqos_only: bool = True             # one staked path, min tip 0.000005 SOL (all paths: 0.001 SOL)
     live_sender_tip_sol: float = 0.00005
+    # our own pump.fun curve transactions (app/pump_tx.py) instead of asking PumpPortal for one (~0.4 s); every one
+    # is simulated first, and PumpPortal takes over for a coin whose transaction the simulation refuses
+    live_local_pump_tx: bool = True
     live_direct_slippage_cap_pct: float = 15.0      # direct buys with a chase limit: slippage at most this
     live_direct_retry_slippage_pct: float = 40.0    # one retry when PumpPortal's own slippage check fails (6004)
     live_direct_max_overspend_pct: float = 3.0      # simulated cost above the entry size: rebuild smaller / use Jupiter

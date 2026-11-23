@@ -69,6 +69,15 @@ def sender_url(s: Any) -> str | None:
 
 
 _ALTS: dict[str, list[Any]] = {}       # address lookup table -> its addresses (PumpPortal's tables don't change)
+_LOCAL_BAD: dict[str, float] = {}       # mint -> when our own transaction for it failed its simulation
+LOCAL_BAD_SECONDS = 600.0
+
+
+class _Built:
+    """Our own transaction (app/pump_tx.py) where PumpPortal's response is expected: `.content` is the tx."""
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
 
 
 def with_tip(tx_bytes: bytes, kp: Any, tip_lamports: int, tables: dict[str, list[Any]] | None = None) -> str | None:
@@ -147,6 +156,13 @@ class SlippageError(Dropped):
 def _is_slippage(err: object) -> bool:
     s = str(err)
     return "0x1771" in s or "'Custom': 6001" in s or "Custom(6001)" in s
+
+
+def _pump_slippage(err: object) -> bool:
+    """pump.fun's own price checks (6002 too much SOL asked, 6003 too little SOL out, 6004): the price moved, our
+    transaction is fine."""
+    s = str(err)
+    return any(f"'Custom': {c}" in s or f"Custom({c})" in s for c in (6002, 6003, 6004))
 
 
 # mints PumpPortal can't buy (non-SOL quote, unsupported pool): Jupiter straight away for a while
@@ -728,6 +744,40 @@ class JupiterExecutor:
         _took("swap_build", time.monotonic() - t_build)
         return await self._send_tx(base64.b64decode(body["swapTransaction"]), last_valid)
 
+    async def _local_tx(self, mint: str, action: str, amount: int, slip_bps: int) -> tuple[bytes, str] | None:
+        """Our own pump.fun curve buy (`amount` lamports) or sell (`amount` raw tokens), signed, with the Sender tip
+        when Sender is on (app/pump_tx.py). None: not for this coin (graduated, not SOL-paired, failed before):
+        the caller asks PumpPortal."""
+        if (not self.s.live_local_pump_tx or not mint.endswith("pump") or not getattr(self, "kp", None)
+                or time.monotonic() - _LOCAL_BAD.get(mint, -1e9) < LOCAL_BAD_SECONDS):
+            return None
+        from app import pump_tx
+
+        t1 = time.monotonic()
+        try:
+            curve, program, blockhash = await pump_tx.read(self._rpc, mint)
+            tip = int(self.s.live_sender_tip_sol * LAMPORTS) if self.sender_url else 0
+            build = pump_tx.build_buy if action == "buy" else pump_tx.build_sell
+            raw, b64, _ = build(self.kp, mint, curve, program, amount, slip_bps,
+                                self.s.live_direct_priority_fee_sol, blockhash, tip)
+        except pump_tx.NotHere as exc:
+            log.debug("local %s %s: %s", action, mint[:8], exc)
+            return None
+        except Exception as exc:
+            log.info("local %s %s not built: %s", action, mint[:8], str(exc)[:160])
+            return None
+        if tip:
+            self._tipped.add(b64)
+        _took("local_build", time.monotonic() - t1)
+        return raw, b64
+
+    def _local_refused(self, mint: str, action: str, raw_b64: str, err: Any) -> None:
+        """Our own transaction failed its simulation (not a price move): PumpPortal for this coin for a while."""
+        _LOCAL_BAD[mint] = time.monotonic()
+        self._tipped.discard(raw_b64)
+        log.warning("local %s %s refused in simulation (%s): PumpPortal for this coin", action, mint[:8],
+                    str(err)[:200])
+
     async def _load_alts(self, txo: Any) -> None:
         """Read the lookup tables a transaction uses, once each (cached for good)."""
         from solders.address_lookup_table_account import AddressLookupTable
@@ -967,8 +1017,28 @@ class JupiterExecutor:
                 slip = max(min(bps, int(self.s.live_direct_slippage_cap_pct * 100)), 100)
             tok0 = sol0 = None
 
-            async def build_and_simulate(slip_bps: int, amount: int | None = None):
+            async def simulate(raw_b64: str):
                 nonlocal tok0, sol0
+                if tok0 is None:
+                    t1 = time.monotonic()
+                    tok0, sol0 = await before
+                    _took("balances", time.monotonic() - t1)
+                t1 = time.monotonic()
+                try:
+                    res = await self._simulate_buy(raw_b64, mint)
+                except Exception as exc:
+                    raise DirectUnavailable(f"simulation failed: {exc}") from exc
+                _took("simulate", time.monotonic() - t1)
+                return res
+
+            async def build_and_simulate(slip_bps: int, amount: int | None = None):
+                local = await self._local_tx(mint, "buy", amount or lamports, slip_bps)
+                if local is not None:
+                    res = await simulate(local[1])
+                    if not res[2] or _pump_slippage(res[2]):
+                        _took("local", 1)
+                        return _Built(local[0]), local[1], res
+                    self._local_refused(mint, "buy", local[1], res[2])
                 t1 = time.monotonic()
                 try:
                     resp = await self.http.post(PUMPPORTAL_TRADE, data={
@@ -988,17 +1058,7 @@ class JupiterExecutor:
                 except Exception as exc:
                     raise DirectUnavailable(f"PumpPortal sent no transaction: {exc}") from exc
                 raw_b64 = await self._sign_direct(resp.content, txo)
-                if tok0 is None:
-                    t1 = time.monotonic()
-                    tok0, sol0 = await before
-                    _took("balances", time.monotonic() - t1)
-                t1 = time.monotonic()
-                try:
-                    res = await self._simulate_buy(raw_b64, mint)
-                except Exception as exc:
-                    raise DirectUnavailable(f"simulation failed: {exc}") from exc
-                _took("simulate", time.monotonic() - t1)
-                return resp, raw_b64, res
+                return resp, raw_b64, await simulate(raw_b64)
 
             r, raw, (tok_after, lam_after, err) = await build_and_simulate(slip)
             if err and "6004" in str(err):
@@ -1139,8 +1199,22 @@ class JupiterExecutor:
         would bring in, all fees included). Raises DirectUnavailable when it can't (nothing is sent)."""
         from solders.transaction import VersionedTransaction
 
-        decimals = await self.decimals(mint)
         self._warm_sender()
+        slip = bps or self.s.live_slippage_bps
+        local = await self._local_tx(mint, "sell", amount, slip)
+        if local is not None:
+            try:
+                tok_after, lam_after, err = await self._simulate_buy(local[1], mint)
+            except Exception as exc:
+                raise DirectUnavailable(f"simulation failed: {exc}") from exc
+            if not err and held - tok_after >= amount * 0.99 and lam_after / LAMPORTS - sol0 > 0:
+                _took("local", 1)
+                return local[0], local[1], lam_after / LAMPORTS - sol0
+            if err and _pump_slippage(err):
+                self._tipped.discard(local[1])
+                raise DirectUnavailable(f"simulation error: {err}")
+            self._local_refused(mint, "sell", local[1], err or "sold less than asked")
+        decimals = await self.decimals(mint)
         try:
             resp = await self.http.post(PUMPPORTAL_TRADE, data={
                 "publicKey": self.pubkey, "action": "sell", "mint": mint,
