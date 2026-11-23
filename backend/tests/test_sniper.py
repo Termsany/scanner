@@ -15,7 +15,7 @@ def S(**kw):
     base = dict(sniper_paper_enabled=True, sniper_size_usd=30.0, sniper_latency_s=2.0, sniper_fee_pct=1.0,
                 sniper_slippage_pct=2.0, sniper_tp_pct=50.0, sniper_sl_pct=-30.0, sniper_max_hold_s=300.0,
                 sniper_sample_every=1, sniper_max_dev_buy_sol=3.0, sniper_window_s=20.0, sniper_min_buyers=3,
-                sniper_min_net_sol=2.0, sniper_max_open=60)
+                sniper_min_net_sol=2.0, sniper_max_open=60, sniper_momentum_enabled=True)
     base.update(kw)
     return Settings(**base)
 
@@ -112,8 +112,9 @@ def test_flush_writes_open_and_closed_rows_for_the_paper_page():
             await eng.dispose()
 
     rows = asyncio.run(go())
-    assert [(r.strategy, r.token_address, r.status) for r in rows] == [("snipe_all", "M", "closed"),
-                                                                       ("snipe_all", "N", "open")]
+    assert [(r.strategy, r.token_address, r.status) for r in rows] == [
+        ("snipe_all", "M", "closed"), ("snipe_fast_tp", "M", "closed"),
+        ("snipe_all", "N", "open"), ("snipe_fast_tp", "N", "open")]
     assert rows[0].exit_reason == "take_profit" and rows[0].pnl_usd > 0
     assert abs(rows[0].entry_price - 30e-9 * 100) < 1e-12                       # priced in USD
 
@@ -166,12 +167,12 @@ def test_open_rows_show_live_pnl():
                 sn.on_message(trade("buy", v_sol=39.0), 3.0)      # +30%: still open
                 await sn.flush(ses)
             async with mk() as ses:
-                live = (await ses.execute(select(PaperPosition))).scalars().one()
+                live = (await ses.execute(select(PaperPosition).where(PaperPosition.strategy == "snipe_all"))).scalars().one()
             async with mk() as ses:
                 sn.tick(400.0)                                    # max hold: closed by a later flush
                 await sn.flush(ses)
             async with mk() as ses:
-                closed = (await ses.execute(select(PaperPosition))).scalars().one()
+                closed = (await ses.execute(select(PaperPosition).where(PaperPosition.strategy == "snipe_all"))).scalars().one()
             return live, closed
         finally:
             await eng.dispose()
@@ -193,3 +194,26 @@ def test_bad_curve_readings_are_ignored():
     sn.tick(2.0)                                                     # held at 30 vSol / 1.073B
     sn.on_curve("M", _curve(205_000_000, 128.0, 1.0), 3.0)           # in range but a 20x+ jump: ignored
     assert "snipe_all" in sn.watch["M"].held and not sn.closed
+
+
+def test_fast_tp_takes_25_or_leaves_15_off_the_high_and_momentum_is_off_by_default():
+    sn = PaperSniper(S(sniper_min_buyers=99))
+    sn.on_message(create(), 0.0)
+    sn.tick(2.0)
+    assert {"snipe_all", "snipe_fast_tp"} <= set(sn.watch["M"].held)
+    sn.on_message(trade("buy", v_sol=37.6), 3.0)              # +25.3%: fast one out, snipe_all stays
+    assert [c["strategy"] for c in sn.closed] == ["snipe_fast_tp"] and sn.closed[0]["reason"] == "take_profit"
+
+    tr = PaperSniper(S(sniper_min_buyers=99))
+    tr.on_message(create(), 0.0)
+    tr.tick(2.0)
+    tr.on_message(trade("buy", v_sol=36.0), 3.0)              # +20% high
+    tr.on_message(trade("sell", v_sol=30.5), 4.0)             # 15.3% off the high (+1.7%): out
+    assert tr.closed[-1]["strategy"] == "snipe_fast_tp" and tr.closed[-1]["reason"] == "trailing_stop"
+    assert "snipe_all" in tr.watch["M"].held
+
+    off = PaperSniper(Settings(**{**S().model_dump(), "sniper_momentum_enabled": False, "sniper_sample_every": 1000}))
+    off.on_message(create(), 0.0)
+    for i in range(6):
+        off.on_message(trade("buy", sol=1.0, who=f"b{i}", v_sol=31.0 + i), 1.0 + i)
+    assert "snipe_momentum" not in off.watch["M"].decided

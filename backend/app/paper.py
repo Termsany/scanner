@@ -58,7 +58,7 @@ class Strategy:
 # priced and closed by their own loops (app/sniper.py, app/grad.py), second by second
 SELF_PRICED = ("snipe_all", "snipe_momentum", "grad_all", "grad_confirm", "curve_70", "curve_85",
                "curve_70_half", "curve_70_trail", "curve_70_filter", "curve_85_half40", "curve_30_70",
-               "curve_30_70_sl")
+               "curve_30_70_sl", "snipe_fast_tp", "curve_fast19", "curve_fast34", "curve_93_fast")
 
 STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("wallet_follow", "Follow a tracked wallet (exit when it sells)"),
@@ -77,6 +77,8 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("signal_85", "Scanner signal, score >= 85", min_score=85),
     # run by app/sniper.py (own live feed and exits); listed here so /paper shows them
     Strategy("snipe_all", "Sniper: sample of every new pump.fun token", tp_pct=50.0, sl_pct=-30.0, max_hold_minutes=5),
+    Strategy("snipe_fast_tp", "Sniper: same tokens as snipe_all, out at +25% or 15% off the high", tp_pct=25.0,
+             sl_pct=-30.0, max_hold_minutes=5),
     Strategy("grad_all", "Graduation: every pump.fun token just moved to PumpSwap", tp_pct=50.0, sl_pct=-20.0,
              max_hold_minutes=30),
     Strategy("grad_confirm", "Graduation: just moved to PumpSwap and still rising a minute later", tp_pct=50.0,
@@ -103,6 +105,13 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              tp_pct=160.0, sl_pct=0.0, max_hold_minutes=60),
     Strategy("curve_30_70_sl", "Bonding curve: $10, buy at 30% sold, sell all at 70%, stop at -30% (1 h max)",
              tp_pct=160.0, sl_pct=-30.0, max_hold_minutes=60),
+    # from the research (arXiv 2610.39458, 2602.14860): fast early curves, sold just before graduation
+    Strategy("curve_fast19", "Bonding curve: $10, 5 SOL in within 30 s (19% sold), sell at 97% sold, stop -30%",
+             tp_pct=0.0, sl_pct=-30.0, max_hold_minutes=15),
+    Strategy("curve_fast34", "Bonding curve: $10, 10 SOL in within 60 s (34% sold), sell at 97% sold, stop -25%",
+             tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=15),
+    Strategy("curve_93_fast", "Bonding curve: $10, 93% sold within 4 min, sell at 99% (before graduation), stop -20%",
+             tp_pct=0.0, sl_pct=-20.0, max_hold_minutes=10),
 )}
 
 # (chain, [addresses]) -> {address: price}

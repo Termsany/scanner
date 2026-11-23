@@ -40,7 +40,7 @@ from app.models import Chain, PaperPosition
 log = logging.getLogger("sniper")
 
 FEED_URL = "wss://pumpportal.fun/api/data"
-SNIPE_STRATEGIES = ("snipe_all", "snipe_momentum")
+SNIPE_STRATEGIES = ("snipe_all", "snipe_momentum", "snipe_fast_tp")
 
 
 def _now() -> datetime:
@@ -121,6 +121,10 @@ class PaperSniper:
             if self.seen % max(self.s.sniper_sample_every, 1) == 0:
                 w.pending["snipe_all"] = (now + self.s.sniper_latency_s, w.price or 0.0, "new token")
                 w.decided.add("snipe_all")
+                # same tokens, quicker exit (arXiv 2610.39458: tokens with early groups peak more often but
+                # fall faster after the peak): take +SNIPER_FAST_TP_PCT, or leave SNIPER_FAST_TRAIL_PCT off the high
+                w.pending["snipe_fast_tp"] = (now + self.s.sniper_latency_s, w.price or 0.0, "new token, fast exit")
+                w.decided.add("snipe_fast_tp")
             self.watch[mint] = w
             return [mint]
         w = self.watch.get(mint)
@@ -141,7 +145,8 @@ class PaperSniper:
         # tx == "update": price only
         # momentum decision inside the window
         buyers = len(w.buyers) or w.buys          # the curve feed has no addresses: count buys
-        if ("snipe_momentum" not in w.decided and now - w.created <= self.s.sniper_window_s
+        if (self.s.sniper_momentum_enabled and "snipe_momentum" not in w.decided
+                and now - w.created <= self.s.sniper_window_s
                 and buyers >= self.s.sniper_min_buyers and w.net_sol >= self.s.sniper_min_net_sol):
             w.decided.add("snipe_momentum")
             w.pending["snipe_momentum"] = (now + self.s.sniper_latency_s, w.price or 0.0,
@@ -193,8 +198,12 @@ class PaperSniper:
             pct = (w.price / pos["market"] - 1) * 100
             pos["peak"], pos["trough"] = max(pos["peak"], pct), min(pos["trough"], pct)
             reason = None
-            if pct >= self.s.sniper_tp_pct:
+            fast = strat == "snipe_fast_tp"
+            if pct >= (self.s.sniper_fast_tp_pct if fast else self.s.sniper_tp_pct):
                 reason = "take_profit"
+            elif fast and pos["peak"] > 0 and (1 + pct / 100) <= (1 + pos["peak"] / 100) * (
+                    1 - self.s.sniper_fast_trail_pct / 100):
+                reason = "trailing_stop"
             elif pct <= self.s.sniper_sl_pct:
                 reason = "stop_loss"
             elif now - pos["at"] >= self.s.sniper_max_hold_s:

@@ -87,6 +87,13 @@ CURVE_RULES: dict[str, CurveRule] = {
     # a stop, side by side
     "curve_30_70": CurveRule(30.0, "range", exit_at=70.0),
     "curve_30_70_sl": CurveRule(30.0, "range", exit_at=70.0, sl=-30.0),
+    # from the research (2026-11-23). arXiv 2610.39458: SOL in the curve 60 s after launch is the best single
+    # predictor of a token going on. arXiv 2602.14860: reaching a level fast (few, big trades) predicts
+    # graduation best, buying on the level alone loses, and selling just before graduation beats selling after.
+    # Levels on a classic curve: 5 real SOL = 19.3 % sold, 10 SOL = 33.8 %, vSol 95 = 92.6 %, vSol 105 = 96.6 %.
+    "curve_fast19": CurveRule(19.3, "custom", exit_at=96.6, sl=-30.0, size=10.0, max_hold_s=900.0, max_secs=30.0),
+    "curve_fast34": CurveRule(33.8, "custom", exit_at=96.6, sl=-25.0, size=10.0, max_hold_s=900.0, max_secs=60.0),
+    "curve_93_fast": CurveRule(92.6, "custom", exit_at=99.0, sl=-20.0, size=10.0, max_hold_s=600.0, max_secs=240.0),
 }
 CURVE_STRATEGIES: dict[str, float] = {k: r.level for k, r in CURVE_RULES.items()}
 RANGE_LATE_PTS = 10.0   # range: buy only while the curve is at most this many points past the entry level

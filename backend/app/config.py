@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     sniper_min_buyers: int = 5
     sniper_min_net_sol: float = 3.0
     sniper_max_open: int = 60
+    sniper_momentum_enabled: bool = False        # snipe_momentum (counts buys): off since 2026-11-23, it lost and
+                                                 # many small trades predict graduation worse (arXiv 2602.14860)
+    sniper_fast_tp_pct: float = 25.0             # snipe_fast_tp: take profit here...
+    sniper_fast_trail_pct: float = 15.0          # ...or sell once the price is this % below its high
 
     # Paper graduation trades (app/grad.py): pump.fun tokens right after they move to PumpSwap. Simulated only.
     grad_paper_enabled: bool = False

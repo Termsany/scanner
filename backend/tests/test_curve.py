@@ -55,9 +55,9 @@ def test_parse_curve_progress_and_price():
 def test_buy_at_70_and_85_then_sell_at_graduation():
     c = PaperCurve(S())
     assert c.on_create(create(), 0.0) == "M"
-    c.on_curve("M", acct(40), 10.0)
+    c.on_curve("M", acct(15), 10.0)                    # (below the early research levels: they stay out)
     c.on_curve("M", acct(71), 20.0)
-    assert "curve_70" in c.watch["M"].pending and not c.watch["M"].held    # waits for our delay
+    assert "curve_70" in c.watch["M"].pending and "curve_70" not in c.watch["M"].held   # waits for our delay
     c.on_curve("M", acct(74), 22.5)
     assert abs(c.watch["M"].held["curve_70"]["market"] - price_at(74)) / price_at(74) < 1e-6
     c.on_curve("M", acct(86), 30.0)
@@ -96,7 +96,7 @@ def test_stalled_tokens_are_dropped():
     c.on_create(create("A"), 0.0)
     c.on_create(create("B"), 0.0)
     c.on_curve("A", acct(3), 5.0)
-    c.on_curve("B", acct(25), 5.0)
+    c.on_curve("B", acct(25), 35.0)                    # too slow for curve_fast19 (5 SOL within 30 s)
     assert c.tick(121.0) == ["A"]                      # under 10 % after 2 min
     assert c.tick(901.0) == ["B"]                      # under 40 % after 15 min
 
@@ -461,3 +461,29 @@ def test_a_long_feed_outage_closes_open_trades_as_feed_lost():
     c.on_feed_lost(20.0)
     assert c.after_reconnect(20.0 + PaperCurve.FEED_GRACE_S + 1) == []
     assert c.closed and {p["reason"] for p in c.closed} == {"feed_lost"} and not c.watch
+
+
+def test_research_rules_fast_early_curves_and_late_fast_curve():
+    c = PaperCurve(S())
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(20), 20.0)                              # 5 SOL in within 30 s
+    c.on_curve("M", acct(35), 50.0)                              # 10 SOL in within 60 s
+    c.on_curve("M", acct(36), 53.0)
+    held = c.watch["M"].held
+    assert {"curve_fast19", "curve_fast34"} <= set(held) and held["curve_fast19"]["size"] == 10.0
+    c.on_curve("M", acct(93), 150.0)                             # 93% within 4 min
+    c.on_curve("M", acct(93.5), 153.0)
+    assert "curve_93_fast" in c.watch["M"].held
+    c.on_curve("M", acct(97), 160.0)                             # early ones sell at 96.6%, before graduation
+    out = {p["strategy"]: p for p in c.closed}
+    assert out["curve_fast19"]["reason"] == "curve_target" and out["curve_fast19"]["pnl"] > 30
+    assert "curve_93_fast" in c.watch["M"].held
+    c.on_curve("M", acct(99.2), 170.0)
+    assert {p["strategy"]: p["reason"] for p in c.closed}["curve_93_fast"] == "curve_target"
+
+    slow = PaperCurve(S())
+    slow.on_create(create("S"), 0.0)
+    slow.on_curve("S", acct(20), 45.0)                           # 5 SOL but after 45 s: no fast19
+    slow.on_curve("S", acct(35), 70.0)                           # 10 SOL after 70 s: no fast34
+    slow.on_curve("S", acct(36), 75.0)
+    assert not {"curve_fast19", "curve_fast34"} & set(slow.watch["S"].held)
