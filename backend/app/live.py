@@ -412,15 +412,21 @@ class JupiterExecutor:
         return total
 
     async def _pump_prices(self, mints: list[str]) -> dict[str, dict[str, float]]:
-        """Fresh PumpPortal prices for pump.fun / PumpSwap coins (app/pump_prices.py); {} when that feed is off.
-        Asking also keeps those coins subscribed for the next checks."""
-        from app import pump_prices
+        """Live prices of pump.fun / PumpSwap coins: on-chain pool / bonding-curve state (app/pool_prices.py)
+        first, then PumpPortal's trade stream (app/pump_prices.py); {} when both feeds are off. Asking also keeps
+        those coins watched for the next checks."""
+        from app import pool_prices, pump_prices
 
-        pp = pump_prices.PUMP
-        if pp is None or not mints:
+        if not mints:
             return {}
-        pp.request(mints)
-        found = {m: s for m in mints if (s := pp.price_sol(m))}
+        found: dict[str, float] = {}
+        for feed in (pool_prices.POOL, pump_prices.PUMP):
+            if feed is None:
+                continue
+            feed.request(mints)
+            for m in mints:
+                if m not in found and (s := feed.price_sol(m)):
+                    found[m] = s
         if not found:
             return {}
         try:
@@ -2200,6 +2206,12 @@ class LiveTrader:
             pump_prices.PUMP = pump_prices.PumpPrices(self.s)
             self._pump_task = asyncio.create_task(pump_prices.PUMP.run_forever())
             log.info("PumpPortal prices on (max %d coins at once)", self.s.live_pump_prices_max_coins)
+        if self.s.live_pool_prices and self.s.live_rpc_url:
+            from app import pool_prices
+
+            pool_prices.POOL = pool_prices.PoolPrices(self.s)
+            self._pool_task = asyncio.create_task(pool_prices.POOL.run_forever())
+            log.info("On-chain pool prices on (max %d coins at once)", self.s.live_pool_prices_max_coins)
         running: dict[str, tuple[asyncio.Task, str | None, CopyEngine]] = {}
         said: set[str] = set()                 # idle notices already sent
         fast: tuple[asyncio.Task, frozenset[str]] | None = None

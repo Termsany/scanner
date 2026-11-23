@@ -201,6 +201,14 @@ class Settings(BaseSettings):
     live_pump_prices_max_coins: int = 15          # at most this many coins subscribed at once
     live_pump_prices_keep_seconds: float = 60.0   # unsubscribe a coin nobody asked a price for this long
     live_pump_prices_max_age_seconds: float = 90.0  # older last trade: use Jupiter / DexScreener instead
+    # Complete prices from the chain (app/pool_prices.py): Helius pushes every change of a coin's bonding curve
+    # or PumpSwap pool vaults. Replaces the PumpPortal feed above, which misses most trades (1 of 7 seen).
+    live_pool_prices: bool = False
+    live_pool_prices_max_coins: int = 20
+    live_pool_prices_keep_seconds: float = 60.0
+    # PumpSwap coins too (pool vault balances). Off: on a live pool the vault ratio read 6.6% below Jupiter's
+    # sell price (2026-11-23), so it is not the price the pool trades at. Bonding-curve coins are exact.
+    live_pool_prices_amm: bool = False
     loop_freeze_log_seconds: float = 1.0          # worker event loop blocked this long: logged (app/loop_watch.py)
     loop_debug: bool = True                       # asyncio debug: names the step that blocked (small overhead)
     # Compare open positions with the wallet's real token balance this often; tokens sold by hand (Phantom)
