@@ -169,6 +169,11 @@ export const api = {
   curveRuleDelete: (password: string, id: number) =>
     request<{ ok: boolean }>(`/api/live/curve-rules/${id}`, { method: "DELETE", ...adm(password) }),
 
+  paperSwitch: (password: string, strategy: string, body: { paused?: boolean; hidden?: boolean }) =>
+    request<{ ok: boolean }>(`/api/live/paper/${encodeURIComponent(strategy)}/switch`, {
+      method: "POST", ...adm(password), body: JSON.stringify(body),
+    }),
+
   paperReset: (password: string, strategy: string) =>
     request<{ ok: boolean; reset_at: string }>(`/api/live/paper/${encodeURIComponent(strategy)}/reset`, {
       method: "POST", ...adm(password),

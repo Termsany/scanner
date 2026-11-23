@@ -169,6 +169,10 @@ class PaperGrad:
             del w.pending[strat]
             if strat in w.held or sum(len(x.held) for x in self.watch.values()) >= self.s.grad_max_open:
                 continue
+            from app import paper_switches
+
+            if paper_switches.paused(strat):              # paused on /paper
+                continue
             fill = w.price * (1 + self._cost())
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price, "fill": fill,
                    "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0, "frac": 1.0, "proceeds": 0.0,
@@ -215,6 +219,9 @@ class PaperGrad:
         return sol_px * self.sol_usd if self.sol_usd else sol_px
 
     async def flush(self, session) -> int:
+        from app import paper_switches
+
+        await paper_switches.refresh(session)
         """Write opened / partly sold / closed rows (strategy grad_*) so /paper shows them. Each flush may use a
         new session: rows are found again by id."""
         n = 0

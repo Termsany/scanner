@@ -2433,7 +2433,8 @@ class CopyEngine:
             # the owner's exit for this bot (Live -> Curve bots): another curve level, and / or a profit % from
             # our fill; the position sells at whichever comes first
             exit_at = cfg.get("exit_at")
-            target = decision_usd * (curve_live.price_ratio(sig.progress, exit_at) if exit_at else sig.target_ratio)
+            ratio = curve_live.price_ratio(sig.progress, exit_at) if exit_at else sig.target_ratio
+            target = decision_usd * ratio if ratio else None
             tp_pct = cfg.get("tp_pct")
             pos = LivePosition(
                 mode=self.x.mode, account=self.a.name, token_address=sig.mint, symbol=sym[:60],
@@ -2441,6 +2442,8 @@ class CopyEngine:
                 sol_spent=f.sol, tokens_raw=str(f.tokens_raw), tokens_bought_raw=str(f.tokens_raw),
                 buy_signature=f.signature, hands_off=True, target_price=target, target_share=1.0,
                 target_pct=tp_pct, stop_pct=sig.sl_pct, sell_by=now + timedelta(seconds=sig.max_hold_s),
+                trail_pct=sig.trail_pct if not exit_at else None,
+                trail_from=decision_usd * sig.grad_ratio if sig.trail_pct and sig.grad_ratio and not exit_at else None,
                 fills=[{"side": "buy", "sig": f.signature, "sol": f.sol, "tokens_raw": str(f.tokens_raw),
                         "usd": round(f.usd, 2), "at": now.isoformat(), "curve": strat, "why": sig.why,
                         "late_s": round(time.monotonic() - sig.at, 1),
@@ -2450,7 +2453,10 @@ class CopyEngine:
             log.info("live[%s]: curve %s BUY %s for %.4f SOL ($%.2f) %s", self.a.name, strat, sym, f.sol, f.usd,
                      f.signature)
             await self.notify(f"{self._tag()} 📈 curve {strat}: bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
-                              f"{sig.why} · sell at ${target:.6g}{f' or +{tp_pct:g}%' if tp_pct else ''} "
+                              f"{sig.why} · "
+                              + (f"sell at ${target:.6g}" if target else
+                                 f"ride graduation, then {sig.trail_pct:g}% under the high" if sig.trail_pct else "")
+                              + f"{f' or +{tp_pct:g}%' if tp_pct else ''} "
                               f"or {sig.sl_pct:+.0f}% or after "
                               f"{sig.max_hold_s / 60:.0f} min\n{self._tx(f.signature)}")
 
@@ -2512,6 +2518,50 @@ class CopyEngine:
                     p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
             await session.commit()
 
+    async def _trails(self, session: AsyncSession) -> None:
+        """Curve trades that ride graduation: once the price reaches the graduation price (trail_from), follow the
+        high and sell everything trail_pct % under it. Price: the curve (paper engine) while on it, then the
+        PumpSwap pool / Jupiter. The stop and the time limit stay as they are."""
+        from app import curve_live
+
+        rows = [p for p in (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine(), LivePosition.trail_pct.is_not(None)))).scalars().all()
+            if int(p.tokens_raw or 0) > 0 and not p.manual_sell_frac
+            and not any(x.get("side") == "sell_failed" for x in (p.fills or []))]
+        if not rows or not hasattr(self.x, "token_prices"):
+            return
+        prices: dict[str, dict[str, float]] = {}
+        need = [p.token_address for p in rows if curve_live.price(p.token_address) is None]
+        if need:
+            try:
+                fast = getattr(self.x, "token_prices_fast", None)
+                prices = dict(await (fast or self.x.token_prices)(sorted(set(need))) or {})
+            except Exception as exc:
+                log.warning("live: trail prices failed: %s", exc)
+        try:
+            sol_usd = await self.x.sol_price()
+        except Exception:
+            sol_usd = None
+        for p in rows:
+            cpx = curve_live.price(p.token_address)
+            now_usd = cpx * sol_usd if cpx and sol_usd else (prices.get(p.token_address) or {}).get("usd")
+            if not now_usd:
+                continue
+            if p.trail_peak is None and (p.trail_from is None or now_usd >= p.trail_from):
+                p.trail_peak = now_usd                       # graduated: the trail starts here
+                log.info("live[%s]: %s trail on at $%.6g", self.a.name, p.symbol, now_usd)
+            if p.trail_peak is None:
+                continue
+            if now_usd > p.trail_peak:
+                p.trail_peak = now_usd
+            elif now_usd <= p.trail_peak * (1 - p.trail_pct / 100):
+                log.info("live[%s]: %s trailing stop at $%.6g (high $%.6g)", self.a.name, p.symbol, now_usd,
+                         p.trail_peak)
+                if await self._sell(session, p, 1.0, "trailing_stop"):
+                    p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
+                    p.trail_pct = None
+            await session.commit()
+
     async def _publish_prices(self, session: AsyncSession) -> None:
         """Every second: the exact price of the pump coins this account holds (bonding curve from the paper engine,
         else the on-chain pool feed) for the /live page, which otherwise only has DexScreener's lagging one."""
@@ -2562,7 +2612,7 @@ class CopyEngine:
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
-        for part in (self._curve, self._curve_exits, self._publish_prices, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits,
+        for part in (self._curve, self._curve_exits, self._trails, self._publish_prices, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits,
                      self._targets, self._sell_by, self._orders):
             if self.wake is not None and self.wake.is_set():
                 return

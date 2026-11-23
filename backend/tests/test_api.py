@@ -746,3 +746,22 @@ def test_curve_bots_switch_and_entry_per_trade(monkeypatch):
         acct = next(a for a in c.get("/api/live/accounts", headers=h).json()["accounts"] if a["name"] == "main")
         assert acct["curve_bots"]["curve_fast34"]["enabled"] is True
     live_api._fails.clear()
+
+
+def test_paper_switch_pause_and_hide(monkeypatch):
+    from app.api import live as live_api
+
+    s = get_settings()
+    live_api._fails.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "s3cret-pass")
+    h = {"X-Live-Password": "s3cret-pass"}
+    with TestClient(app) as c:
+        assert c.post("/api/live/paper/curve_70/switch", json={"paused": True}).status_code == 401
+        assert c.post("/api/live/paper/nope/switch", headers=h, json={"paused": True}).status_code == 404
+        assert c.post("/api/live/paper/curve_70/switch", headers=h, json={"paused": True, "hidden": True}).status_code == 200
+        st = next(x for x in c.get("/api/paper").json()["strategies"] if x["name"] == "curve_70")
+        assert st["paused"] is True and st["hidden"] is True
+        c.post("/api/live/paper/curve_70/switch", headers=h, json={"hidden": False})
+        st = next(x for x in c.get("/api/paper").json()["strategies"] if x["name"] == "curve_70")
+        assert st["paused"] is True and st["hidden"] is False
+    live_api._fails.clear()

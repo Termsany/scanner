@@ -340,6 +340,11 @@ class LivePosition(Base):
     # only the owner's target / stop or a sell from the page.
     hands_off: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     sell_by: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)   # sell all at this time
+    # curve trades that ride graduation (curve_70_organic): from trail_from (the graduation price, USD per token)
+    # on, sell everything trail_pct % under the highest price since (trail_peak)
+    trail_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trail_from: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trail_peak: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class PriceOrder(Base):

@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, FlaskConical, History, Info, Plus, RefreshCw, RotateCcw, Trash2, Wand2 } from "lucide-react";
+import { Activity, Eye, EyeOff, FlaskConical, History, Info, Pause, Play, Plus, RefreshCw, RotateCcw, Trash2, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { adminCredential, adminWho } from "@/components/AdminAuth";
@@ -49,6 +49,7 @@ export function PaperView() {
   const [strategy, setStrategy] = useState("");   // "" = every strategy
   const [admin, setAdmin] = useState(false);       // the Reset buttons are for the admin only
   const [note, setNote] = useState("");
+  const [showHidden, setShowHidden] = useState(false);
   useEffect(() => {
     adminWho().then(() => setAdmin(true)).catch(() => setAdmin(false));
   }, []);
@@ -107,7 +108,21 @@ export function PaperView() {
     return () => clearInterval(id);
   }, []);
 
-  const mine = (data?.positions ?? []).filter((p) => !strategy || p.strategy === strategy);
+  const hiddenSet = new Set((data?.strategies ?? []).filter((s) => s.hidden).map((s) => s.name));
+  const shownStrategies = (data?.strategies ?? []).filter((s) => showHidden || !s.hidden);
+  const mine = (data?.positions ?? []).filter((p) => (strategy ? p.strategy === strategy : showHidden || !hiddenSet.has(p.strategy)));
+
+  async function flip(s: PaperStrategy, body: { paused?: boolean; hidden?: boolean }) {
+    try {
+      await api.paperSwitch(adminCredential(), s.name, body);
+      setNote(body.paused !== undefined ? `${s.name} ${body.paused ? "paused: no new paper trades" : "running again"}`
+        : `${s.name} ${body.hidden ? "hidden" : "shown again"}`);
+      if (body.hidden && strategy === s.name) setStrategy("");
+      await load(hours);
+    } catch (e) {
+      setNote(e instanceof ApiError ? e.message : "Could not change it");
+    }
+  }
   const open = mine.filter((p) => p.status === "open");
   const closed = mine.filter((p) => p.status !== "open");
   const strat = Object.fromEntries((data?.strategies ?? []).map((s) => [s.name, s]));
@@ -156,11 +171,19 @@ export function PaperView() {
         <>
           {admin && <CurveBuilder onChange={() => load(hours)} />}
 
+          {hiddenSet.size > 0 && (
+            <div className="mb-3 flex items-center gap-2 text-xs text-muted">
+              <Toggle on={showHidden} label="Show hidden strategies" onClick={() => setShowHidden(!showHidden)} />
+              Show hidden strategies ({hiddenSet.size})
+            </div>
+          )}
           {/* strategies: click one to see only its trades */}
           <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {data.strategies.map((s) => (
+            {shownStrategies.map((s) => (
               <StrategyCard key={s.name} s={s} on={strategy === s.name}
                 onClick={() => setStrategy(strategy === s.name ? "" : s.name)}
+                onPause={admin ? () => flip(s, { paused: !s.paused }) : undefined}
+                onHide={admin ? () => flip(s, { hidden: !s.hidden }) : undefined}
                 onReset={admin ? async () => {
                   if (!confirm(`Start ${s.name} from zero? Its older trades stay saved but stop counting here.`)) return;
                   try {
@@ -215,12 +238,15 @@ export function PaperView() {
   );
 }
 
-function StrategyCard({ s, on, onClick, onReset }: {
+function StrategyCard({ s, on, onClick, onReset, onPause, onHide }: {
   s: PaperStrategy;
   on: boolean;
   onClick: () => void;
   onReset?: () => void;
+  onPause?: () => void;
+  onHide?: () => void;
 }) {
+  const small = "inline-flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10px] text-muted";
   const total = s.realized_usd + s.unrealized_usd;
   return (
     <div role="button" tabIndex={0} onClick={onClick} aria-pressed={on}
@@ -232,9 +258,27 @@ function StrategyCard({ s, on, onClick, onReset }: {
         <span className="flex items-center gap-1.5">
           <span className="num text-[11px] font-semibold tracking-[0.14em] text-muted uppercase">{s.name}</span>
           {s.custom && <Badge tone={s.custom.enabled ? "sky" : "muted"}>{s.custom.enabled ? "yours" : "yours · off"}</Badge>}
+          {s.paused && <Badge tone="gold">paused</Badge>}
+          {s.hidden && <Badge tone="muted">hidden</Badge>}
         </span>
         <span className="flex items-center gap-1.5">
           {on && <Badge tone="mint">filter</Badge>}
+          {onPause && (
+            <button type="button" title={s.paused ? "Run it again" : "Pause: no new paper trades (open ones still close)"}
+              aria-label={`${s.paused ? "Resume" : "Pause"} ${s.name}`}
+              onClick={(e) => { e.stopPropagation(); onPause(); }}
+              className={`${small} hover:border-gold/60 hover:text-gold`}>
+              {s.paused ? <Play className="size-3" /> : <Pause className="size-3" />}
+            </button>
+          )}
+          {onHide && (
+            <button type="button" title={s.hidden ? "Show it on the page" : "Hide it from the page (it keeps running)"}
+              aria-label={`${s.hidden ? "Show" : "Hide"} ${s.name}`}
+              onClick={(e) => { e.stopPropagation(); onHide(); }}
+              className={`${small} hover:border-line-strong hover:text-ink`}>
+              {s.hidden ? <Eye className="size-3" /> : <EyeOff className="size-3" />}
+            </button>
+          )}
           {onReset && (
             <button type="button" title="Start this strategy from zero" aria-label={`Reset ${s.name}`}
               onClick={(e) => { e.stopPropagation(); onReset(); }}

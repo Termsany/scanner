@@ -45,7 +45,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app import curve_live
+from app import curve_live, paper_switches
 from app.config import Settings, get_settings
 from app.models import Chain, PaperPosition
 
@@ -84,10 +84,15 @@ class CurveRule:
     # copycats (2026-11-23, BOBCAT): a coin named like one launched shortly before it (CURVE_COPYCAT_WINDOW_S) is
     # usually a copy riding the original's name, pumped by one wallet; on the day's curve_fast34 trades 1 of 26 won
     skip_copycat: bool = False
+    # (2026-11-23, from all the day's curve trades) real trading around the decision, and launch tools to avoid
+    min_buys_60s: int | None = None   # at least this many buys in the 60 s before the decision
+    min_sells_60s: int | None = None  # and this many sells (two-way trading, not one bot buying)
+    skip_hosts: tuple[str, ...] = ()  # metadata hosts of bundler launch tools (most of their coins were dumped)
 
     def waits(self) -> bool:
         return (self.min_fill is not None or self.max_dev is not None or self.min_rise is not None
-                or self.skip_copycat)
+                or self.skip_copycat or self.min_buys_60s is not None or self.min_sells_60s is not None
+                or bool(self.skip_hosts))
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -117,6 +122,19 @@ CURVE_RULES: dict[str, CurveRule] = {
                                   min_fill=40.0, min_rise=5.0, max_dev=25.0, skip_copycat=True,
                                   title="curve_fast34 with momentum: still bought after the signal (up 5+ points, "
                                         "40%+ at the fill), dev under 25%, no copycat names"),
+    # from the day's 1,656 curve trades (2026-11-23): mom plus real buyers in the minute before the signal and
+    # no coins from the two bundler launch tools whose coins were dumped 68-70 % of the time
+    "curve_fast34_mom2": CurveRule(33.8, "custom", exit_at=96.6, sl=-25.0, size=10.0, max_hold_s=900.0, max_secs=60.0,
+                                   min_fill=40.0, min_rise=5.0, max_dev=25.0, skip_copycat=True, min_buys_60s=1,
+                                   skip_hosts=("meta.thecompanysol.fun", "ipfs2.extraction.live"),
+                                   title="curve_fast34_mom + bought in the minute before the signal, no bundler "
+                                         "launch tools"),
+    # coins at 70 % with organic two-way trading that got there within 5 min: they reach graduation; held through
+    # it and sold 30 % under the high on PumpSwap (curve_70 on those coins: +$135 on 41 trades)
+    "curve_70_organic": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
+                                  min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True, grad_trail=30.0,
+                                  title="curve 70% with organic trading (10+ buys, 5+ sells in a minute, dev under "
+                                        "25%) within 5 min; rides graduation, sells 30% under the high, stop -25%"),
     # user's choice (2026-11-23): curve_70 with real money at $10. curve_70 sells at graduation, which a real
     # account can't (it needs an exit level and a stop), so this is curve_70 with the exit just before
     # graduation (99 % sold, ~+225 % on a classic curve), the same -25 % stop and 60 min max hold.
@@ -185,6 +203,15 @@ def _now() -> datetime:
 
 _LOOKALIKE = str.maketrans({"а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p",
                             "с": "c", "т": "t", "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d"})
+
+
+def _host(uri: str | None) -> str:
+    from urllib.parse import urlparse
+
+    try:
+        return urlparse(uri or "").netloc.lower()
+    except ValueError:
+        return ""
 
 
 def name_key(symbol: str) -> str:
@@ -483,6 +510,17 @@ class PaperCurve:
                 continue                                  # nobody kept buying after the signal
             if rule.skip_copycat and w.copycat:
                 continue                                  # a copy of a coin launched just before it
+            if rule.min_buys_60s is not None and (pre.get("buys_60s") or 0) < rule.min_buys_60s:
+                continue                                  # nobody but the launch bought
+            if rule.min_sells_60s is not None and (pre.get("sells_60s") or 0) < rule.min_sells_60s:
+                continue                                  # one-way buying: a bot, not a market
+            if rule.skip_hosts and _host(w.uri) in rule.skip_hosts:
+                continue                                  # launched with a bundler tool
+            if paper_switches.paused(strat):              # paused on /paper: no paper trade, live signal still goes
+                if rule.waits() and self.live_signals and strat in self.live_signals:
+                    curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
+                                       f"{why}, {w.progress:.0f}% at the fill", rule.max_hold_s or self.s.curve_max_hold_s)
+                continue
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,
                    "fill": w.price * (1 + self._cost()), "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
                    "size": self._size(strat), "rem": 1.0, "proceeds": 0.0, "half": False, "gpeak": None,
@@ -905,6 +943,12 @@ class PaperCurve:
 
     async def _load_custom(self, SessionLocal) -> None:
         from app.models import CurveCustom
+
+        try:
+            async with SessionLocal() as session:
+                await paper_switches.refresh(session, force=True)
+        except Exception:
+            log.warning("curve (paper): could not read the paper switches", exc_info=True)
 
         try:
             async with SessionLocal() as session:

@@ -30,10 +30,12 @@ class CurveSignal:
     at: float               # monotonic time of the paper decision
     px_sol: float           # coin price (SOL) at the decision
     progress: float         # curve % sold at the decision
-    target_ratio: float     # price at the rule's exit level / price now (classic curve)
+    target_ratio: float | None   # price at the rule's exit level / price now (classic curve); None: no exit level
     sl_pct: float           # stop, % from our own fill (negative)
     max_hold_s: float
     why: str
+    trail_pct: float | None = None   # rides graduation: from the graduation price, sell this % under the high
+    grad_ratio: float | None = None  # price at graduation / price now (classic curve)
 
 
 SIGNALS: deque[CurveSignal] = deque(maxlen=500)
@@ -47,11 +49,13 @@ def price_ratio(from_pct: float, to_pct: float) -> float:
 
 
 def live_rules() -> dict[str, Any]:
-    """Curve rules that can be traded for real: they need an exit level and a stop."""
+    """Curve rules that can be traded for real: they need a stop and an exit (an exit level, or riding the
+    graduation on a trailing stop)."""
     from app.curve import CURVE_RULES
 
     return {k: r for k, r in CURVE_RULES.items()
-            if r.mode in ("custom", "range") and r.exit_at is not None and r.sl is not None}
+            if r.mode in ("custom", "range") and r.sl is not None
+            and (r.exit_at is not None or getattr(r, "grad_trail", None) is not None)}
 
 
 def publish(strategy: str, rule: Any, mint: str, symbol: str, px_sol: float, progress: float, why: str,
@@ -60,7 +64,9 @@ def publish(strategy: str, rule: Any, mint: str, symbol: str, px_sol: float, pro
     if strategy not in live_rules() or not px_sol:
         return None
     sig = CurveSignal(next(_ids), strategy, mint, symbol, time.monotonic() if now is None else now, px_sol,
-                      progress, price_ratio(progress, rule.exit_at), float(rule.sl), float(max_hold_s), why)
+                      progress, price_ratio(progress, rule.exit_at) if rule.exit_at is not None else None,
+                      float(rule.sl), float(max_hold_s), why,
+                      trail_pct=getattr(rule, "grad_trail", None), grad_ratio=price_ratio(progress, 100.0))
     SIGNALS.append(sig)
     try:
         from app.fast_watch import WAKE

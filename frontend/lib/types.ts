@@ -346,6 +346,8 @@ export interface PaperStrategy {
   worst_pct: number | null;
   exit_reasons: Record<string, number>;
   reset_at?: string | null;       // the owner reset its numbers: only trades opened since count
+  paused?: boolean;               // no new paper trades (open ones still managed)
+  hidden?: boolean;               // left off the page unless "show hidden" is on
   custom?: { id: number; enabled: boolean } | null;   // one of the owner's own curve strategies
 }
 
@@ -935,6 +937,7 @@ export interface CurveBotRule {
   exit_at: number | null;
   sl: number | null;
   max_hold_s: number | null;
+  grad_trail?: number | null;   // rides graduation, then sells this % under the high
   paper_24h: { trades: number; pnl_usd: number };
 }
 

@@ -342,3 +342,40 @@ def test_bot_exit_override_curve_level_and_profit_whichever_first():
     finally:
         curve_live.unwatch("curve", set())
     assert ("sell", "EXITpump", 1_000_000) in x.calls and p.exit_reason == "your_target"
+
+
+def test_curve_70_organic_trades_for_real_and_trails_after_graduation():
+    s = S()
+    x = FakeExec()
+    assert "curve_70_organic" in curve_live.live_rules() and "curve_fast34_mom2" in curve_live.live_rules()
+    prices = {"v": None}
+
+    class X(FakeExec):
+        async def token_prices(self, mints):
+            return {m: {"usd": prices["v"], "decimals": 6} for m in mints} if prices["v"] else {}
+
+    x = X()
+    a = Account("curve", 10, 100, 50, [], curve_bots={"curve_70_organic": {"size_usd": None}})
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=a)
+        await eng.step(sess)
+        curve_live.publish("curve_70_organic", CURVE_RULES["curve_70_organic"], "ORGpump", "O", 2e-7, 70.0, "x",
+                           3600)
+        await eng.step(sess)                            # bought $10 for 1 token: $10 each
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        assert p.target_price is None and p.trail_pct == 30.0 and p.stop_pct == -25.0
+        grad = 2e-7 * 150 * curve_live.price_ratio(70.0, 100.0)
+        assert abs(p.trail_from - grad) < 1e-12
+        for v in (grad * 0.9, grad * 1.1, grad * 2.0, grad * 1.5, grad * 1.3):   # trail on at graduation, high 2x
+            prices["v"] = v
+            await eng.step(sess)
+            if p.status != "open":
+                break
+        return p
+
+    try:
+        p = _db(body)
+    finally:
+        curve_live.unwatch("curve", set())
+    assert p.status == "closed" and p.exit_reason == "trailing_stop"     # 1.5 holds (over 1.4), 1.3 sells

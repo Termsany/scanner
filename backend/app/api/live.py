@@ -484,6 +484,28 @@ async def paper_reset(strategy: str, session: Session, _: Auth) -> dict[str, Any
     return {"ok": True, "strategy": strategy, "reset_at": at.isoformat()}
 
 
+class PaperSwitchIn(BaseModel):
+    paused: bool | None = None          # no new paper trades (open ones are still managed)
+    hidden: bool | None = None          # left off the /paper page
+
+
+@router.post("/paper/{strategy}/switch")
+async def paper_switch(strategy: str, body: PaperSwitchIn, session: Session, _: Auth) -> dict[str, Any]:
+    """Admin: pause a paper strategy or hide it from /paper. Pausing a curve rule on paper does not stop the live
+    accounts that trade it."""
+    from app import paper_switches
+    from app.paper import STRATEGIES, custom_strategies
+
+    if strategy not in STRATEGIES and strategy not in {c.name for c in await custom_strategies(session)}:
+        raise HTTPException(404, "No such paper strategy")
+    await paper_switches.set_switch(session, strategy, paused=body.paused, hidden=body.hidden)
+    await session.commit()
+    from app.api.tokens import _PAPER_CACHE
+
+    _PAPER_CACHE.clear()
+    return {"ok": True, "strategy": strategy, **body.model_dump(exclude_none=True)}
+
+
 MAX_CUSTOM_CURVE = 12        # the owner's curve strategies switched on at once
 
 
@@ -888,6 +910,7 @@ async def curve_bots(session: Session, _: Auth) -> dict[str, Any]:
         n, pnl = paper.get(k, (0, 0.0))
         out_rules.append({"name": k, "title": STRATEGIES[k].title if k in STRATEGIES else k, "level": r.level,
                           "exit_at": r.exit_at, "sl": r.sl, "max_hold_s": r.max_hold_s,
+                          "grad_trail": getattr(r, "grad_trail", None),
                           "paper_24h": {"trades": n, "pnl_usd": round(float(pnl or 0), 2)}})
     accounts = []
     for row in await rows(session, s):

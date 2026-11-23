@@ -182,6 +182,11 @@ class PaperSniper:
             if sum(len(x.held) for x in self.watch.values()) >= self.s.sniper_max_open:
                 del w.pending[strat]
                 continue
+            from app import paper_switches
+
+            if paper_switches.paused(strat):              # paused on /paper
+                del w.pending[strat]
+                continue
             fill = w.price * (1 + self._cost())
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price, "fill": fill,
                    "decision": decision_px, "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
@@ -235,6 +240,9 @@ class PaperSniper:
 
     # ---- persistence ----------------------------------------------------------
     async def flush(self, session) -> int:
+        from app import paper_switches
+
+        await paper_switches.refresh(session)
         """Write opened / closed paper positions (strategy snipe_*) so /paper shows them."""
         n = 0
         rows: dict[tuple[str, str], PaperPosition] = {}

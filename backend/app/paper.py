@@ -59,7 +59,7 @@ class Strategy:
 SELF_PRICED = ("snipe_all", "snipe_momentum", "grad_all", "grad_confirm", "curve_70", "curve_85",
                "curve_70_half", "curve_70_trail", "curve_70_filter", "curve_85_half40", "curve_30_70",
                "curve_30_70_sl", "snipe_fast_tp", "curve_fast19", "curve_fast34", "curve_93_fast",
-               "curve_70_live", "curve_fast34_mom")
+               "curve_70_live", "curve_fast34_mom", "curve_fast34_mom2", "curve_70_organic")
 
 STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("wallet_follow", "Follow a tracked wallet (exit when it sells)"),
@@ -113,6 +113,11 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=15),
     Strategy("curve_93_fast", "Bonding curve: $10, 93% sold within 4 min, sell at 99% (before graduation), stop -20%",
              tp_pct=0.0, sl_pct=-20.0, max_hold_minutes=10),
+    Strategy("curve_fast34_mom2", "Bonding curve: curve_fast34_mom + bought in the minute before the signal, no "
+             "bundler launch tools", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=15),
+    Strategy("curve_70_organic", "Bonding curve: 70% with organic trading (10+ buys, 5+ sells a minute, dev under 25%) "
+             "within 5 min; rides graduation, sells 30% under the high", tp_pct=0.0, sl_pct=-25.0,
+             max_hold_minutes=60),
     Strategy("curve_fast34_mom", "Bonding curve: curve_fast34 only if still bought after the signal (up 5+ points, "
              "40%+ sold at the fill), the dev holds under 25% and no copycat name", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=15),
     # user's choice (2026-11-23): curve_70 traded with real money ($10); sells just before graduation
@@ -173,8 +178,10 @@ async def _open_keys(session: AsyncSession) -> set[tuple[str, str, str]]:
 def _open(session: AsyncSession, keys: set, strategy: Strategy, *, chain: Chain, token: str, symbol: str,
           price: float, trigger: str, at: datetime, s: Settings, wallet: str | None = None,
           leader_trade_id: int | None = None) -> PaperPosition | None:
+    from app import paper_switches
+
     key = (strategy.name, chain.value, token)
-    if key in keys or not price or price <= 0:
+    if key in keys or not price or price <= 0 or paper_switches.paused(strategy.name):
         return None
     keys.add(key)
     pos = PaperPosition(
@@ -195,8 +202,11 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
                           prices: PriceFetcher | None = None) -> int:
     """`prices`: the market price when this runs (a few seconds after the trade, like the live bot), so a wallet
     buy is entered where we could really buy, not at the wallet's own price."""
+    from app import paper_switches
+
     s = s or get_settings()
     opened = 0
+    await paper_switches.refresh(session)
     keys = await _open_keys(session)
     now = _now()
     mirror_set = set(s.paper_mirror_wallets)
@@ -588,7 +598,10 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
         select(PaperPosition).where(or_(PaperPosition.entry_time >= since, PaperPosition.status == "open"))
         .order_by(PaperPosition.entry_time.desc())
     )).scalars().all()
+    from app import paper_switches
+
     resets = await paper_resets(session)
+    paused, hidden = await paper_switches.read(session)
     customs = await custom_strategies(session)
     custom_rows = {c.name: c for c in customs}
     rows = [r for r in rows if r.strategy not in resets or (utc(r.entry_time) or since) >= resets[r.strategy]]
@@ -618,6 +631,7 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
             "worst_pct": round(min(r.pnl_pct or 0 for r in closed), 2) if closed else None,
             "exit_reasons": dict(reasons),
             "reset_at": resets[strat.name].isoformat() if strat.name in resets else None,
+            "paused": strat.name in paused, "hidden": strat.name in hidden,
             "custom": {"id": custom_rows[strat.name].id, "enabled": custom_rows[strat.name].enabled}
                       if strat.name in custom_rows else None,
         })

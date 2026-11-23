@@ -1357,7 +1357,7 @@ function CurveBotsPanel({ password }: { password: string }) {
 
   const rule = (r: CurveBots["rules"][number]) => [
     `buy at ${r.level}%`,
-    r.exit_at != null ? `sell at ${r.exit_at}%` : null,
+    r.exit_at != null ? `sell at ${r.exit_at}%` : r.grad_trail != null ? `rides graduation, then ${r.grad_trail}% under the high` : null,
     r.sl != null ? `stop ${r.sl}%` : null,
     r.max_hold_s ? `max ${Math.round(r.max_hold_s / 60)} min` : null,
   ].filter(Boolean).join(" · ");

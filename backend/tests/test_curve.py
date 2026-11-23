@@ -562,3 +562,60 @@ def test_mom_needs_a_real_rise_after_the_signal_not_a_launch_already_past_40():
     c.on_curve("REAL", acct(36.6), 10.1)
     c.on_curve("REAL", acct(42.7), 12.6)              # +6 points and past 40 %
     assert "curve_fast34_mom" in c.watch["REAL"].held
+
+
+def test_mom2_needs_buyers_before_the_signal_and_skips_bundler_launch_tools():
+    def run(mint, uri, with_buy):
+        c = PaperCurve(S())
+        c.on_create({**create(mint), "symbol": mint, "uri": uri, "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+        if with_buy:
+            c.on_curve(mint, acct(20), 2.0)
+            c.on_curve(mint, acct(25), 3.0)              # a buy after the launch
+        c.on_curve(mint, acct(34), 5.0)
+        c.on_curve(mint, acct(45), 7.5)
+        return c.watch[mint].held
+
+    assert "curve_fast34_mom2" in run("A1", "https://ipfs.io/ipfs/x", True)
+    held = run("A2", "https://ipfs.io/ipfs/x", False)
+    assert "curve_fast34_mom2" not in held and "curve_fast34_mom" in held
+    assert "curve_fast34_mom2" not in run("A3", "https://meta.thecompanysol.fun/x.json", True)
+
+
+def test_curve_70_organic_needs_two_way_trading_and_rides_graduation():
+    def run(mint, two_way):
+        c = PaperCurve(S())
+        c.on_create({**create(mint), "symbol": mint, "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+        t, p = 100.0, 40.0
+        c.on_curve(mint, acct(p), t)
+        for i in range(28):                             # a minute of trading before 70 %
+            t += 2
+            p += 1.3 if (not two_way or i % 3 != 2) else -0.5
+            c.on_curve(mint, acct(p), t)
+        c.on_curve(mint, acct(70), t + 1)
+        c.on_curve(mint, acct(72), t + 3.5)
+        return c
+
+    c = run("O1", True)
+    assert "curve_70_organic" in c.watch["O1"].held
+    c.on_curve("O1", acct(100, complete=True), 200.0)  # graduation: it keeps riding (trailing stop)
+    assert "curve_70_organic" in c.watch["O1"].held
+    assert "curve_70_organic" not in run("O2", False).watch["O2"].held     # buys only: no sells
+
+
+def test_paused_paper_strategy_opens_nothing_but_still_signals_live():
+    from app import curve_live, paper_switches
+
+    paper_switches.PAUSED = {"curve_fast34_mom", "curve_fast34"}
+    try:
+        start = curve_live.last_id()
+        c = PaperCurve(S())
+        c.live_signals = {"curve_fast34_mom", "curve_fast34"}
+        c.on_create({**create("P"), "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+        c.on_curve("P", acct(34), 5.0)
+        c.on_curve("P", acct(45), 7.5)
+        held = c.watch["P"].held
+        assert "curve_fast34_mom" not in held and "curve_fast34" not in held and "curve_30_70" in held
+        sent = {s.strategy for s in curve_live.take(start, {"curve_fast34_mom", "curve_fast34"}, 1e9)[0]}
+        assert sent == {"curve_fast34_mom", "curve_fast34"}
+    finally:
+        paper_switches.PAUSED = set()
