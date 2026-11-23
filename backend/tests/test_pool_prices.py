@@ -58,31 +58,44 @@ def test_curve_and_pool_updates_reprice_and_completion_asks_to_resolve_again():
     assert pp.price_sol("P2pump") is None                               # connection down: no stale prices
 
 
-def test_resolve_finds_the_curve_or_the_pumpswap_vaults():
-    curve = curve_address(MINT)
+VBASE = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"      # any valid keys stand in for the vaults
+VSOL = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
+
+def _pool_b64(vq_sol: float) -> str:
+    from solders.pubkey import Pubkey
+
+    raw = bytearray(301)
+    raw[139:171] = bytes(Pubkey.from_string(VBASE))
+    raw[171:203] = bytes(Pubkey.from_string(VSOL))
+    raw[245:261] = int(vq_sol * 1e9).to_bytes(16, "little", signed=True)
+    return base64.b64encode(bytes(raw)).decode()
+
+
+def test_resolve_finds_the_curve_or_the_canonical_pumpswap_pool():
+    from app.pool_prices import AMM_PROGRAM, parse_pool, pool_address
+
+    curve, pool = curve_address(MINT), pool_address(MINT)
     state = {"curve": _curve_b64(45.0, 700_000_000.0)}
+    assert parse_pool(_pool_b64(17.5)) == (VBASE, VSOL, 17.5) and parse_pool(base64.b64encode(b"x" * 40).decode()) is None
 
     def handler(req: httpx.Request) -> httpx.Response:
-        if "dexscreener" in req.url.host:
-            return httpx.Response(200, json=[
-                {"dexId": "raydium", "pairAddress": "RAY", "quoteToken": {"address": WSOL}, "liquidity": {"usd": 9e9}},
-                {"dexId": "pumpswap", "pairAddress": "POOL", "quoteToken": {"address": WSOL}, "liquidity": {"usd": 5e4}}])
         body = json.loads(req.content)
         if body["method"] == "getAccountInfo":
-            assert body["params"][0] == curve
-            v = {"data": [state["curve"], "base64"]} if state["curve"] else None
-            return httpx.Response(200, json={"result": {"value": v}})
-        if body["method"] == "getTokenAccountsByOwner":
-            owner, mint = body["params"][0], body["params"][1]["mint"]
-            assert owner == "POOL"
-            if mint == WSOL:
-                return httpx.Response(200, json={"result": {"value": [{"pubkey": "VSOL", "account": _vault(150.0)}]}})
-            return httpx.Response(200, json={"result": {"value": [{"pubkey": "VBASE", "account": _vault(60e6)}]}})
+            if body["params"][0] == curve:
+                v = {"data": [state["curve"], "base64"]} if state["curve"] else None
+                return httpx.Response(200, json={"result": {"value": v}})
+            assert body["params"][0] == pool
+            return httpx.Response(200, json={"result": {"value": {"owner": AMM_PROGRAM,
+                                                                  "data": [_pool_b64(17.5), "base64"]}}})
+        if body["method"] == "getMultipleAccounts":
+            assert body["params"][0] == [VBASE, VSOL]
+            return httpx.Response(200, json={"result": {"value": [_vault(60e6), _vault(150.0)]}})
         return httpx.Response(404)
 
     async def go():
-        pp = PoolPrices(_s(live_pool_prices_amm=True))
-        off = PoolPrices(_s())                          # default: PumpSwap coins are left to Jupiter
+        pp = PoolPrices(_s())
+        off = PoolPrices(_s(live_pool_prices_amm=False))
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
             on_curve = await pp.resolve(http, MINT)
             state["curve"] = None
@@ -93,7 +106,20 @@ def test_resolve_finds_the_curve_or_the_pumpswap_vaults():
     on_curve, on_pool, skipped = asyncio.run(go())
     assert skipped is None
     assert on_curve.kind == "curve" and on_curve.accounts == [curve] and abs(on_curve.price - 45 / 7e8) < 1e-18
-    assert on_pool.kind == "amm" and on_pool.accounts == ["VBASE", "VSOL"] and on_pool.price == 150.0 / 60e6
+    assert on_pool.kind == "amm" and on_pool.accounts == [VBASE, VSOL, pool]
+    assert abs(on_pool.price - (150.0 + 17.5) / 60e6) < 1e-18            # vault SOL + the pool's virtual reserve
+
+
+def test_pool_account_update_moves_the_virtual_reserve():
+    pp = PoolPrices(_s())
+    pp.connected = True
+    b = Book(MINT, "amm", [VBASE, VSOL, "POOL"], {"base": 60e6, "quote": 150.0, "vq": 17.5},
+             {1: VBASE, 2: VSOL, 3: "POOL"})
+    b.reprice()
+    pp.books[MINT] = b
+    pp.on_message(json.dumps({"method": "accountNotification", "params": {"subscription": 3, "result": {
+        "value": {"data": [_pool_b64(20.0), "base64"]}}}}))
+    assert abs(pp.price_sol(MINT) - 170.0 / 60e6) < 1e-18
 
 
 def test_executor_prefers_on_chain_prices(monkeypatch):

@@ -5,8 +5,11 @@ price could be minutes stale. This feed watches the accounts that ARE the price 
 
   * a coin still on pump.fun: its bonding-curve account (PDA "bonding-curve" + mint). SOL per token =
     virtual SOL / virtual tokens, the exact formula pump.fun trades at (decoded by app.sniper.curve_state).
-  * a coin that moved to PumpSwap: the pool's two vaults (its token account and its wrapped-SOL account).
-    SOL per token = SOL in the pool / tokens in the pool.
+  * a coin that moved to PumpSwap: its canonical pool (derived from the mint, the pool a pump.fun migration
+    creates) and the pool's two vaults. SOL per token = (SOL vault + the pool's virtual_quote_reserves) / token
+    vault. The virtual reserve (i128 at offset 245 of the pool account, ~17.6 SOL on a migrated coin) is part of
+    what the pool prices with (Chainstack's pump.fun bot, docs/pumpfun-protocol.md); without it the vault ratio
+    read 49-93 % below Jupiter's price on real pools, with it +0.9..1.8 % (about the pool fee), 2026-11-23.
 
 Helius pushes every change of those accounts (accountSubscribe), so the price is current after every trade and
 needs no "age" check: a quiet coin simply has not moved. Demand-driven like the old PumpPortal feed: the copy
@@ -32,6 +35,11 @@ log = logging.getLogger("pool_prices")
 
 POOL: "PoolPrices | None" = None      # set by the worker when LIVE_POOL_PRICES is on
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+AMM_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+# PumpSwap Pool account, after the 8-byte discriminator: pool_bump u8, index u16, creator, base_mint, quote_mint,
+# lp_mint, base vault, quote vault, lp_supply u64, coin_creator, is_mayhem_mode, is_cashback_coin,
+# virtual_quote_reserves i128
+POOL_BASE_VAULT, POOL_QUOTE_VAULT, POOL_VIRTUAL_QUOTE = 139, 171, 245
 WSOL = "So11111111111111111111111111111111111111112"
 RETRY_UNRESOLVED_SECONDS = 300.0
 
@@ -42,6 +50,37 @@ def curve_address(mint: str) -> str:
     pda, _ = Pubkey.find_program_address([b"bonding-curve", bytes(Pubkey.from_string(mint))],
                                          Pubkey.from_string(PUMP_PROGRAM))
     return str(pda)
+
+
+def pool_address(mint: str) -> str:
+    """The canonical PumpSwap pool of a pump.fun coin paired with SOL: index 0, owned by the curve's authority."""
+    import struct
+
+    from solders.pubkey import Pubkey
+
+    m = Pubkey.from_string(mint)
+    auth = Pubkey.find_program_address([b"pool-authority", bytes(m)], Pubkey.from_string(PUMP_PROGRAM))[0]
+    return str(Pubkey.find_program_address(
+        [b"pool", struct.pack("<H", 0), bytes(auth), bytes(m), bytes(Pubkey.from_string(WSOL))],
+        Pubkey.from_string(AMM_PROGRAM))[0])
+
+
+def parse_pool(data_b64: str) -> tuple[str, str, float] | None:
+    """PumpSwap pool account -> (token vault, SOL vault, virtual quote reserves in SOL)."""
+    import base64
+
+    from solders.pubkey import Pubkey
+
+    try:
+        raw = base64.b64decode(data_b64)
+        if len(raw) < POOL_VIRTUAL_QUOTE + 16:
+            return None
+        base = str(Pubkey.from_bytes(raw[POOL_BASE_VAULT:POOL_BASE_VAULT + 32]))
+        quote = str(Pubkey.from_bytes(raw[POOL_QUOTE_VAULT:POOL_QUOTE_VAULT + 32]))
+        vq = int.from_bytes(raw[POOL_VIRTUAL_QUOTE:POOL_VIRTUAL_QUOTE + 16], "little", signed=True)
+    except Exception:
+        return None
+    return base, quote, vq / 1e9
 
 
 def _ui(acc_value: dict[str, Any] | None) -> float | None:
@@ -57,7 +96,7 @@ def _ui(acc_value: dict[str, Any] | None) -> float | None:
 class Book:
     mint: str
     kind: str                                   # "curve" | "amm"
-    accounts: list[str]                         # curve: [curve]; amm: [token vault, SOL vault]
+    accounts: list[str]                         # curve: [curve]; amm: [token vault, SOL vault, pool]
     values: dict[str, float] = field(default_factory=dict)
     subs: dict[int, str] = field(default_factory=dict)    # Helius subscription id -> account
     price: float | None = None
@@ -67,7 +106,8 @@ class Book:
         if self.kind == "curve" and v.get("vtok"):
             self.price = v["vsol"] / v["vtok"]
         elif self.kind == "amm" and v.get("base"):
-            self.price = v.get("quote", 0.0) / v["base"] if v.get("quote") else None
+            quote = v.get("quote", 0.0) + v.get("vq", 0.0)
+            self.price = quote / v["base"] if quote > 0 else None
 
 
 class PoolPrices:
@@ -114,26 +154,23 @@ class PoolPrices:
             b = Book(mint, "curve", [curve], {"vsol": st["vSolInBondingCurve"], "vtok": st["vTokensInBondingCurve"]})
             b.reprice()
             return b
-        # moved to PumpSwap (or never on a classic curve): the most liquid PumpSwap pool's vaults. Off by default:
-        # measured 2026-11-23, the vault ratio read 6.6% BELOW even Jupiter's sell price on a live pool (the vaults
-        # hold more than the reserves the pool prices with), so those coins stay on Jupiter's price.
+        # moved to PumpSwap: its canonical pool (no search), the vaults it names and its virtual quote reserve
         if not self.s.live_pool_prices_amm:
             return None
-        r = await http.get(f"https://api.dexscreener.com/tokens/v1/solana/{mint}")
-        pairs = [p for p in (r.json() if r.status_code == 200 else []) or [] if p.get("dexId") == "pumpswap"
-                 and (p.get("quoteToken") or {}).get("address") == WSOL]
-        if not pairs:
+        pool = pool_address(mint)
+        res = await self._call(http, "getAccountInfo", [pool, {"encoding": "base64", "commitment": "processed"}])
+        val = (res or {}).get("value") or {}
+        parsed = parse_pool(val["data"][0]) if val.get("owner") == AMM_PROGRAM and val.get("data") else None
+        if parsed is None:
             return None
-        pool = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)["pairAddress"]
-        accounts, values = [], {}
-        for role, m in (("base", mint), ("quote", WSOL)):
-            res = await self._call(http, "getTokenAccountsByOwner", [pool, {"mint": m}, {"encoding": "jsonParsed"}])
-            vals = (res or {}).get("value") or []
-            if not vals:
-                return None
-            accounts.append(vals[0]["pubkey"])
-            values[role] = _ui(vals[0]["account"]) or 0.0
-        b = Book(mint, "amm", accounts, values)
+        base_vault, quote_vault, vq = parsed
+        res = await self._call(http, "getMultipleAccounts", [[base_vault, quote_vault],
+                                                            {"encoding": "jsonParsed", "commitment": "processed"}])
+        vals = (res or {}).get("value") or []
+        if len(vals) != 2 or not all(vals):
+            return None
+        b = Book(mint, "amm", [base_vault, quote_vault, pool],
+                 {"base": _ui(vals[0]) or 0.0, "quote": _ui(vals[1]) or 0.0, "vq": vq})
         b.reprice()
         return b
 
@@ -167,6 +204,11 @@ class PoolPrices:
                 if st is None:                                    # complete: the coin is moving to PumpSwap
                     return b.mint
                 b.values.update(vsol=st["vSolInBondingCurve"], vtok=st["vTokensInBondingCurve"])
+            elif len(b.accounts) > 2 and acct == b.accounts[2]:          # the pool: its virtual reserve
+                data = value.get("data")
+                parsed = parse_pool(data[0]) if isinstance(data, list) and data else None
+                if parsed is not None:
+                    b.values["vq"] = parsed[2]
             else:
                 amt = _ui(value)
                 if amt is not None:
@@ -213,7 +255,7 @@ class PoolPrices:
             for acct in b.accounts:
                 self._ids += 1
                 self._pending[self._ids] = (mint, acct)
-                enc = "base64" if b.kind == "curve" else "jsonParsed"
+                enc = "base64" if b.kind == "curve" or (b.kind == "amm" and acct == b.accounts[-1]) else "jsonParsed"
                 await ws.send(json.dumps({"jsonrpc": "2.0", "id": self._ids, "method": "accountSubscribe",
                                           "params": [acct, {"encoding": enc, "commitment": "processed"}]}))
 

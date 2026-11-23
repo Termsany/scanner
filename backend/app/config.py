@@ -250,9 +250,10 @@ class Settings(BaseSettings):
     live_pool_prices: bool = False
     live_pool_prices_max_coins: int = 20
     live_pool_prices_keep_seconds: float = 60.0
-    # PumpSwap coins too (pool vault balances). Off: on a live pool the vault ratio read 6.6% below Jupiter's
-    # sell price (2026-11-23), so it is not the price the pool trades at. Bonding-curve coins are exact.
-    live_pool_prices_amm: bool = False
+    # PumpSwap coins too: the canonical pool's vaults plus its virtual quote reserve (app/pool_prices.py). On since
+    # 2026-11-23: with the virtual reserve it reads +0.9..1.8 % from Jupiter (the fee); the vaults alone were 49-93 %
+    # low, which is why it was off before. Bonding-curve coins are exact.
+    live_pool_prices_amm: bool = True
     loop_freeze_log_seconds: float = 1.0          # worker event loop blocked this long: logged (app/loop_watch.py)
     loop_debug: bool = True                       # asyncio debug: names the step that blocked (small overhead)
     # Compare open positions with the wallet's real token balance this often; tokens sold by hand (Phantom)
