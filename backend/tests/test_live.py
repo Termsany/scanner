@@ -1068,10 +1068,12 @@ def test_supervisor_starts_updates_and_stops_engines_without_restart():
         running, said = {}, set()
         await t._sync([acct("main"), acct("big", wallets=())], "dry", running, said, None)
         await asyncio.sleep(0)
-        assert sorted(running) == ["main"] and started == ["main"]          # big has no leaders yet
+        # big has no leaders yet: its engine still runs (hand sales, targets, page sells on what it holds)
+        assert sorted(running) == ["big", "main"] and started == ["main", "big"]
         await t._sync([acct("main", size=12), acct("big")], "dry", running, said, None)
         await asyncio.sleep(0)
-        assert running["main"][2].a.size_usd == 12 and started == ["main", "big"]   # edit applied in place
+        assert running["main"][2].a.size_usd == 12 and started == ["main", "big"]   # edits applied in place
+        assert LEADER in running["big"][2].a.wallets                                 # big got its leader, no restart
         await t._sync([acct("big")], "dry", running, said, None)
         assert sorted(running) == ["big"] and any("[main] stopped" in n for n in notes)
         for task, _, _ in running.values():
