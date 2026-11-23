@@ -136,6 +136,8 @@ class Settings(BaseSettings):
 
     # Paper pre-graduation trades (app/curve.py): buy late on the pump.fun bonding curve, sell at graduation.
     curve_paper_enabled: bool = False
+    curve_feed: str = "auto"                     # auto / helius / hybrid / pumpportal (see app/curve.py)
+    curve_pp_from_pct: float = 50.0              # hybrid: stream a token from PumpPortal once this far along
     curve_size_usd: float = 30.0
     curve_latency_s: float = 2.0                 # our assumed delay from decision to a landed buy
     curve_fee_pct: float = 1.0                   # pump.fun fee + priority/tip, each way
