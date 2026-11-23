@@ -325,6 +325,7 @@ class JupiterGate:
 JUPITER = JupiterGate()
 _sol_px: tuple[float, float] = (0.0, 0.0)   # (monotonic time, USD per SOL), shared by all accounts
 SOL_PRICE_TTL = 60.0        # SOL's price only sizes a buy: a minute old is fine and spares a Jupiter call
+PUMP_DECIMALS = 6                 # pump.fun mints (address ends in "pump") are always 6 decimals
 _DECIMALS: dict[str, int] = {}   # mint -> decimals (never change), read from the RPC, not Jupiter
 STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,   # USDC
            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCeUBenwNYB": 6}   # USDT
@@ -372,8 +373,19 @@ class JupiterExecutor:
     async def decimals(self, mint: str) -> int:
         """Token decimals from the RPC (getTokenSupply), cached forever: keeps the Jupiter queue for swaps."""
         if mint not in _DECIMALS:
-            res = await self._rpc("getTokenSupply", [mint])
-            _DECIMALS[mint] = int(((res or {}).get("value") or {})["decimals"])
+            # a coin made seconds ago is not "finalized" yet (the RPC default): ask at "confirmed", then "processed"
+            err: Exception | None = None
+            for commitment in ("confirmed", "processed"):
+                try:
+                    res = await self._rpc("getTokenSupply", [mint, {"commitment": commitment}])
+                    _DECIMALS[mint] = int(((res or {}).get("value") or {})["decimals"])
+                    break
+                except Exception as e:  # noqa: BLE001
+                    err = e
+            else:
+                if mint.endswith("pump"):
+                    return PUMP_DECIMALS      # every pump.fun coin has 6; not cached, the RPC answers once it lands
+                raise err or SwapError("token decimals unknown")
         return _DECIMALS[mint]
 
     async def sol_price(self) -> float:

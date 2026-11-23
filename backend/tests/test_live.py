@@ -2330,3 +2330,45 @@ def test_account_with_no_copied_wallets_still_gets_an_engine():
 
     names, names2 = asyncio.run(go())
     assert names == ["main", "wallet"] and names2 == ["main", "wallet"] and sorted(started) == ["main", "wallet"]
+
+
+def test_decimals_of_a_brand_new_coin_not_finalized_yet():
+    """getTokenSupply at "confirmed" (a coin made seconds ago isn't finalized); a pump coin falls back to 6."""
+    import asyncio
+
+    import httpx
+    import respx
+
+    import app.live as live_mod
+    from app.live import JupiterExecutor
+
+    seen = []
+
+    def rpc(request):
+        import json as _json
+        body = _json.loads(request.content)
+        seen.append(body["params"])
+        if body["params"][0] == "GOODmint":
+            return httpx.Response(200, json={"result": {"value": {"decimals": 9, "amount": "1"}}})
+        return httpx.Response(200, json={"error": {"code": -32602, "message": "Invalid param: could not find mint"}})
+
+    async def go():
+        x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/"), live=False)
+        try:
+            out = [await x.decimals("GOODmint"), await x.decimals("NEWcoinpump")]
+            try:
+                await x.decimals("NEWother")
+                out.append("no error")
+            except Exception:
+                out.append("error")
+            return out
+        finally:
+            await x.close()
+
+    live_mod._DECIMALS.clear()
+    with respx.mock:
+        respx.post("https://rpc.test/").mock(side_effect=rpc)
+        got = asyncio.run(go())
+    assert got == [9, 6, "error"]
+    assert seen[0] == ["GOODmint", {"commitment": "confirmed"}]
+    assert "NEWcoinpump" not in live_mod._DECIMALS        # not cached: the real answer is read once it lands
