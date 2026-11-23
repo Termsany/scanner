@@ -16,14 +16,16 @@ def _s(**kw):
 
 def test_price_from_curve_pumpswap_and_marketcap():
     assert price_from({"vSolInBondingCurve": 30.0, "vTokensInBondingCurve": 1_000_000_000.0}) == 3e-8
-    assert price_from({"solAmount": 0.5, "tokenAmount": 1_000_000}) == 5e-7          # trade price, last resort
+    assert price_from({"solAmount": 0.5, "tokenAmount": 1_000_000}) == 5e-7          # PumpSwap trade price
     assert price_from({"marketCapSol": 40.0}) == 4e-8
-    # real PumpSwap message (2026-11-23): pool reserves win over the trade's own (fee-inclusive) price
+    assert price_from({"solInPool": 30.0, "tokensInPool": 1e9}) == 3e-8                # last resorts
+    # real PumpSwap message (2026-11-23): the trade's own price (it matched Jupiter: 2.819e-6 vs 2.821e-6),
+    # not PumpPortal's pool numbers (2.632e-6, 7% low)
     real = {"txType": "sell", "tokenAmount": 202796.42104499042, "solAmount": 0.5716637000000162,
             "tokensInPool": 81351851.772133, "solInPool": 214.142361546, "marketCapSol": 2632.2985510620456,
             "pool": "pump-amm"}
-    assert abs(price_from(real) - 214.142361546 / 81351851.772133) < 1e-15
-    assert abs(price_from(real) - 2632.2985510620456 / 1e9) / price_from(real) < 1e-6   # agrees with market cap
+    assert abs(price_from(real) - 0.5716637000000162 / 202796.42104499042) < 1e-15
+    assert abs(price_from(real) / 2.8207e-6 - 1) < 0.01
     assert price_from({"solAmount": "x"}) is None and price_from({}) is None
 
 

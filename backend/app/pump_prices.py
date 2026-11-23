@@ -36,17 +36,19 @@ def price_from(msg: dict[str, Any]) -> float | None:
     try:
         v_sol, v_tok = float(msg.get("vSolInBondingCurve") or 0), float(msg.get("vTokensInBondingCurve") or 0)
         if v_sol > 0 and v_tok > 0:
-            return v_sol / v_tok                      # bonding curve: the price after this trade
+            return v_sol / v_tok                      # bonding curve: the exact price after this trade
+        # PumpSwap: the trade's own price. Measured 2026-11-23 on a live coin: it matched Jupiter within 0.1-1.3%,
+        # while PumpPortal's solInPool / tokensInPool (and marketCapSol, built from them) read 7-9% below
+        # Jupiter and didn't even agree with the pool's vault balances on-chain. So those are a last resort.
+        sol, tok = float(msg.get("solAmount") or 0), float(msg.get("tokenAmount") or 0)
+        if sol > 0 and tok > 0:
+            return sol / tok
         p_sol, p_tok = float(msg.get("solInPool") or 0), float(msg.get("tokensInPool") or 0)
         if p_sol > 0 and p_tok > 0:
-            return p_sol / p_tok                      # PumpSwap pool reserves after this trade
+            return p_sol / p_tok
         mc = float(msg.get("marketCapSol") or 0)
         if mc > 0:
             return mc / 1_000_000_000                 # pump.fun supply is 1 billion tokens
-        sol, tok = float(msg.get("solAmount") or 0), float(msg.get("tokenAmount") or 0)
-        if sol > 0 and tok > 0:
-            return sol / tok                          # last resort: this trade's own price (fees and impact
-                                                      # included, ~7% off on a PumpSwap sell measured 2026-11-23)
     except (TypeError, ValueError):
         return None
     return None
