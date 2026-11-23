@@ -167,6 +167,7 @@ class Settings(BaseSettings):
     curve_prune2_s: float = 900.0                # ...or under CURVE_PRUNE2_PCT after this long
     curve_prune2_pct: float = 40.0
     curve_max_watch_s: float = 7200.0
+    curve_copycat_window_s: float = 1800.0       # a coin named like one launched this recently is a copycat
     curve_skip_mayhem: bool = True
     # curve_70_half / curve_70_trail (user's rule 2026-11-23): $10, no stop loss, half at 2x, then a stop at entry
     curve_half_size_usd: float = 10.0

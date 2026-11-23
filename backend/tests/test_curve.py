@@ -533,3 +533,20 @@ def test_mom_sends_its_live_signal_only_once_its_filters_pass():
     c2.on_curve("R", acct(34), 5.0)
     c2.on_curve("R", acct(35), 7.5)                                          # stalled: no live signal at all
     assert curve_live.take(start, "curve_fast34_mom", 1e9)[0] == []
+
+
+def test_mom_skips_a_copycat_named_like_a_coin_launched_just_before():
+    from app.curve import name_key
+
+    assert name_key("BЕAR") == name_key("bear") == "bear"           # Cyrillic Е, case
+    c = PaperCurve(S())
+    c.on_create({**create("ORIG"), "symbol": "BOBCAT", "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+    c.on_create({**create("COPY"), "symbol": "BobCat", "initialBuy": 0.10 * REAL_TOKENS_START}, 120.0)
+    c.on_create({**create("LATE"), "symbol": "bobcat", "initialBuy": 0.10 * REAL_TOKENS_START}, 120.0 + 1801.0)
+    assert not c.watch["ORIG"].copycat and c.watch["COPY"].copycat and not c.watch["LATE"].copycat
+    for m, t in (("ORIG", 0.0), ("COPY", 120.0)):
+        c.on_curve(m, acct(34), t + 5.0)
+        c.on_curve(m, acct(45), t + 7.5)
+    assert "curve_fast34_mom" in c.watch["ORIG"].held
+    assert "curve_fast34_mom" not in c.watch["COPY"].held and "curve_fast34" in c.watch["COPY"].held
+    assert c.watch["COPY"].held["curve_fast34"]["features"]["copycat"] is True

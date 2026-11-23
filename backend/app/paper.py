@@ -114,7 +114,7 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("curve_93_fast", "Bonding curve: $10, 93% sold within 4 min, sell at 99% (before graduation), stop -20%",
              tp_pct=0.0, sl_pct=-20.0, max_hold_minutes=10),
     Strategy("curve_fast34_mom", "Bonding curve: curve_fast34 only if still bought after the signal (40%+ sold at "
-             "the fill) and the dev holds under 25%", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=15),
+             "the fill), the dev holds under 25% and no copycat name", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=15),
     # user's choice (2026-11-23): curve_70 traded with real money ($10); sells just before graduation
     Strategy("curve_70_live", "Bonding curve: $10, buy at 70% sold, sell at 99% (before graduation), stop -25% "
              "(curve_70 for real)", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),

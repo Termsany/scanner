@@ -77,9 +77,12 @@ class CurveRule:
     # either one sends its live signal only once they pass, never at the decision.
     min_fill: float | None = None   # buy only if the curve is at least this % sold when our buy would land
     max_dev: float | None = None    # skip if the dev holds this % of the supply or more
+    # copycats (2026-11-23, BOBCAT): a coin named like one launched shortly before it (CURVE_COPYCAT_WINDOW_S) is
+    # usually a copy riding the original's name, pumped by one wallet; on the day's curve_fast34 trades 1 of 26 won
+    skip_copycat: bool = False
 
     def waits(self) -> bool:
-        return self.min_fill is not None or self.max_dev is not None
+        return self.min_fill is not None or self.max_dev is not None or self.skip_copycat
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -106,9 +109,9 @@ CURVE_RULES: dict[str, CurveRule] = {
     # user's choice (2026-11-23): curve_fast34, buying only coins still being bought after the signal (40 %+ sold at
     # the fill) whose dev holds under 25 %. On the day's trades: 48 of 149 passed, +$18.5, against -$198 for the rest.
     "curve_fast34_mom": CurveRule(33.8, "custom", exit_at=96.6, sl=-25.0, size=10.0, max_hold_s=900.0, max_secs=60.0,
-                                  min_fill=40.0, max_dev=25.0,
+                                  min_fill=40.0, max_dev=25.0, skip_copycat=True,
                                   title="curve_fast34 with momentum: still bought after the signal (40%+ at the "
-                                        "fill), dev under 25%"),
+                                        "fill), dev under 25%, no copycat names"),
     # user's choice (2026-11-23): curve_70 with real money at $10. curve_70 sells at graduation, which a real
     # account can't (it needs an exit level and a stop), so this is curve_70 with the exit just before
     # graduation (99 % sold, ~+225 % on a classic curve), the same -25 % stop and 60 min max hold.
@@ -175,6 +178,19 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_LOOKALIKE = str.maketrans({"а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p",
+                            "с": "c", "т": "t", "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d"})
+
+
+def name_key(symbol: str) -> str:
+    """A coin's name for spotting copies: case, accents, spacing and look-alike letters (Cyrillic "Е" in "BЕAR")
+    don't matter."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFKD", symbol or "").casefold().translate(_LOOKALIKE)
+    return "".join(ch for ch in s if ch.isalnum() and ch.isascii())
+
+
 def parse_curve(data_b64: str) -> dict[str, Any] | None:
     """pump.fun bonding-curve account -> {price, progress, complete} (8-byte discriminator, then u64 virtual
     token, virtual SOL, real token, real SOL reserves, total supply, then bool complete)."""
@@ -219,6 +235,7 @@ class Watch:
     symbol: str
     created: float                    # monotonic time we saw it
     curve: str
+    copycat: bool = False             # named like another coin launched shortly before it
     price: float | None = None
     progress: float = 0.0
     graduated: bool = False
@@ -241,6 +258,7 @@ class PaperCurve:
         self.sol_usd = sol_usd
         self.watch: dict[str, Watch] = {}
         self.live_signals: set[str] = set()   # rules some live account trades (app/curve_live.py): publish them
+        self._names: dict[str, tuple[float, str]] = {}   # name -> (first seen, its mint): for spotting copycats
         self.opened: list[dict[str, Any]] = []
         self.closed: list[dict[str, Any]] = []
         self.feed = self._pick_feed()
@@ -276,11 +294,12 @@ class PaperCurve:
         mint, curve = msg.get("mint"), str(msg.get("bondingCurveKey") or "")
         if msg.get("txType") != "create" or not mint or not curve or mint in self.watch:
             return None
+        copycat = self._seen_name(str(msg.get("symbol") or ""), mint, now)
         if self.s.curve_skip_mayhem and msg.get("is_mayhem_mode"):
             return None
         if len(self.watch) >= self.s.curve_max_watch:
             return None
-        w = Watch(mint, str(msg.get("symbol") or "")[:60], now, curve)
+        w = Watch(mint, str(msg.get("symbol") or "")[:60], now, curve, copycat=copycat)
         w.creator, w.uri = msg.get("traderPublicKey"), (str(msg.get("uri") or "")[:300] or None)
         try:
             w.dev_pct = round(float(msg.get("initialBuy") or 0) / REAL_TOKENS_START * 100, 2)
@@ -288,6 +307,22 @@ class PaperCurve:
             w.dev_pct = None
         self.watch[mint] = w
         return mint
+
+    def _seen_name(self, symbol: str, mint: str, now: float) -> bool:
+        """Remember every launch's name (watched or not); True if another coin had it within the window."""
+        key = name_key(symbol)
+        if not key:
+            return False
+        names = self._names
+        window = self.s.curve_copycat_window_s
+        if len(names) > 20_000:
+            for k in [k for k, (t, _) in names.items() if now - t > window]:
+                del names[k]
+        prev = names.get(key)
+        if prev is not None and prev[1] != mint and now - prev[0] <= window:
+            return True
+        names[key] = (now, mint)
+        return False
 
     def on_curve(self, mint: str, data_b64: str, now: float) -> None:
         """A change of the token's bonding-curve account (from Helius)."""
@@ -411,7 +446,7 @@ class PaperCurve:
         back = [p for (t, p) in w.path if now - t <= 60]
         return {
             "secs_to_level": round(now - w.created, 1), "level_at": round(w.progress, 1),
-            "dev_pct": w.dev_pct, "dev_sold": w.dev_sold if w.creator else None,
+            "dev_pct": w.dev_pct, "dev_sold": w.dev_sold if w.creator else None, "copycat": w.copycat,
             "buys_60s": len(buys), "sells_60s": len(sells),
             "sol_in_60s": round(sum(t[2] for t in buys), 3), "sol_out_60s": round(sum(t[2] for t in sells), 3),
             "buyers_60s": len({t[3] for t in known if t[1] > 0}) if known else None,
@@ -439,6 +474,8 @@ class PaperCurve:
                 continue                                  # stalled at the level: nobody kept buying
             if rule.max_dev is not None and (pre.get("dev_pct") or 0) >= rule.max_dev:
                 continue                                  # the dev holds too much of it
+            if rule.skip_copycat and w.copycat:
+                continue                                  # a copy of a coin launched just before it
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,
                    "fill": w.price * (1 + self._cost()), "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
                    "size": self._size(strat), "rem": 1.0, "proceeds": 0.0, "half": False, "gpeak": None,
