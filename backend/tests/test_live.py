@@ -2372,3 +2372,25 @@ def test_decimals_of_a_brand_new_coin_not_finalized_yet():
     assert got == [9, 6, "error"]
     assert seen[0] == ["GOODmint", {"commitment": "confirmed"}]
     assert "NEWcoinpump" not in live_mod._DECIMALS        # not cached: the real answer is read once it lands
+
+
+def test_token_balance_of_a_mint_the_rpc_has_not_seen_yet_is_zero():
+    import asyncio
+
+    import httpx
+    import respx
+
+    from app.live import JupiterExecutor
+
+    async def go():
+        x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/"), live=False)
+        x.pubkey = "Owner1111111111111111111111111111111111111"
+        try:
+            return await x.token_balance("NEWcoinpump")
+        finally:
+            await x.close()
+
+    with respx.mock:
+        respx.post("https://rpc.test/").mock(return_value=httpx.Response(200, json={"error": {
+            "code": -32602, "message": "Error getting token program id and mint: Invalid param: could not find mint"}}))
+        assert asyncio.run(go()) == 0

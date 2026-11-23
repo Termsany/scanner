@@ -416,8 +416,15 @@ class JupiterExecutor:
         return (res or {}).get("value", 0) / LAMPORTS
 
     async def token_balance(self, mint: str) -> int:
-        res = await self._rpc("getTokenAccountsByOwner", [self.pubkey, {"mint": mint},
-                                                          {"encoding": "jsonParsed", "commitment": "confirmed"}])
+        try:
+            res = await self._rpc("getTokenAccountsByOwner", [self.pubkey, {"mint": mint},
+                                                              {"encoding": "jsonParsed", "commitment": "confirmed"}])
+        except SwapError as e:
+            # a coin made seconds ago the RPC hasn't seen yet: the wallet holds none of it (and after our buy the
+            # balance check simply waits for it to show up instead of failing a swap that went through)
+            if "could not find mint" in str(e):
+                return 0
+            raise
         total = 0
         for acc in (res or {}).get("value", []):
             info = acc["account"]["data"]["parsed"]["info"]
