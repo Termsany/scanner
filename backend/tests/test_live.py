@@ -1744,8 +1744,9 @@ def test_buy_keeps_its_timing():
     assert {"pickup", "checks", "buy_call", "block_to_bought"} <= set(t) and t["block_to_bought"] >= 0
 
 
-def _direct_exec(sim=(0, 0, None), pp_status=200):
-    """JupiterExecutor in live mode with PumpPortal, the RPC and Jupiter stubbed (nothing leaves the test)."""
+def _direct_exec(sim=(0, 0, None), pp_status=200, **settings):
+    """JupiterExecutor in live mode with PumpPortal, the RPC and Jupiter stubbed (nothing leaves the test).
+    Best route is off unless asked for: these tests are about the PumpPortal path itself."""
     import httpx as hx
     from solders.hash import Hash
     from solders.keypair import Keypair
@@ -1756,8 +1757,9 @@ def _direct_exec(sim=(0, 0, None), pp_status=200):
 
     kp = Keypair()
     calls = {"quote": 0, "sent": 0, "pp": 0}
+    settings = {"live_best_route": False, "live_best_route_sells": False, **settings}
     x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/",
-                                 live_direct_pump_buys=True), live=True, private_key=str(kp))
+                                 live_direct_pump_buys=True, **settings), live=True, private_key=str(kp))
     unsigned = bytes(VersionedTransaction(MessageV0.try_compile(kp.pubkey(), [], [], Hash.default()), [kp]))
     state = {"tok": 0, "sol": 2.0}
 
@@ -2145,3 +2147,146 @@ def test_target_on_a_coin_the_bot_does_not_hold_sells_it_at_the_owners_price():
     p = _db(body)
     assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 500_000)]
     assert p.status == "open" and p.target_price is None
+
+
+# ---- best route: PumpPortal vs Jupiter after fees (user's request 2026-11-23) --------------------------------
+def test_route_edge_math():
+    from app.live import route_edge_buy, route_edge_sell
+
+    assert abs(route_edge_buy(100, 1.0, 110, 1.0) - 0.10) < 1e-12          # Jupiter 10% more tokens per SOL
+    assert abs(route_edge_buy(100, 1.0, 100, 1.05) + 0.0476) < 1e-3        # same tokens, Jupiter costs more
+    assert abs(route_edge_sell(0.50, 0.49) + 0.02) < 1e-12                  # PumpPortal 2% more SOL
+    assert route_edge_sell(0.0, 0.1) == 1.0
+
+
+def _best_exec(jup_tokens, quote_delay=0.0, **kw):
+    """Live executor with both routes stubbed: PumpPortal simulates +100 tokens for 0.3 SOL (all-in),
+    Jupiter quotes `jup_tokens` for the same SOL."""
+    x, calls = _direct_exec(sim=(100_000_000, int(1.7e9), None), live_best_route=True, **kw)
+
+    async def quote(a, b, lamports, bps=None):
+        calls["quote"] += 1
+        if quote_delay:
+            await asyncio.sleep(quote_delay)
+        return {"outAmount": str(jup_tokens), "inAmount": str(lamports)}
+
+    async def send_jup(q):
+        calls["jup_sent"] = calls.get("jup_sent", 0) + 1
+        x._test_state_tokens = int(q["outAmount"])
+        return "SIGJ", True
+
+    x.quote, x._send = quote, send_jup
+    bal = x.token_balance
+
+    async def token_balance(mint):
+        return getattr(x, "_test_state_tokens", None) or await bal(mint)
+
+    x.token_balance = token_balance
+    return x, calls
+
+
+def test_best_route_buys_on_jupiter_when_it_gives_more_tokens_after_fees():
+    async def go():
+        x, calls = _best_exec(110_000_000)       # ~9% more tokens per SOL even after fee + rent
+        try:
+            return await x.buy(MINT_PUMP, 30.0), calls
+        finally:
+            await x.close()
+
+    f, calls = asyncio.run(go())
+    assert f.timing["route"] == "jupiter" and f.signature == "SIGJ"
+    assert calls["sent"] == 0 and calls["jup_sent"] == 1 and calls["quote"] == 1   # the winning quote is reused
+
+
+def test_best_route_keeps_pumpportal_when_jupiter_is_only_marginally_better_or_slow():
+    async def near():
+        x, calls = _best_exec(100_900_000)       # +0.9% raw, below +0.3% once Jupiter's fee + rent count
+        try:
+            return await x.buy(MINT_PUMP, 30.0), calls
+        finally:
+            await x.close()
+
+    f, calls = asyncio.run(near())
+    assert f.timing["route"] == "pumpportal" and calls["sent"] == 1 and "jup_sent" not in calls
+    assert "route_edge_pct" in f.timing
+
+    async def slow():
+        x, calls = _best_exec(200_000_000, quote_delay=3.0, live_best_route_wait_seconds=0.2)
+        t0 = asyncio.get_running_loop().time()
+        try:
+            f = await x.buy(MINT_PUMP, 30.0)
+        finally:
+            await x.close()
+        return f, asyncio.get_running_loop().time() - t0
+
+    f, took = asyncio.run(slow())
+    assert f.timing["route"] == "pumpportal" and took < 2.0     # speed first: no waiting for a slow quote
+
+
+def _sell_exec(pp_sol_out, jup_lamports_out):
+    """Holding 100 tokens; PumpPortal's simulated sell brings `pp_sol_out` SOL, Jupiter quotes `jup_lamports_out`."""
+    x, calls = _direct_exec(live_best_route_sells=True)
+    state = {"tok": 100_000_000, "sol": 2.0}
+
+    async def token_balance(mint):
+        return state["tok"]
+
+    async def sol_balance():
+        return state["sol"]
+
+    async def simulate(raw, mint):
+        return 0, int((2.0 + pp_sol_out) * 1e9), None
+
+    async def quote(a, b, amount, bps=None):
+        calls["quote"] += 1
+        return {"outAmount": str(jup_lamports_out), "inAmount": str(amount)}
+
+    async def send_pp(tx_bytes, last_valid=None, signed_b64=None):
+        calls["sent"] += 1
+        state["tok"], state["sol"] = 0, 2.0 + pp_sol_out
+        return "SIGPP", True
+
+    async def send_jup(q):
+        calls["jup_sent"] = calls.get("jup_sent", 0) + 1
+        state["tok"], state["sol"] = 0, 2.0 + int(q["outAmount"]) / 1e9
+        return "SIGJ", True
+
+    x.token_balance, x.sol_balance, x._simulate_buy, x.quote = token_balance, sol_balance, simulate, quote
+    x._send_tx, x._send = send_pp, send_jup
+    return x, calls
+
+
+def test_best_route_sells_where_it_pays_more_after_fees():
+    from app.live import SOL_MINT  # noqa: F401  (route chosen per sell)
+
+    async def run(pp, jup):
+        x, calls = _sell_exec(pp, jup)
+        try:
+            return await x.sell(MINT_PUMP, 100_000_000), calls
+        finally:
+            await x.close()
+
+    f, calls = asyncio.run(run(0.50, 490_000_000))          # PumpPortal 0.50 vs Jupiter 0.4895 after its fee
+    assert f.signature == "SIGPP" and abs(f.sol - 0.50) < 1e-9 and "jup_sent" not in calls
+    f, calls = asyncio.run(run(0.50, 520_000_000))          # Jupiter 0.5195 after fee: 3.9% more
+    assert f.signature == "SIGJ" and calls["sent"] == 0 and calls["jup_sent"] == 1
+
+
+def test_best_route_sell_falls_back_to_jupiter_when_pumpportal_cannot():
+    import httpx as hx
+
+    async def go():
+        x, calls = _sell_exec(0.50, 480_000_000)
+
+        async def post(url, **kw):
+            calls["pp"] += 1
+            return hx.Response(400, content=b'{"error":"bad pool"}', headers={"content-type": "application/json"})
+
+        x.http.post = post
+        try:
+            return await x.sell(MINT_PUMP, 100_000_000), calls
+        finally:
+            await x.close()
+
+    f, calls = asyncio.run(go())
+    assert f.signature == "SIGJ" and calls["pp"] == 1 and calls["sent"] == 0

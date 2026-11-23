@@ -155,6 +155,14 @@ class Settings(BaseSettings):
     live_direct_slippage_cap_pct: float = 15.0      # direct buys with a chase limit: slippage at most this
     live_direct_retry_slippage_pct: float = 40.0    # one retry when PumpPortal's own slippage check fails (6004)
     live_direct_max_overspend_pct: float = 3.0      # simulated cost above the entry size: rebuild smaller / use Jupiter
+    # Best route (user's request 2026-11-23: buy where it's cheapest, sell where it pays most, fees included):
+    # pump coins are priced on PumpPortal (simulated: exact, its 0.5% fee and priority fee included) and on
+    # Jupiter (every pool, split routes) at the same time; the better one after fees is sent.
+    live_best_route: bool = True
+    live_best_route_sells: bool = True
+    live_best_route_wait_seconds: float = 1.5       # a ready PumpPortal buy waits at most this for Jupiter's quote
+    live_best_route_margin_pct: float = 0.3         # switch only when the other route is better by more than this
+    live_jupiter_fee_estimate_sol: float = 0.0005   # network + priority fee a Jupiter swap adds (not in its quote)
     live_min_liquidity_usd: float = 10_000.0
     # Skip a copy buy when the live quote's price per token is more than this % above the price recorded with
     # the leader's buy (we would be buying the leader's pump). None = no limit.

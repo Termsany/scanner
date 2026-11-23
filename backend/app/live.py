@@ -78,6 +78,31 @@ class DirectUnavailable(Exception):
     sent, so the buy falls back to Jupiter."""
 
 
+class JupiterBetter(Exception):
+    """Best route: Jupiter's quote beats the prepared PumpPortal buy after fees. Nothing was sent."""
+
+    def __init__(self, quote: dict[str, Any], edge: float) -> None:
+        super().__init__(f"Jupiter {edge * 100:+.2f}% after fees")
+        self.quote, self.edge = quote, edge
+
+
+ATA_RENT_SOL = 0.00203928       # a new token account's rent: both routes pay it on a first buy
+
+
+def route_edge_buy(pp_tokens: int, pp_sol: float, jup_tokens: int, jup_sol: float) -> float:
+    """How much more Jupiter gives per SOL than PumpPortal, all costs included (+0.02 = 2% more tokens)."""
+    if pp_tokens <= 0 or pp_sol <= 0 or jup_sol <= 0:
+        return 0.0
+    return (jup_tokens / jup_sol) / (pp_tokens / pp_sol) - 1
+
+
+def route_edge_sell(pp_sol_out: float, jup_sol_out: float) -> float:
+    """How much more SOL Jupiter brings than PumpPortal for the same tokens, fees included (+ = Jupiter)."""
+    if pp_sol_out <= 0:
+        return 1.0 if jup_sol_out > 0 else 0.0
+    return jup_sol_out / pp_sol_out - 1
+
+
 class ChaseError(Exception):
     """The price already ran too far past the leader's: skip instead of buying the top."""
 
@@ -660,15 +685,27 @@ class JupiterExecutor:
         for attempt in range(3):   # nothing is spent when a swap is dropped or hits slippage: try again, fresh quote
             try:
                 f = None
+                q0 = None
                 if direct:
+                    # best route: Jupiter quotes while PumpPortal builds and simulates; the better one is sent
+                    rival = (asyncio.ensure_future(self._jup_buy_quote(mint, usd, bps))
+                             if self.s.live_best_route else None)
                     try:
-                        f = await self._buy_direct(mint, usd, max_price, bps)
+                        f = await self._buy_direct(mint, usd, max_price, bps, rival=rival)
                         timing["route"] = "pumpportal"
+                    except JupiterBetter as exc:
+                        log.info("buy %s: Jupiter gives %.2f%% more tokens after fees; buying there",
+                                 mint[:8], exc.edge * 100)
+                        q0 = exc.quote
                     except DirectUnavailable as exc:
                         log.info("buy %s: direct route unavailable (%s); using Jupiter", mint[:8], exc)
                         direct = False
+                    finally:
+                        if rival is not None and not rival.done():
+                            rival.cancel()
                 if f is None:
-                    f = await self._buy_once(mint, usd, max_price, bps)
+                    f = await (self._buy_once(mint, usd, max_price, bps, q0=q0) if q0 is not None
+                               else self._buy_once(mint, usd, max_price, bps))
                     timing["route"] = "jupiter"
                 timing["attempts"] = attempt + 1
                 timing["executor_total"] = round(time.monotonic() - t_start, 2)
@@ -703,7 +740,24 @@ class JupiterExecutor:
         lamports_after = int((accs[0] or {}).get("lamports") or 0)
         return tokens, lamports_after, v.get("err")
 
-    async def _buy_direct(self, mint: str, usd: float, max_price: float | None, bps: int) -> Fill:
+    async def _jup_buy_quote(self, mint: str, usd: float, bps: int) -> dict[str, Any]:
+        px = await self.sol_price()
+        return await self.quote(SOL_MINT, mint, int(usd / px * LAMPORTS), bps)
+
+    async def _rival_edge_buy(self, rival, got: int, spent: float, tok0: int) -> tuple[float, dict] | None:
+        """Jupiter's edge over the simulated PumpPortal buy, waiting a little for its quote (speed first)."""
+        try:
+            q = await asyncio.wait_for(asyncio.shield(rival), timeout=self.s.live_best_route_wait_seconds)
+        except Exception:
+            return None
+        if not q or not q.get("outAmount") or not q.get("inAmount"):
+            return None
+        jup_sol = (int(q["inAmount"]) / LAMPORTS + self.s.live_jupiter_fee_estimate_sol
+                   + (ATA_RENT_SOL if not tok0 else 0.0))
+        return route_edge_buy(got, spent, int(q["outAmount"]), jup_sol), q
+
+    async def _buy_direct(self, mint: str, usd: float, max_price: float | None, bps: int,
+                          rival=None) -> Fill:
         """Buy a pump.fun / PumpSwap token through PumpPortal's transaction API: no Jupiter queue. The signed
         transaction is simulated first, which gives the exact tokens and SOL for the chase check (and replaces the
         preflight). Anything that fails before sending raises DirectUnavailable (the caller uses Jupiter)."""
@@ -792,6 +846,15 @@ class JupiterExecutor:
                 pay = spent * px / (got / 10 ** decimals)
                 if pay > max_price:
                     raise ChaseError(pay, max_price)
+            if rival is not None:
+                # `spent` is all-in (simulated: PumpPortal's 0.5% fee, priority fee, rent); Jupiter's quote gets its
+                # network fee and, on a first buy, the same rent added before comparing
+                res = await self._rival_edge_buy(rival, got, spent, tok0)
+                if res is not None:
+                    edge, q = res
+                    _took("route_edge_pct", round(edge * 100, 2))
+                    if edge * 100 > self.s.live_best_route_margin_pct:
+                        raise JupiterBetter(q, edge)
             if self.mode == "dry":
                 self._dry_n += 1
                 return Fill(f"dry-direct-{self._dry_n}", spent, got, px)
@@ -813,7 +876,7 @@ class JupiterExecutor:
         return Fill(sig, max(sol0 - sol1, 0.0), got, px)
 
     async def _buy_once(self, mint: str, usd: float, max_price: float | None = None,
-                        bps: int | None = None) -> Fill:
+                        bps: int | None = None, q0: dict[str, Any] | None = None) -> Fill:
         # Speed: the wallet's balances and the token's decimals are read from the RPC while Jupiter quotes;
         # only the quote and the swap go through the (shared, spaced) Jupiter queue.
         live = self.mode != "dry"
@@ -825,7 +888,7 @@ class JupiterExecutor:
             _took("sol_price", time.monotonic() - t0)
             lamports = int(usd / px * LAMPORTS)
             t0 = time.monotonic()
-            q = await self.quote(SOL_MINT, mint, lamports, bps)
+            q = q0 or await self.quote(SOL_MINT, mint, lamports, bps)   # q0: the quote that won the best-route check
             _took("quote", time.monotonic() - t0)
             if dec is not None:
                 try:
@@ -881,6 +944,42 @@ class JupiterExecutor:
                 log.warning("sell %s: %s; retrying with a fresh quote (slippage %.0f%%)", mint[:8], exc, bps / 100)
         raise SwapError("unreachable")
 
+    async def _sell_direct_offer(self, mint: str, amount: int, held: int, bps: int | None,
+                                 sol0: float) -> tuple[bytes, str, float]:
+        """Build a PumpPortal sell of `amount` raw tokens and simulate it: (unsigned tx, signed base64, SOL it
+        would bring in, all fees included). Raises DirectUnavailable when it can't (nothing is sent)."""
+        from solders.transaction import VersionedTransaction
+
+        decimals = await self.decimals(mint)
+        try:
+            resp = await self.http.post(PUMPPORTAL_TRADE, data={
+                "publicKey": self.pubkey, "action": "sell", "mint": mint,
+                "amount": f"{amount / 10 ** decimals:.{decimals}f}", "denominatedInSol": "false",
+                "slippage": f"{(bps or self.s.live_slippage_bps) / 100:.2f}",
+                "priorityFee": f"{self.s.live_direct_priority_fee_sol:.6f}", "pool": "auto"}, timeout=8)
+        except Exception as exc:
+            raise DirectUnavailable(f"PumpPortal: {exc}") from exc
+        ctype = resp.headers.get("content-type", "")
+        if resp.status_code != 200 or not resp.content or ctype.startswith(("application/json", "text")):
+            raise DirectUnavailable(f"PumpPortal {resp.status_code}: {resp.text[:150]}")
+        try:
+            txo = VersionedTransaction.from_bytes(resp.content)
+        except Exception as exc:
+            raise DirectUnavailable(f"PumpPortal sent no transaction: {exc}") from exc
+        raw = base64.b64encode(bytes(VersionedTransaction(txo.message, [self.kp]))).decode()
+        try:
+            tok_after, lam_after, err = await self._simulate_buy(raw, mint)
+        except Exception as exc:
+            raise DirectUnavailable(f"simulation failed: {exc}") from exc
+        if err:
+            raise DirectUnavailable(f"simulation error: {err}")
+        if held - tok_after < amount * 0.99:          # it would not sell what we asked (rounding aside)
+            raise DirectUnavailable(f"simulation sells {held - tok_after} of {amount}")
+        sol_out = lam_after / LAMPORTS - sol0
+        if sol_out <= 0:                              # e.g. paid out as wrapped SOL: let Jupiter do it
+            raise DirectUnavailable("simulation brings no SOL")
+        return resp.content, raw, sol_out
+
     async def _sell_once(self, mint: str, tokens_raw: int, bps: int | None = None) -> Fill:
         px = await self.sol_price()
         if self.mode == "dry":
@@ -891,9 +990,45 @@ class JupiterExecutor:
         amount = min(tokens_raw, held)
         if amount <= 0:
             raise SwapError("no tokens left to sell")
-        q = await self.quote(mint, SOL_MINT, amount, bps)
         sol0 = await self.sol_balance()
-        sig, ok = await self._send(q)
+        offer = None
+        if (self.s.live_best_route_sells and mint.endswith("pump") and getattr(self, "kp", None)
+                and time.monotonic() - _NO_DIRECT.get(mint, -1e9) >= NO_DIRECT_SECONDS):
+            # best route: Jupiter's quote and a simulated PumpPortal sell at the same time; more SOL wins
+            jq, offer = await asyncio.gather(self.quote(mint, SOL_MINT, amount, bps),
+                                             self._sell_direct_offer(mint, amount, held, bps, sol0),
+                                             return_exceptions=True)
+            if isinstance(offer, BaseException):
+                log.info("sell %s: PumpPortal not available (%s)", mint[:8], str(offer)[:120])
+                offer = None
+            if isinstance(jq, BaseException):
+                if offer is None:
+                    raise jq
+                q = None
+            else:
+                q = jq
+        else:
+            q = await self.quote(mint, SOL_MINT, amount, bps)
+        use_pp = False
+        if offer is not None:
+            if q is None:
+                use_pp = True
+            else:
+                jup_sol = int(q["outAmount"]) / LAMPORTS - self.s.live_jupiter_fee_estimate_sol
+                edge = route_edge_sell(offer[2], jup_sol)
+                use_pp = edge * 100 < -self.s.live_best_route_margin_pct
+                log.info("sell %s: PumpPortal %.5f SOL vs Jupiter %.5f SOL after fees -> %s", mint[:8], offer[2],
+                         jup_sol, "PumpPortal" if use_pp else "Jupiter")
+        if use_pp:
+            try:
+                sig, ok = await self._send_tx(offer[0], signed_b64=offer[1])
+            except SwapError as exc:
+                # pump.fun / PumpSwap slippage codes (6002-6004): nothing was sold, retry with a fresh price
+                if not isinstance(exc, Dropped) and any(c in str(exc) for c in ("6002", "6003", "6004")):
+                    raise SlippageError(f"PumpPortal sell: {exc}") from exc
+                raise
+        else:
+            sig, ok = await self._send(q)
         await asyncio.sleep(1)
         sold, sol1 = held - await self.token_balance(mint), await self.sol_balance()
         if sold <= 0:
