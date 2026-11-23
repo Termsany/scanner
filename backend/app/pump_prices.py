@@ -37,12 +37,16 @@ def price_from(msg: dict[str, Any]) -> float | None:
         v_sol, v_tok = float(msg.get("vSolInBondingCurve") or 0), float(msg.get("vTokensInBondingCurve") or 0)
         if v_sol > 0 and v_tok > 0:
             return v_sol / v_tok                      # bonding curve: the price after this trade
-        sol, tok = float(msg.get("solAmount") or 0), float(msg.get("tokenAmount") or 0)
-        if sol > 0 and tok > 0:
-            return sol / tok                          # PumpSwap: this trade's own price
+        p_sol, p_tok = float(msg.get("solInPool") or 0), float(msg.get("tokensInPool") or 0)
+        if p_sol > 0 and p_tok > 0:
+            return p_sol / p_tok                      # PumpSwap pool reserves after this trade
         mc = float(msg.get("marketCapSol") or 0)
         if mc > 0:
             return mc / 1_000_000_000                 # pump.fun supply is 1 billion tokens
+        sol, tok = float(msg.get("solAmount") or 0), float(msg.get("tokenAmount") or 0)
+        if sol > 0 and tok > 0:
+            return sol / tok                          # last resort: this trade's own price (fees and impact
+                                                      # included, ~7% off on a PumpSwap sell measured 2026-11-23)
     except (TypeError, ValueError):
         return None
     return None
