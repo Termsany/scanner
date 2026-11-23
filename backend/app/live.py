@@ -113,6 +113,9 @@ class ChaseError(Exception):
 
 # Seconds spent in each step of the buy being made in this task (see JupiterExecutor.buy); None = not timing.
 _TIMING: ContextVar[dict[str, float] | None] = ContextVar("_TIMING", default=None)
+# Speed over price (real curve trades, 2026-11-23): pump coins go straight to PumpPortal, without waiting for a
+# Jupiter quote to compare (that wait cost 2-4 s a buy, for 0.2-1.9 % better prices, on coins moving 30 % in seconds)
+_FAST: ContextVar[bool] = ContextVar("_FAST", default=False)
 
 
 def _took(step: str, seconds: float) -> None:
@@ -672,8 +675,8 @@ class JupiterExecutor:
                     _took("confirm", time.monotonic() - t_sent)
                     return sig, True
                 continue        # processed: landed, waiting for confirmation; no need to resend
-            if n % 4:
-                continue                    # re-broadcast / expiry check every ~2 s as before
+            if n % 2:
+                continue                    # re-broadcast / expiry check every ~1 s (was 2 s: lands sooner)
             if last_valid and n % 12 == 0:
                 height = await self._rpc("getBlockHeight", [{"commitment": "confirmed"}])
                 if isinstance(height, int) and height > last_valid:
@@ -715,7 +718,7 @@ class JupiterExecutor:
                 if direct:
                     # best route: Jupiter quotes while PumpPortal builds and simulates; the better one is sent
                     rival = (asyncio.ensure_future(self._jup_buy_quote(mint, usd, bps))
-                             if self.s.live_best_route else None)
+                             if self.s.live_best_route and not _FAST.get() else None)
                     try:
                         f = await self._buy_direct(mint, usd, max_price, bps, rival=rival)
                         timing["route"] = "pumpportal"
@@ -1018,8 +1021,18 @@ class JupiterExecutor:
             raise SwapError("no tokens left to sell")
         sol0 = await self.sol_balance()
         offer = None
-        if (self.s.live_best_route_sells and mint.endswith("pump") and getattr(self, "kp", None)
-                and time.monotonic() - _NO_DIRECT.get(mint, -1e9) >= NO_DIRECT_SECONDS):
+        direct_ok = (mint.endswith("pump") and getattr(self, "kp", None)
+                     and time.monotonic() - _NO_DIRECT.get(mint, -1e9) >= NO_DIRECT_SECONDS)
+        if _FAST.get() and direct_ok:
+            # speed first: PumpPortal straight away; Jupiter only when PumpPortal can't sell it
+            try:
+                offer = await self._sell_direct_offer(mint, amount, held, bps, sol0)
+                q = None
+            except Exception as exc:
+                log.info("sell %s: PumpPortal not available (%s)", mint[:8], str(exc)[:120])
+                offer = None
+                q = await self.quote(mint, SOL_MINT, amount, bps)
+        elif self.s.live_best_route_sells and direct_ok:
             # best route: Jupiter's quote and a simulated PumpPortal sell at the same time; more SOL wins
             jq, offer = await asyncio.gather(self.quote(mint, SOL_MINT, amount, bps),
                                              self._sell_direct_offer(mint, amount, held, bps, sol0),
@@ -1652,6 +1665,7 @@ class CopyEngine:
         sym = pos.symbol or pos.token_address[:6]
         if amount <= 0:
             return False
+        fast = _FAST.set(self.s.live_curve_fast and (pos.leader_wallet or "").startswith("curve:"))
         try:
             f = await self.x.sell(pos.token_address, amount)
         except Exception as exc:
@@ -1666,6 +1680,8 @@ class CopyEngine:
                 await self.notify(f"{self._tag()} ⚠️ Sell ${sym} failed{' again, giving up retries' if attempts >= MAX_SELL_ATTEMPTS else ', retrying'}: "
                                   f"{str(exc)[:160]}")
             return False
+        finally:
+            _FAST.reset(fast)
         pos.error = None
         remaining = max(held - f.tokens_raw, 0)
         if share >= 0.99:
@@ -2158,6 +2174,7 @@ class CopyEngine:
                 continue
             decision_usd = sig.px_sol * sol_usd
             max_price = decision_usd * (1 + self.s.live_curve_max_chase_pct / 100)
+            fast = _FAST.set(self.s.live_curve_fast)
             try:
                 f = await self.x.buy(sig.mint, self.a.size_usd, max_price=max_price)
             except ChaseError as exc:
@@ -2167,6 +2184,8 @@ class CopyEngine:
                 log.warning("live[%s]: curve %s buy %s failed: %s", self.a.name, strat, sym, exc)
                 await self.notify(f"{self._tag()} ❌ curve {strat}: buy ${sym} failed: {str(exc)[:160]}")
                 continue
+            finally:
+                _FAST.reset(fast)
             now = _now()
             target = decision_usd * sig.target_ratio
             pos = LivePosition(
@@ -2186,6 +2205,64 @@ class CopyEngine:
             await self.notify(f"{self._tag()} 📈 curve {strat}: bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
                               f"{sig.why} · sell at ${target:.6g} or {sig.sl_pct:+.0f}% or after "
                               f"{sig.max_hold_s / 60:.0f} min\n{self._tx(f.signature)}")
+
+    async def _curve_exits(self, session: AsyncSession) -> None:
+        """Real curve positions: stop and exit level checked on every step against the paper engine's own
+        bonding-curve price (exact, on-chain, updated on every trade: one reading is enough, no Jupiter call).
+        The paper engine also wakes this engine the moment a held coin crosses a line. Off the curve
+        (graduated, or no fresh price) the normal checks in _targets take over."""
+        from app import curve_live
+
+        if not self.s.live_curve_fast:
+            return
+        rows = [p for p in (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine(), LivePosition.leader_wallet.like("curve:%")))).scalars().all()
+            if int(p.tokens_raw or 0) > 0 and not p.manual_sell_frac
+            and not any(x.get("side") == "sell_failed" for x in (p.fills or []))]
+        curve_live.unwatch(self.a.name, {p.token_address for p in rows})
+        if not rows:
+            return
+        try:
+            sol_usd = await self.x.sol_price()
+        except Exception:
+            return
+        if not sol_usd:
+            return
+        for p in rows:
+            mint = p.token_address
+            try:
+                dec = await self.x.decimals(mint) if hasattr(self.x, "decimals") else 6
+            except Exception:
+                dec = 6 if mint.endswith("pump") else None
+            bought = int(p.tokens_bought_raw or p.tokens_raw) / 10 ** dec if dec is not None else 0
+            if bought <= 0 or not p.cost_usd:
+                continue
+            stop_usd = None
+            if p.stop_pct is not None:
+                stop_usd = p.cost_usd / bought * (1 + p.stop_pct / 100)
+            if p.stop_price is not None:
+                stop_usd = max(stop_usd or 0.0, p.stop_price)
+            target_usd = p.target_price
+            if target_usd is None and p.target_pct is not None:
+                target_usd = p.cost_usd / bought * (1 + p.target_pct / 100)
+            curve_live.watch_exit(mint, self.a.name, stop_usd / sol_usd if stop_usd else None,
+                                  target_usd / sol_usd if target_usd else None)
+            px = curve_live.price(mint)
+            if px is None:
+                continue
+            now_usd = px * sol_usd
+            hit = ("stop" if stop_usd is not None and now_usd <= stop_usd
+                   else "target" if target_usd is not None and now_usd >= target_usd else None)
+            if hit is None:
+                continue
+            log.info("live[%s]: curve exit %s: %s at $%.6g (curve price)", self.a.name, p.symbol, hit, now_usd)
+            share = 1.0 if hit == "stop" else (p.target_share or 1.0)
+            if await self._sell(session, p, share, "your_target" if hit == "target" else "your_stop"):
+                if hit == "target":
+                    p.target_pct = p.target_price = p.target_share = None
+                else:
+                    p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
+            await session.commit()
 
     async def _sell_by(self, session: AsyncSession) -> None:
         """Positions with a time limit (curve trades): sell everything once it has passed."""
@@ -2210,7 +2287,7 @@ class CopyEngine:
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
-        for part in (self._curve, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits,
+        for part in (self._curve, self._curve_exits, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits,
                      self._targets, self._sell_by, self._orders):
             if self.wake is not None and self.wake.is_set():
                 return

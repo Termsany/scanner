@@ -45,6 +45,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app import curve_live
 from app.config import Settings, get_settings
 from app.models import Chain, PaperPosition
 
@@ -309,10 +310,14 @@ class PaperCurve:
                 w.price = final
             w.progress = 100.0
             self._exits(w, now)
+            if mint in curve_live.EXITS:
+                curve_live.on_price(mint, None, graduated=True)
             return
         if w.price and not w.price / 20 <= st["price"] <= w.price * 20:
             return                                    # a 20x jump in one update is a bad reading
         w.price, w.progress = st["price"], st["progress"]
+        if mint in curve_live.EXITS:                  # a live account holds it: its stop / exit, at once
+            curve_live.on_price(mint, w.price)
         w.path.append((now, w.progress))
         for strat, rule in self.rules.items():
             level = rule.level
@@ -328,8 +333,6 @@ class PaperCurve:
                 w.pending[strat] = (now + self.s.curve_latency_s, w.price,
                                     f"curve {w.progress:.0f}% at {now - w.created:.0f}s")
                 if self.live_signals and strat in self.live_signals:     # accounts trade this rule for real
-                    from app import curve_live
-
                     curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
                                        f"curve {w.progress:.0f}% at {now - w.created:.0f}s",
                                        rule.max_hold_s or self.s.curve_max_hold_s)

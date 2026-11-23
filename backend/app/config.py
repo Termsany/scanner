@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     # Real-money curve trades (app/curve_live.py): an account with a curve_strategy buys that rule's signals
     live_curve_max_signal_age_s: float = 8.0     # a signal older than this is too late to buy
     live_curve_max_chase_pct: float = 15.0       # pay at most this much above the price at the paper decision
+    live_curve_fast: bool = True                 # curve trades: PumpPortal straight away (no Jupiter compare),
+    # stop / exit on the paper engine's live curve price at once (no 3 s check, no second reading)
     scout_min_tstat: float = 1.645
     scout_max_ret_std: float = 1.0               # std of per-trade return (1.0 = 100 %)
     scout_max_idle_hours: float = 72.0

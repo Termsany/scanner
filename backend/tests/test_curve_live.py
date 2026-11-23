@@ -150,3 +150,104 @@ def test_a_curve_position_can_be_sold_by_hand_from_the_page():
     ok, p = _db(body)
     assert ok and ("sell", "HANDpump", 1_000_000) in x.calls
     assert p.status == "closed" and p.exit_reason == "manual"
+
+
+def test_curve_price_crossing_wakes_once_and_unwatch_cleans_up():
+    import asyncio
+
+    from app.fast_watch import WAKE
+
+    ev = asyncio.Event()
+    WAKE.append(ev)
+    try:
+        curve_live.watch_exit("XPpump", "curve", 0.05, 0.2)
+        curve_live.on_price("XPpump", 0.1, now=1.0)
+        assert not ev.is_set() and curve_live.price("XPpump", now=2.0) == 0.1
+        curve_live.on_price("XPpump", 0.04, now=3.0)              # under the stop: wake
+        assert ev.is_set()
+        ev.clear()
+        curve_live.on_price("XPpump", 0.039, now=3.5)             # still under: no second wake
+        assert not ev.is_set()
+        assert curve_live.price("XPpump", max_age_s=60, now=100.0) is None    # dead feed: no price
+        curve_live.on_price("XPpump", None, graduated=True)
+        assert curve_live.price("XPpump", now=3.6) is None
+        curve_live.on_price("NOTHELDpump", 0.1)                   # not held: not kept
+        assert "NOTHELDpump" not in curve_live.PRICES
+        curve_live.unwatch("curve", set())
+        assert "XPpump" not in curve_live.EXITS
+    finally:
+        WAKE.remove(ev)
+
+
+def test_paper_engine_hands_held_coins_curve_price_to_live():
+    c = PaperCurve(S())
+    c.on_create({"txType": "create", "mint": "HELDpump", "symbol": "H", "bondingCurveKey": "CH"}, 0.0)
+    curve_live.watch_exit("HELDpump", "curve", None, None)
+    try:
+        c.on_curve("HELDpump", acct(20), 5.0)
+        assert curve_live.price("HELDpump") == c.watch["HELDpump"].price
+    finally:
+        curve_live.unwatch("curve", set())
+
+
+def _held(sess, mint, **kw):
+    sess.add(LivePosition(mode="live", account="curve", token_address=mint, symbol="S",
+                          leader_wallet="curve:curve_fast34", leader_trade_id=0, status="open", cost_usd=10,
+                          tokens_raw="1000000", tokens_bought_raw="1000000", hands_off=True, stop_pct=-25.0,
+                          target_price=30.0, target_share=1.0, sell_by=_now() + timedelta(minutes=10), fills=[],
+                          **kw))
+
+
+def test_stop_sells_on_the_first_curve_price_under_it():
+    """$10 for 1 token (6 decimals): stop at $7.50 = 0.05 SOL at $150. One curve reading under it sells."""
+    s = S()
+    x = FakeExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=Account("curve", 10, 30, 20, [], curve_strategy="curve_fast34"))
+        _held(sess, "STOPpump")
+        await sess.commit()
+        await eng.step(sess)
+        await eng.step(sess)                        # registers the lines; no price yet: nothing sold
+        assert x.calls == [] and curve_live.EXITS["STOPpump"]["curve"][0] == 7.5 / 150
+        curve_live.on_price("STOPpump", 0.049)
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().one()
+
+    try:
+        p = _db(body)
+    finally:
+        curve_live.unwatch("curve", set())
+    assert ("sell", "STOPpump", 1_000_000) in x.calls and p.status == "closed" and p.exit_reason == "your_stop"
+
+
+def test_curve_buys_and_sells_ask_for_speed():
+    from app import live as live_mod
+
+    seen = []
+
+    class X(FakeExec):
+        async def buy(self, mint, usd, max_price=None, slippage_bps=None):
+            seen.append(("buy", live_mod._FAST.get()))
+            return await super().buy(mint, usd, max_price, slippage_bps)
+
+        async def sell(self, mint, tokens_raw):
+            seen.append(("sell", live_mod._FAST.get()))
+            return await super().sell(mint, tokens_raw)
+
+    s = S()
+    x = X()
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=Account("curve", 10, 30, 20, [], curve_strategy="curve_fast34"))
+        await eng.step(sess)
+        curve_live.publish("curve_fast34", CURVE_RULES["curve_fast34"], "FASTpump", "F", 2e-7, 34.0, "x", 900)
+        await eng.step(sess)
+        curve_live.on_price("FASTpump", 1e-9)          # far under the stop
+        await eng.step(sess)
+
+    try:
+        _db(body)
+    finally:
+        curve_live.unwatch("curve", set())
+    assert seen == [("buy", True), ("sell", True)] and live_mod._FAST.get() is False

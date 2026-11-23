@@ -87,3 +87,66 @@ def take(after_id: int, strategy: str, max_age_s: float, now: float | None = Non
 
 def last_id() -> int:
     return SIGNALS[-1].id if SIGNALS else 0
+
+
+# ---- exits of real curve positions on the paper engine's own curve price (2026-11-23: stops were 7-10 s late) --
+# The paper engine reads every bonding-curve change of the coins it watches (Helius). For coins a live account
+# holds, it hands the price here and wakes the live engines the moment it crosses a stop or an exit level, so
+# the sell starts on that update, not on the next Jupiter price check (every 3 s, two readings in a row).
+PRICES: dict[str, tuple[float, float]] = {}                  # mint -> (SOL per token, monotonic time)
+EXITS: dict[str, dict[str, tuple[float | None, float | None]]] = {}   # mint -> {account: (stop, target) in SOL}
+_crossed: set[str] = set()
+
+
+def watch_exit(mint: str, account: str, stop_sol: float | None, target_sol: float | None) -> None:
+    EXITS.setdefault(mint, {})[account] = (stop_sol, target_sol)
+
+
+def unwatch(account: str, keep: set[str]) -> None:
+    """Drop this account's lines on coins it no longer holds."""
+    for mint in list(EXITS):
+        if mint not in keep and account in EXITS[mint]:
+            del EXITS[mint][account]
+            if not EXITS[mint]:
+                del EXITS[mint]
+                PRICES.pop(mint, None)
+                _crossed.discard(mint)
+
+
+def crossed(mint: str, px: float) -> bool:
+    return any((stop is not None and px <= stop) or (target is not None and px >= target)
+               for stop, target in EXITS.get(mint, {}).values())
+
+
+def on_price(mint: str, px_sol: float | None, graduated: bool = False, now: float | None = None) -> None:
+    """Called by the paper engine on every curve update of a coin in EXITS."""
+    if mint not in EXITS:
+        return
+    if graduated or not px_sol:
+        PRICES.pop(mint, None)           # off the curve: the normal price checks take over
+        return
+    PRICES[mint] = (px_sol, time.monotonic() if now is None else now)
+    if crossed(mint, px_sol):
+        if mint not in _crossed:         # wake once per crossing, not on every update while it sells
+            _crossed.add(mint)
+            _wake()
+    else:
+        _crossed.discard(mint)
+
+
+def price(mint: str, max_age_s: float = 120.0, now: float | None = None) -> float | None:
+    """The coin's curve price (SOL per token) if the paper engine saw it lately. A curve only changes with a
+    trade, so a quiet coin keeps its price; the age limit only guards against a dead feed."""
+    got = PRICES.get(mint)
+    now = time.monotonic() if now is None else now
+    return got[0] if got and now - got[1] <= max_age_s else None
+
+
+def _wake() -> None:
+    try:
+        from app.fast_watch import WAKE
+
+        for ev in list(WAKE):
+            ev.set()
+    except Exception:
+        pass
