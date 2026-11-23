@@ -63,10 +63,11 @@ def test_buy_at_70_and_85_then_sell_at_graduation():
     c.on_curve("M", acct(86), 30.0)
     c.tick(32.5)                                                           # no trade: fill on the tick
     assert set(c.watch["M"].held) == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail",
-                                      "curve_70_filter", "curve_85_half40"}
+                                      "curve_70_filter", "curve_85_half40", "curve_70_live"}
     c.on_curve("M", acct(100, complete=True), 40.0)
     reasons = {p["strategy"]: p for p in c.closed}
-    assert {p["reason"] for p in c.closed} == {"graduated"}
+    assert {p["reason"] for p in c.closed if p["strategy"] != "curve_70_live"} == {"graduated"}
+    assert reasons["curve_70_live"]["pnl"] > 0                              # the real-money copy of curve_70
     assert reasons["curve_70"]["pnl"] > reasons["curve_85"]["pnl"] > 0      # earlier entry, bigger gain
     assert set(c.watch["M"].held) == {"curve_70_trail"}                     # the trail rides on after graduation
     assert c.tick(41.0) == []

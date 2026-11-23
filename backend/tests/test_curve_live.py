@@ -36,7 +36,7 @@ def S(**kw):
 def test_price_ratio_and_live_rules():
     assert abs(curve_live.price_ratio(33.8, 96.6) - 6.881) < 0.01        # ~588% from 34% to 97% sold
     rules = curve_live.live_rules()
-    assert "curve_fast34" in rules and "curve_30_70_sl" in rules
+    assert "curve_fast34" in rules and "curve_30_70_sl" in rules and "curve_70_live" in rules
     assert "curve_70" not in rules and "curve_30_70" not in rules        # no stop: not traded for real
 
 

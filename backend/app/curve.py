@@ -95,6 +95,11 @@ CURVE_RULES: dict[str, CurveRule] = {
     "curve_fast19": CurveRule(19.3, "custom", exit_at=96.6, sl=-30.0, size=10.0, max_hold_s=900.0, max_secs=30.0),
     "curve_fast34": CurveRule(33.8, "custom", exit_at=96.6, sl=-25.0, size=10.0, max_hold_s=900.0, max_secs=60.0),
     "curve_93_fast": CurveRule(92.6, "custom", exit_at=99.0, sl=-20.0, size=10.0, max_hold_s=600.0, max_secs=240.0),
+    # user's choice (2026-11-23): curve_70 with real money at $10. curve_70 sells at graduation, which a real
+    # account can't (it needs an exit level and a stop), so this is curve_70 with the exit just before
+    # graduation (99 % sold, ~+225 % on a classic curve), the same -25 % stop and 60 min max hold.
+    "curve_70_live": CurveRule(70.0, "custom", exit_at=99.0, sl=-25.0, size=10.0, max_hold_s=3600.0,
+                               title="curve_70 for real: buy at 70% sold, sell at 99% sold, stop -25%, 60 min max"),
 }
 CURVE_STRATEGIES: dict[str, float] = {k: r.level for k, r in CURVE_RULES.items()}
 RANGE_LATE_PTS = 10.0   # range: buy only while the curve is at most this many points past the entry level
