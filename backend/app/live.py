@@ -145,6 +145,10 @@ class SwapError(Exception):
     pass
 
 
+class RpcBusy(SwapError):
+    """The RPC kept saying 429 / 503 (rate limit) after the quick retries in JupiterExecutor._rpc."""
+
+
 class Dropped(SwapError):
     """The transaction's blockhash expired without it landing: nothing happened on-chain, safe to retry."""
 
@@ -432,6 +436,7 @@ class JupiterGate:
 JUPITER = JupiterGate()
 _sol_px: tuple[float, float] = (0.0, 0.0)   # (monotonic time, USD per SOL), shared by all accounts
 SOL_PRICE_TTL = 60.0        # SOL's price only sizes a buy: a minute old is fine and spares a Jupiter call
+RPC_RETRY_WAITS = (0.2, 0.4, 0.8)   # seconds between tries when the RPC says 429 / 503 (1.4 s at most)
 PUMP_DECIMALS = 6                 # pump.fun mints (address ends in "pump") are always 6 decimals
 _DECIMALS: dict[str, int] = {}   # mint -> decimals (never change), read from the RPC, not Jupiter
 STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6,   # USDC
@@ -460,7 +465,20 @@ class JupiterExecutor:
 
     # ---- plumbing ----------------------------------------------------------
     async def _rpc(self, method: str, params: list[Any]) -> Any:
-        r = await self.http.post(self.rpc_url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        # Helius refuses a share of calls (429) when we pass the plan's per-second limit (2026-11-23: a curve buy
+        # failed on one refused call). Retry a few times, quickly: a refused call did nothing, so even
+        # sendTransaction is safe to resend.
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        for wait in RPC_RETRY_WAITS:
+            r = await self.http.post(self.rpc_url, json=payload)
+            if r.status_code not in (429, 503):
+                break
+            log.info("rpc %s: HTTP %s, retrying in %.1fs", method, r.status_code, wait)
+            await asyncio.sleep(wait)
+        else:
+            r = await self.http.post(self.rpc_url, json=payload)
+            if r.status_code in (429, 503):
+                raise RpcBusy(f"{method}: RPC busy (HTTP {r.status_code}) after {len(RPC_RETRY_WAITS)} retries")
         r.raise_for_status()
         body = r.json()
         if body.get("error"):
@@ -617,10 +635,12 @@ class JupiterExecutor:
             await asyncio.sleep(0.12)
             try:
                 return await self._rpc(method, params)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 429 or attempt == 5:
-                    raise SwapError(f"{method}: HTTP {exc.response.status_code}") from None
+            except RpcBusy:
+                if attempt == 5:
+                    raise
                 await asyncio.sleep(1.5 * (attempt + 1))
+            except httpx.HTTPStatusError as exc:
+                raise SwapError(f"{method}: HTTP {exc.response.status_code}") from None
         raise SwapError("unreachable")
 
     async def transfer_sol(self, to: str, lamports: int) -> str:

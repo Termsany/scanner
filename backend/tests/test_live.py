@@ -2408,6 +2408,41 @@ def test_token_balance_of_a_mint_the_rpc_has_not_seen_yet_is_zero():
         assert asyncio.run(go()) == 0
 
 
+def test_rpc_retries_a_rate_limit_then_gives_up_cleanly(monkeypatch):
+    import asyncio
+
+    import httpx
+    import respx
+
+    from app import live as live_mod
+    from app.live import JupiterExecutor, RpcBusy
+
+    monkeypatch.setattr(live_mod, "RPC_RETRY_WAITS", (0.0, 0.0, 0.0))
+    answers: list[httpx.Response] = []
+
+    async def go():
+        x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/"), live=False)
+        try:
+            ok = await x._rpc("getSlot", [])
+            try:
+                await x._rpc("getSlot", [])
+                busy = "no error"
+            except RpcBusy as exc:
+                busy = str(exc)
+            return ok, busy
+        finally:
+            await x.close()
+
+    with respx.mock:
+        route = respx.post("https://rpc.test/").mock(side_effect=lambda req: answers.pop(0))
+        answers += [httpx.Response(429), httpx.Response(429), httpx.Response(200, json={"result": 7})]  # 2 refused
+        answers += [httpx.Response(429)] * 4                                                          # never clears
+        ok, busy = asyncio.run(go())
+    assert ok == 7
+    assert "RPC busy (HTTP 429)" in busy and "api-key" not in busy
+    assert route.call_count == 7
+
+
 def test_sender_tip_is_added_keeping_every_instruction_and_lookup_table():
     import base64 as b64
 
