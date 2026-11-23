@@ -108,7 +108,7 @@ def test_live_buy_uses_our_own_transaction_first():
 
     f, calls = asyncio.run(go())
     assert f.signature == "SIGD" and calls["pp"] == 0 and calls["sent"] == 1
-    assert f.timing.get("local") == 1 and "local_build" in f.timing
+    assert f.timing.get("local") == 1 and "local_build" in f.timing and f.timing["route"] == "local"
 
 
 def test_live_buy_falls_back_to_pumpportal_when_the_simulation_refuses_ours():
@@ -127,6 +127,6 @@ def test_live_buy_falls_back_to_pumpportal_when_the_simulation_refuses_ours():
         return f, calls
 
     f, calls = asyncio.run(go())
-    assert f.signature == "SIGD" and calls["pp"] == 1 and calls["sent"] == 1
+    assert f.signature == "SIGD" and calls["pp"] == 1 and calls["sent"] == 1 and f.timing["route"] == "pumpportal"
     assert MINT_PUMP in live._LOCAL_BAD                     # PumpPortal for this coin for a while
     live._LOCAL_BAD.pop(MINT_PUMP, None)

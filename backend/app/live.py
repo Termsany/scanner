@@ -930,7 +930,7 @@ class JupiterExecutor:
                              if self.s.live_best_route and not _FAST.get() else None)
                     try:
                         f = await self._buy_direct(mint, usd, max_price, bps, rival=rival)
-                        timing["route"] = "pumpportal"
+                        timing["route"] = "local" if timing.get("local") else "pumpportal"
                     except JupiterBetter as exc:
                         log.info("buy %s: Jupiter gives %.2f%% more tokens after fees; buying there",
                                  mint[:8], exc.edge * 100)
