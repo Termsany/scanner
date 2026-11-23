@@ -1,11 +1,12 @@
 "use client";
 
-import { Activity, FlaskConical, History, Info, RefreshCw } from "lucide-react";
+import { Activity, FlaskConical, History, Info, RefreshCw, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { adminCredential, adminWho } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
 import { Badge, button, Empty, PageHeader, pageMain, Panel, SectionTabs, Segmented } from "@/components/ui";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { ago, pct, pctClass, price } from "@/lib/format";
 import type { PaperPositionOut, PaperStrategy, PaperSummary } from "@/lib/types";
 
@@ -46,6 +47,11 @@ export function PaperView() {
   const [loading, setLoading] = useState(false);
   const [tab, setTabState] = useState<Tab>("open");
   const [strategy, setStrategy] = useState("");   // "" = every strategy
+  const [admin, setAdmin] = useState(false);       // the Reset buttons are for the admin only
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    adminWho().then(() => setAdmin(true)).catch(() => setAdmin(false));
+  }, []);
 
   useEffect(() => {
     const read = () => setTabState(window.location.hash === "#history" ? "history" : "open");
@@ -152,10 +158,26 @@ export function PaperView() {
           <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {data.strategies.map((s) => (
               <StrategyCard key={s.name} s={s} on={strategy === s.name}
-                onClick={() => setStrategy(strategy === s.name ? "" : s.name)} />
+                onClick={() => setStrategy(strategy === s.name ? "" : s.name)}
+                onReset={admin ? async () => {
+                  if (!confirm(`Start ${s.name} from zero? Its older trades stay saved but stop counting here.`)) return;
+                  try {
+                    await api.paperReset(adminCredential(), s.name);
+                    setNote(`${s.name} starts from zero now`);
+                    await load(hours);
+                  } catch (e) {
+                    setNote(e instanceof ApiError ? e.message : "Could not reset it");
+                  }
+                } : undefined} />
             ))}
           </section>
 
+          {note && (
+            <p className="-mt-3 mb-4 flex items-center gap-2 text-xs text-mint">
+              {note}
+              <button type="button" className="text-muted hover:text-ink" onClick={() => setNote("")} aria-label="Close">×</button>
+            </p>
+          )}
           <SectionTabs label="Paper sections" value={tab} onChange={setTab}
             tabs={[
               { key: "open", label: `Open trades · ${open.length}`, icon: <Activity /> },
@@ -191,17 +213,33 @@ export function PaperView() {
   );
 }
 
-function StrategyCard({ s, on, onClick }: { s: PaperStrategy; on: boolean; onClick: () => void }) {
+function StrategyCard({ s, on, onClick, onReset }: {
+  s: PaperStrategy;
+  on: boolean;
+  onClick: () => void;
+  onReset?: () => void;
+}) {
   const total = s.realized_usd + s.unrealized_usd;
   return (
-    <button type="button" onClick={onClick} aria-pressed={on}
-      className={`card group relative overflow-hidden p-5 text-left transition duration-300 hover:-translate-y-0.5 ${
+    <div role="button" tabIndex={0} onClick={onClick} aria-pressed={on}
+      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onClick())}
+      className={`card group relative cursor-pointer overflow-hidden p-5 text-left transition duration-300 hover:-translate-y-0.5 ${
         on ? "border-mint/60 shadow-[0_0_0_1px_rgb(43_228_167/0.35)]" : "hover:border-line-strong"}`}>
       <span className={`absolute inset-x-0 top-0 h-[2px] ${total >= 0 ? "bg-gradient-to-r from-mint/0 via-mint/70 to-mint/0" : "bg-gradient-to-r from-bear/0 via-bear/70 to-bear/0"}`} />
       <div className="flex items-center justify-between gap-2">
         <span className="num text-[11px] font-semibold tracking-[0.14em] text-muted uppercase">{s.name}</span>
-        {on && <Badge tone="mint">filter</Badge>}
+        <span className="flex items-center gap-1.5">
+          {on && <Badge tone="mint">filter</Badge>}
+          {onReset && (
+            <button type="button" title="Start this strategy from zero" aria-label={`Reset ${s.name}`}
+              onClick={(e) => { e.stopPropagation(); onReset(); }}
+              className="inline-flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10px] text-muted hover:border-bear/50 hover:text-bear">
+              <RotateCcw className="size-3" /> Reset
+            </button>
+          )}
+        </span>
       </div>
+      {s.reset_at && <div className="mt-0.5 text-[10px] text-faint">since {new Date(s.reset_at).toLocaleString()}</div>}
       <div className="mt-1 line-clamp-2 text-xs text-faint">{s.title}</div>
       <div className={`num mt-3 text-2xl font-semibold ${pctClass(s.realized_usd || null)}`}>{money(s.realized_usd)}</div>
       <div className="num mt-1 text-xs text-muted">
@@ -217,7 +255,7 @@ function StrategyCard({ s, on, onClick }: { s: PaperStrategy; on: boolean; onCli
       <div className="num mt-2 text-[11px] text-faint">
         {s.mirror ? `Exits with the wallet · max ${hold(s.max_hold_minutes)}` : `TP +${s.tp_pct}% · SL ${s.sl_pct}% · max ${hold(s.max_hold_minutes)}`}
       </div>
-    </button>
+    </div>
   );
 }
 

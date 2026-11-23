@@ -345,6 +345,7 @@ export interface PaperStrategy {
   best_pct: number | null;
   worst_pct: number | null;
   exit_reasons: Record<string, number>;
+  reset_at?: string | null;       // the owner reset its numbers: only trades opened since count
 }
 
 export interface PaperPositionOut {

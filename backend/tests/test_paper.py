@@ -293,3 +293,33 @@ def test_a_wild_price_jump_is_ignored_until_it_repeats():
         return [r.exit_reason for r in rows]
 
     assert set(_db(body)) == {"take_profit"}
+
+
+def test_reset_starts_a_strategy_from_zero_and_keeps_its_trades():
+    from app.paper import reset_strategy
+
+    s = _settings()
+
+    async def body(sess):
+        tok = Token(chain=Chain.solana, address=MINT, symbol="TOK")
+        sess.add(tok)
+        await sess.flush()
+        await process_entries(sess, s)
+        await sess.commit()
+        sess.add(Signal(token_id=tok.id, score=86, badge=Badge.strong_alpha, price_usd=1.0, payload={}))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        await process_exits(sess, _prices({MINT: 0.5}), s)       # both signal strategies stop out
+        await sess.commit()
+        before = {x["name"]: x for x in (await paper_summary(sess, settings=s))["strategies"]}
+        await reset_strategy(sess, "signal_80")
+        after = {x["name"]: x for x in (await paper_summary(sess, settings=s))["strategies"]}
+        kept = len((await sess.execute(select(PaperPosition))).scalars().all())
+        return before, after, kept
+
+    before, after, kept = _db(body)
+    assert before["signal_80"]["closed"] == 1 and after["signal_80"]["closed"] == 0
+    assert after["signal_80"]["realized_usd"] == 0 and after["signal_80"]["reset_at"]
+    assert after["signal_85"]["closed"] == 1 and after["signal_85"]["reset_at"] is None   # others untouched
+    assert kept == 2                                                                       # nothing deleted

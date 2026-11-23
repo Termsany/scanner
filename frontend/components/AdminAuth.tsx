@@ -21,6 +21,11 @@ function savedShared(): string {
   }
 }
 
+/** What admin calls from a public page send: the shared password saved here, or else the session cookie. */
+export function adminCredential(): string {
+  return savedShared() || SESSION;
+}
+
 /** Who is signed in as admin: the session cookie, or else the old shared password saved in this browser. */
 export async function adminWho() {
   try {

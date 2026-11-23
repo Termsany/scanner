@@ -147,6 +147,11 @@ export const api = {
       method: "POST", ...adm(password), body: JSON.stringify(items), signal,
     }),
 
+  paperReset: (password: string, strategy: string) =>
+    request<{ ok: boolean; reset_at: string }>(`/api/live/paper/${encodeURIComponent(strategy)}/reset`, {
+      method: "POST", ...adm(password),
+    }),
+
   holdings: (password: string, signal?: AbortSignal) =>
     request<Holdings>("/api/live/holdings", { ...adm(password), signal }),
 

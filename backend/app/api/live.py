@@ -454,6 +454,18 @@ async def peaks(body: list[PeakIn], request: Request, _: Auth) -> dict[str, Any]
     return {"peaks": out}
 
 
+@router.post("/paper/{strategy}/reset")
+async def paper_reset(strategy: str, session: Session, _: Auth) -> dict[str, Any]:
+    """Admin: a paper strategy's numbers start from zero (older trades stay in the database, just not counted)."""
+    from app.paper import reset_strategy
+
+    try:
+        at = await reset_strategy(session, strategy)
+    except KeyError:
+        raise HTTPException(404, "No such paper strategy") from None
+    return {"ok": True, "strategy": strategy, "reset_at": at.isoformat()}
+
+
 class PauseIn(BaseModel):
     paused: bool
 

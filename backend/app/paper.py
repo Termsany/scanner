@@ -516,6 +516,38 @@ def _row(p: PaperPosition, s: Settings) -> dict[str, Any]:
     return d
 
 
+RESET_KEY = "paper_reset:"     # tracker_cursors key + strategy -> ISO time the owner reset its numbers
+
+
+async def paper_resets(session: AsyncSession) -> dict[str, datetime]:
+    rows = (await session.execute(select(TrackerCursor).where(TrackerCursor.key.like(RESET_KEY + "%")))).scalars().all()
+    out = {}
+    for r in rows:
+        try:
+            out[r.key[len(RESET_KEY):]] = datetime.fromisoformat(r.value)
+        except ValueError:
+            continue
+    return out
+
+
+async def reset_strategy(session: AsyncSession, strategy: str) -> datetime:
+    """Start a strategy's numbers from zero: /paper counts only trades opened from now on. Nothing is deleted."""
+    if strategy not in STRATEGIES:
+        raise KeyError(strategy)
+    now = _now()
+    await _set_cursor_str(session, RESET_KEY + strategy, now.isoformat())
+    await session.commit()
+    return now
+
+
+async def _set_cursor_str(session: AsyncSession, key: str, value: str) -> None:
+    row = await session.get(TrackerCursor, key)
+    if row is None:
+        session.add(TrackerCursor(key=key, value=value))
+    else:
+        row.value = value
+
+
 async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit: int = 50,
                         settings: Settings | None = None) -> dict[str, Any]:
     s = settings or get_settings()
@@ -524,6 +556,8 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
         select(PaperPosition).where(or_(PaperPosition.entry_time >= since, PaperPosition.status == "open"))
         .order_by(PaperPosition.entry_time.desc())
     )).scalars().all()
+    resets = await paper_resets(session)
+    rows = [r for r in rows if r.strategy not in resets or (utc(r.entry_time) or since) >= resets[r.strategy]]
 
     strategies = []
     for strat in STRATEGIES.values():
@@ -549,6 +583,7 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
             "best_pct": round(max(r.pnl_pct or 0 for r in closed), 2) if closed else None,
             "worst_pct": round(min(r.pnl_pct or 0 for r in closed), 2) if closed else None,
             "exit_reasons": dict(reasons),
+            "reset_at": resets[strat.name].isoformat() if strat.name in resets else None,
         })
     return {
         "hours": hours, "size_usd": s.paper_size_usd, "slippage_pct": s.paper_slippage_pct,
