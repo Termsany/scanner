@@ -282,3 +282,38 @@ def test_several_curve_bots_each_at_its_own_entry():
     assert bots_of(TradingAccount(name="z", curve_strategy="curve_fast34",
                                   curve_bots={"curve_fast34": {"enabled": False, "size_usd": 5}})) == {
         "curve_fast34": {"enabled": False, "size_usd": 5}}
+
+
+def test_worker_publishes_the_curve_price_and_the_page_prefers_it():
+    import asyncio
+
+    from app import live_prices
+    from app.api.live import _with_live
+    from app.cache import Cache
+
+    live_prices._cache = Cache(None)                 # in-memory for the test
+    s = S()
+    x = FakeExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=Account("curve", 10, 30, 20, [], curve_strategy="curve_fast34"))
+        _held(sess, "PXpump")
+        await sess.commit()
+        await eng.step(sess)
+        await eng.step(sess)                         # registers the coin with the paper engine's feed
+        curve_live.on_price("PXpump", 0.1)           # $15 at $150 / SOL, above the stop ($7.50)
+        eng._px_at = 0.0
+        await eng.step(sess)
+
+    try:
+        _db(body)
+        got = asyncio.run(live_prices.read(["PXpump", "OTHERpump"]))
+        assert got == {"PXpump": 0.1 * 150}
+        stale = asyncio.run(live_prices.read(["PXpump"], now=10 ** 12))
+        assert stale == {}
+        merged = asyncio.run(_with_live({"PXpump": {"usd": 3.0, "decimals": 6}, "ABC": {"usd": 1.0, "decimals": 9}},
+                                        ["PXpump", "ABC"]))
+        assert merged == {"PXpump": {"usd": 15.0, "decimals": 6}, "ABC": {"usd": 1.0, "decimals": 9}}
+    finally:
+        curve_live.unwatch("curve", set())
+        live_prices._cache = None

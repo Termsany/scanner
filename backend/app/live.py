@@ -2275,6 +2275,33 @@ class CopyEngine:
                     p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
             await session.commit()
 
+    async def _publish_prices(self, session: AsyncSession) -> None:
+        """Every second: the exact price of the pump coins this account holds (bonding curve from the paper engine,
+        else the on-chain pool feed) for the /live page, which otherwise only has DexScreener's lagging one."""
+        if self.x.mode != "live" or time.monotonic() - getattr(self, "_px_at", 0.0) < 1.0:
+            return
+        self._px_at = time.monotonic()
+        from app import curve_live, live_prices, pool_prices
+
+        mints = sorted({m for (m,) in (await session.execute(select(LivePosition.token_address).where(
+            LivePosition.status == "open", *self._mine()))).all() if m and m.endswith("pump")})
+        if not mints:
+            return
+        if pool_prices.POOL is not None:
+            pool_prices.POOL.request([m for m in mints if curve_live.price(m) is None])
+        found = {}
+        for m in mints:
+            sol = curve_live.price(m) or (pool_prices.POOL.price_sol(m) if pool_prices.POOL is not None else None)
+            if sol:
+                found[m] = sol
+        if not found:
+            return
+        try:
+            sol_usd = await self.x.sol_price()
+            await live_prices.publish({m: s * sol_usd for m, s in found.items()})
+        except Exception as exc:
+            log.debug("live: publishing prices failed: %s", exc)
+
     async def _sell_by(self, session: AsyncSession) -> None:
         """Positions with a time limit (curve trades): sell everything once it has passed."""
         now = _now()
@@ -2298,7 +2325,7 @@ class CopyEngine:
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
-        for part in (self._curve, self._curve_exits, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits,
+        for part in (self._curve, self._curve_exits, self._publish_prices, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits,
                      self._targets, self._sell_by, self._orders):
             if self.wake is not None and self.wake.is_set():
                 return

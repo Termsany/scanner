@@ -232,6 +232,24 @@ async def sol_balances(http: httpx.AsyncClient, pubkeys: list[str]) -> dict[str,
     return {pk: ((v or {}).get("lamports", 0) / 1e9) for pk, v in zip(pubkeys, vals)}
 
 
+async def _with_live(prices: dict[str, dict[str, float]], mints: list[str]) -> dict[str, dict[str, float]]:
+    """DexScreener lags minutes behind on new pump coins: use the worker's own exact price where it has a fresh
+    one (bonding curve / pool, app/live_prices.py)."""
+    from app import live_prices
+
+    try:
+        fast = await live_prices.read([m for m in mints if m.endswith("pump")])
+    except Exception:
+        return prices
+    if not fast:
+        return prices
+    out = dict(prices)
+    for m, usd in fast.items():
+        dec = (prices.get(m) or {}).get("decimals", _decimals.get(m, 6))
+        out[m] = {"usd": usd, "decimals": dec}
+    return out
+
+
 def _mark(p: dict[str, Any], px: dict[str, float] | None) -> None:
     """Value the tokens still held at the live price; unrealized = value now + already sold - cost."""
     p["price_usd"] = p["value_usd"] = p["unrealized_usd"] = p["unrealized_pct"] = None
@@ -260,7 +278,7 @@ async def live(request: Request, session: Session, _: Auth) -> dict[str, Any]:
     ]
     http: httpx.AsyncClient = request.app.state.http
     mints = sorted({p["token_address"] for a in accounts for p in a["open"]} | {SOL_MINT})
-    prices = await _cached("px:" + ",".join(mints), PRICE_TTL, lambda: jupiter_prices(http, mints)) or {}
+    prices = await _with_live(await _cached("px:" + ",".join(mints), PRICE_TTL, lambda: jupiter_prices(http, mints)) or {}, mints)
     pubkeys = sorted({a["pubkey"] for a in accounts if a["pubkey"]})
     balances = (await _cached("bal:" + ",".join(pubkeys), BALANCE_TTL, lambda: sol_balances(http, pubkeys))
                 if pubkeys else {}) or {}
@@ -703,7 +721,7 @@ async def overview(request: Request, session: Session, _: Auth) -> dict[str, Any
     http: httpx.AsyncClient = request.app.state.http
     accounts = out["accounts"]
     mints = sorted({t["token_address"] for a in accounts for t in a["open_tokens"]} | {SOL_MINT})
-    prices = await _cached("px:" + ",".join(mints), PRICE_TTL, lambda: jupiter_prices(http, mints)) or {}
+    prices = await _with_live(await _cached("px:" + ",".join(mints), PRICE_TTL, lambda: jupiter_prices(http, mints)) or {}, mints)
     pubkeys = sorted({a["pubkey"] for a in accounts if a["pubkey"]})
     balances = (await _cached("bal:" + ",".join(pubkeys), BALANCE_TTL, lambda: sol_balances(http, pubkeys))
                 if pubkeys else {}) or {}

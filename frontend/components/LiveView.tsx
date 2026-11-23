@@ -271,9 +271,11 @@ function TargetEditor({
           </span>
         </span>
       )}
-      {p.hands_off && !open && (
+      {p.hands_off && !open && (p.leader_wallet?.startsWith("curve:") ? (
+        <span className="order-first basis-full text-[11px] text-gold">🤖 curve bot {p.leader_wallet.slice(6)}: sells at the target, the stop or its time limit</span>
+      ) : (
         <span className="order-first basis-full text-[11px] text-sky">✋ you manage it: the bot won&apos;t sell it</span>
-      )}
+      ))}
       {!open && (
         <button onClick={() => setOpen(true)}
           className="inline-flex items-center gap-1 rounded-md border border-gold/50 bg-gold-soft px-2.5 py-1 font-medium text-gold hover:border-gold">
@@ -808,7 +810,9 @@ function OpenCard({ p, now, onSell, onTarget, peak }: {
               ${p.symbol || short(p.token_address)}
             </a>
             {p.mode === "dry" && <span className="rounded border border-line px-1 text-[10px] text-faint">DRY</span>}
-            {p.hands_off && <Badge tone="sky">✋ yours</Badge>}
+            {p.hands_off && (p.leader_wallet?.startsWith("curve:")
+              ? <Badge tone="gold">🤖 {p.leader_wallet.slice(6)}</Badge>
+              : <Badge tone="sky">✋ yours</Badge>)}
           </div>
           <div className="text-[11px] text-faint">
             {ago(p.opened_at, now)} · in {money(p.cost_usd)}{p.proceeds_usd ? ` · out ${money(p.proceeds_usd)}` : ""}
