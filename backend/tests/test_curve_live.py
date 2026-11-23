@@ -125,3 +125,28 @@ def test_time_limit_sells_everything():
 
     p = _db(body)[0]
     assert ("sell", "TIMEpump", 1_000_000) in x.calls and p.status == "closed" and p.exit_reason == "quick_time"
+
+
+def test_a_curve_position_can_be_sold_by_hand_from_the_page():
+    """The owner's Sell button (request_manual_sell) works on a real curve position like on any other."""
+    from app.live import request_manual_sell
+
+    s = S()
+    x = FakeExec()
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=Account("curve", 10, 30, 20, [], curve_strategy="curve_fast34"))
+        sess.add(LivePosition(mode="live", account="curve", token_address="HANDpump", symbol="H",
+                              leader_wallet="curve:curve_fast34", leader_trade_id=0, status="open", cost_usd=10,
+                              tokens_raw="1000000", tokens_bought_raw="1000000", hands_off=True, stop_pct=-25.0,
+                              sell_by=_now() + timedelta(minutes=10), fills=[]))
+        await sess.commit()
+        pid = (await sess.execute(select(LivePosition.id))).scalar_one()
+        ok, _ = await request_manual_sell(sess, pid, 1.0)
+        await eng.step(sess)            # first step: sets the trade cursor
+        await eng.step(sess)
+        return ok, (await sess.execute(select(LivePosition))).scalars().one()
+
+    ok, p = _db(body)
+    assert ok and ("sell", "HANDpump", 1_000_000) in x.calls
+    assert p.status == "closed" and p.exit_reason == "manual"
