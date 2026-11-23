@@ -7,6 +7,7 @@ import {
   Crosshair,
   ExternalLink,
   History,
+  ListChecks,
   Radio,
   Wallet,
 } from "lucide-react";
@@ -25,6 +26,8 @@ import type {
   LivePositionOut,
   TargetBody,
   LiveStatus,
+  PriceOrderIn,
+  PriceOrderOut,
 } from "@/lib/types";
 
 const REFRESH_MS = 3_000;
@@ -453,7 +456,7 @@ function PositionRows({
   );
 }
 
-type LiveTab = "open" | "coins" | "history" | "wallets";
+type LiveTab = "open" | "coins" | "orders" | "history" | "wallets";
 
 type Peak = { price: number; at: string };
 
@@ -494,7 +497,7 @@ export function LiveView() {
   useEffect(() => {
     const read = () => {
       const h = window.location.hash.slice(1);
-      if (h === "history" || h === "wallets" || h === "open" || h === "coins") setTabState(h);
+      if (h === "history" || h === "wallets" || h === "open" || h === "coins" || h === "orders") setTabState(h);
     };
     read();
     window.addEventListener("hashchange", read);
@@ -674,6 +677,7 @@ export function LiveView() {
             tabs={[
               { key: "open", label: `Open trades · ${openCount}`, icon: <Activity /> },
               { key: "coins", label: "Wallet coins", icon: <Coins /> },
+              { key: "orders", label: "Price orders", icon: <ListChecks /> },
               { key: "history", label: `History · ${closedCount}`, icon: <History /> },
               { key: "wallets", label: "Wallet activity", icon: <Radio /> },
             ]} />
@@ -684,6 +688,7 @@ export function LiveView() {
                 onToggle={() => toggleAccount(a)} onSell={sellPosition} onTarget={setTarget} />
             ))}
             {tab === "coins" && <WalletCoins password={password} onSell={sellPosition} onTarget={setTarget} />}
+            {tab === "orders" && <OrdersPanel password={password} accounts={data.accounts.map((a) => a.name)} now={tick} />}
             {tab === "history" && <HistoryPanel accounts={data.accounts} now={tick} onSell={sellPosition} />}
             {tab === "wallets" && (
               data.leader_activity.length ? <LeaderFeed rows={data.leader_activity} now={tick} />
@@ -1099,5 +1104,170 @@ function HoldTarget({ c, onSave, peak }: {
       )}
       {msg && <span className="basis-full text-[11px] text-faint">{msg}</span>}
     </>
+  );
+}
+
+
+/** Price orders: buy a coin once it falls to / rises to a price, then (optionally) sell at a price or stop. */
+function OrdersPanel({ password, accounts, now }: { password: string; accounts: string[]; now: number }) {
+  const [orders, setOrders] = useState<PriceOrderOut[] | null>(null);
+  const [all, setAll] = useState(false);
+  const [error, setError] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [f, setF] = useState({
+    account: accounts[0] ?? "main", mint: "", condition: "below" as "below" | "above", trigger: "", amount: "20",
+    target: "", share: "100", stop: "", hours: "24", over: "5",
+  });
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+  const box = "num rounded-md border border-line bg-carbon px-2 py-1.5 text-xs text-ink outline-none focus:border-gold/70";
+
+  const load = useCallback(async (signal?: AbortSignal) => {
+    try {
+      setOrders((await api.orders(password, all, signal)).orders);
+      setError("");
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") setError(e instanceof ApiError ? e.message : "Could not read the orders.");
+    }
+  }, [password, all]);
+
+  useEffect(() => {
+    const ctl = new AbortController();
+    load(ctl.signal);
+    const id = setInterval(() => !document.hidden && load(ctl.signal), 10_000);
+    return () => {
+      clearInterval(id);
+      ctl.abort();
+    };
+  }, [load]);
+
+  async function place() {
+    const num = (v: string) => (v.trim() === "" ? null : Number(v.replace(/[$,\s]/g, "")));
+    const trigger = num(f.trigger), amount = num(f.amount);
+    if (!f.mint.trim()) return setMsg("Paste the coin address");
+    if (!trigger || !(trigger > 0)) return setMsg("Enter the price that triggers the buy");
+    if (!amount || !(amount > 0)) return setMsg("Enter the amount in $");
+    const body: PriceOrderIn = {
+      account: f.account, mint: f.mint.trim(), condition: f.condition, trigger_price: trigger, amount_usd: amount,
+      max_over_pct: num(f.over), target_price: num(f.target), target_share: (num(f.share) ?? 100) / 100,
+      stop_price: num(f.stop), expires_hours: num(f.hours),
+    };
+    setBusy(true);
+    setMsg("");
+    try {
+      const r = await api.placeOrder(password, body);
+      setMsg(`${r.message}: #${r.order.id} $${r.order.symbol}`);
+      setF({ ...f, mint: "", trigger: "", target: "", stop: "" });
+      await load();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "Could not place the order");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancel(o: PriceOrderOut) {
+    try {
+      await api.cancelOrder(password, o.id);
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not cancel");
+    }
+  }
+
+  const statusTone = (s: PriceOrderOut["status"]) =>
+    s === "open" ? "gold" : s === "filled" ? "mint" : s === "failed" ? "bear" : "muted";
+
+  return (
+    <div className="flex flex-col gap-6">
+      <Panel title="New price order">
+        <div className="flex flex-col gap-3 p-4 text-xs text-muted">
+          <span className="flex flex-wrap items-center gap-2">
+            Account
+            <select className={box} value={f.account} onChange={set("account")}>
+              {accounts.map((a) => <option key={a} value={a}>{a}</option>)}
+            </select>
+            Coin address
+            <input className={`${box} w-[26rem] max-w-full`} placeholder="paste the mint address" value={f.mint} onChange={set("mint")} />
+          </span>
+          <span className="flex flex-wrap items-center gap-2">
+            Buy $<input className={`${box} w-20`} inputMode="decimal" value={f.amount} onChange={set("amount")} />
+            when the price
+            <select className={box} value={f.condition} onChange={set("condition")}>
+              <option value="below">falls to</option>
+              <option value="above">rises to</option>
+            </select>
+            $<input className={`${box} w-36`} inputMode="decimal" placeholder="price per coin" value={f.trigger} onChange={set("trigger")} />
+            <span className="text-faint">pay at most</span>
+            <input className={`${box} w-14 text-center`} inputMode="decimal" value={f.over} onChange={set("over")} />
+            <span className="text-faint">% above it</span>
+          </span>
+          <span className="flex flex-wrap items-center gap-2">
+            Then sell <input className={`${box} w-14 text-center`} inputMode="decimal" value={f.share} onChange={set("share")} />
+            % at $<input className={`${box} w-36`} inputMode="decimal" placeholder="optional" value={f.target} onChange={set("target")} />
+            stop at $<input className={`${box} w-36`} inputMode="decimal" placeholder="optional" value={f.stop} onChange={set("stop")} />
+            expires in <input className={`${box} w-16 text-center`} inputMode="decimal" value={f.hours} onChange={set("hours")} /> h
+          </span>
+          <span className="text-faint">
+            The bot watches the price and buys through the cheapest route (PumpPortal or Jupiter, fees included) once
+            it gets there. If the coin jumps past your limit before the buy lands, the order keeps waiting. Prices can
+            gap: a stop can fill below its price.
+          </span>
+          <span className="flex flex-wrap items-center gap-2">
+            <button disabled={busy} onClick={place}
+              className="rounded-md bg-gold px-3 py-1.5 font-semibold text-carbon hover:brightness-110 disabled:opacity-50">
+              Place order
+            </button>
+            {msg && <span className="text-faint">{msg}</span>}
+          </span>
+        </div>
+      </Panel>
+
+      <Panel title="Orders">
+        <div className="flex items-center gap-2 border-b border-line px-4 py-2 text-xs text-muted">
+          <Toggle on={all} label="Show finished orders" onClick={() => setAll(!all)} /> Show finished orders
+        </div>
+        {error ? <p className="p-4 text-sm text-bear">{error}</p>
+          : !orders ? <span className="skeleton m-4 block h-16 rounded-xl" />
+            : orders.length === 0 ? <Empty>No {all ? "" : "open "}orders.</Empty> : (
+              <div className="flex flex-col divide-y divide-line">
+                {orders.map((o) => {
+                  const dist = o.last_price ? (o.trigger_price / o.last_price - 1) * 100 : null;
+                  return (
+                    <div key={o.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 text-xs">
+                      <span className="num text-faint">#{o.id}</span>
+                      <a href={`/token/solana/${o.mint}`} className="font-semibold text-ink hover:text-mint">${o.symbol}</a>
+                      <Badge tone={statusTone(o.status)}>{o.status}</Badge>
+                      <span className="text-muted">
+                        buy <b className="num text-ink">{money(o.amount_usd)}</b> when it {o.condition === "below" ? "falls to" : "rises to"}{" "}
+                        <b className="num text-ink">{usdPrice(o.trigger_price)}</b>
+                      </span>
+                      {o.status === "open" && o.last_price != null && (
+                        <span className="num text-faint">
+                          now {usdPrice(o.last_price)}{dist != null && ` · ${dist > 0 ? "+" : ""}${dist.toFixed(1)}% away`}
+                        </span>
+                      )}
+                      {(o.then_target_price || o.then_stop_price) && (
+                        <span className="num text-faint">
+                          then{o.then_target_price ? ` sell ${Math.round((o.then_target_share ?? 1) * 100)}% at ${usdPrice(o.then_target_price)}` : ""}
+                          {o.then_stop_price ? ` · stop ${usdPrice(o.then_stop_price)}` : ""}
+                        </span>
+                      )}
+                      <span className="num text-faint">{o.account}</span>
+                      {o.status === "open" && o.expires_at && <span className="text-faint">expires {ago(o.expires_at, now).replace(" ago", "")}</span>}
+                      {o.note && o.status !== "open" && <span className="basis-full text-faint">{o.note}</span>}
+                      {o.note && o.status === "open" && <span className="basis-full text-gold">{o.note}</span>}
+                      {o.status === "open" && (
+                        <button onClick={() => cancel(o)} className="ms-auto rounded-md border border-line px-2 py-1 text-muted hover:border-bear/60 hover:text-bear">
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+      </Panel>
+    </div>
   );
 }

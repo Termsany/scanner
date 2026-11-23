@@ -503,6 +503,69 @@ async def position_target(position_id: int, body: TargetIn, session: Session, _:
     return {"ok": True, "message": note}
 
 
+# ---- price orders (/live, Orders tab): buy once a coin reaches a price ---------------------------------
+class OrderIn(BaseModel):
+    account: str
+    mint: str
+    condition: str                      # below (buy the dip) | above (buy the breakout)
+    trigger_price: float                # USD per token
+    amount_usd: float
+    max_over_pct: float | None = None   # never pay more than trigger + this % (default LIVE_ORDER_MAX_OVER_PCT)
+    target_price: float | None = None   # then sell target_share at this price
+    target_share: float | None = None
+    stop_price: float | None = None     # then sell everything at / below this
+    expires_hours: float | None = None
+
+
+@router.get("/orders")
+async def list_orders(session: Session, _: Auth, all: bool = False) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.models import PriceOrder
+    from app.orders import order_row
+
+    q = select(PriceOrder).order_by(PriceOrder.created_at.desc()).limit(200)
+    if not all:
+        q = q.where(PriceOrder.status == "open")
+    return {"orders": [order_row(o) for o in (await session.execute(q)).scalars().all()]}
+
+
+@router.post("/orders")
+async def place_order(body: OrderIn, request: Request, session: Session, _: Auth) -> dict[str, Any]:
+    from app.live import live_status
+    from app.orders import create_order, order_row
+
+    s = get_settings()
+    mode = s.live_mode if s.live_mode in ("dry", "live") else None
+    if mode is None:
+        raise HTTPException(400, "Copy trading is off on the server")
+    st = await live_status(session, s)
+    if not any(a["name"] == body.account for a in st["accounts"]):
+        raise HTTPException(404, "No such account")
+    http: httpx.AsyncClient = request.app.state.http
+    mint = body.mint.strip()
+    meta = (await token_meta(http, [mint])).get(mint) or {} if mint else {}
+    o, note = await create_order(
+        session, body.account, mode, mint, meta.get("symbol"), body.condition, body.trigger_price,
+        body.amount_usd, s.live_order_max_over_pct if body.max_over_pct is None else body.max_over_pct,
+        body.target_price, body.target_share, body.stop_price, body.expires_hours, meta.get("price"))
+    if o is None:
+        raise HTTPException(400, note)
+    await session.commit()
+    return {"ok": True, "message": note, "order": order_row(o)}
+
+
+@router.post("/orders/{order_id}/cancel")
+async def cancel(order_id: int, session: Session, _: Auth) -> dict[str, Any]:
+    from app.orders import cancel_order
+
+    ok, note = await cancel_order(session, order_id)
+    if not ok:
+        raise HTTPException(409, note)
+    await session.commit()
+    return {"ok": True, "message": note}
+
+
 # ---- admin overview (/admin page) ---------------------------------------------------
 @router.get("/overview")
 async def overview(request: Request, session: Session, _: Auth) -> dict[str, Any]:

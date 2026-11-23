@@ -339,6 +339,35 @@ class LivePosition(Base):
     hands_off: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
+class PriceOrder(Base):
+    """The owner's price order (/live, Orders tab): buy a coin once its price reaches a level, like a limit /
+    stop order on an exchange. The worker watches it, buys through the best route when it triggers, and the
+    position it opens is owner-managed with the order's own sell price / stop price attached."""
+
+    __tablename__ = "price_orders"
+    __table_args__ = (Index("ix_price_orders_status", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))                      # dry | live
+    mint: Mapped[str] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(64), default="")
+    condition: Mapped[str] = mapped_column(String(8))                 # below: buy the dip | above: buy the breakout
+    trigger_price: Mapped[float] = mapped_column(Float)               # USD per token
+    amount_usd: Mapped[float] = mapped_column(Float)
+    max_over_pct: Mapped[float] = mapped_column(Float, default=5.0)   # never pay more than trigger + this %
+    then_target_price: Mapped[float | None] = mapped_column(Float, nullable=True)   # sell then_target_share here
+    then_target_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    then_stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)     # sell everything at / below
+    status: Mapped[str] = mapped_column(String(10), default="open")   # open | filled | cancelled | expired | failed
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    position_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SignalOutcome(Base):
     """What happened after a signal, from GeckoTerminal 15-minute candles of its pool (so tokens that crashed
     out of the scanner's filters are still measured: no survivorship bias)."""

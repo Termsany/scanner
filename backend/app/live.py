@@ -1235,6 +1235,8 @@ class CopyEngine:
         self.wake: asyncio.Event | None = None  # set by the WebSocket watcher when a copied wallet trades
         self._target_at = 0.0                   # last check of owner-set targets
         self._target_seen: dict[int, int] = {}  # position id -> readings in a row past its target / stop
+        self._orders_at = 0.0                   # last check of the owner's price orders (app/orders.py)
+        self._order_seen: dict[int, int] = {}   # order id -> readings in a row past its trigger
 
     def update(self, account: Account) -> None:
         """New settings from the /accounts page; takes effect on the next step."""
@@ -2083,10 +2085,17 @@ class CopyEngine:
                     p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
             await session.commit()
 
+    async def _orders(self, session: AsyncSession) -> None:
+        """The owner's price orders: buy once the price reaches the trigger (app/orders.py)."""
+        from app.orders import check_orders
+
+        await check_orders(self, session)
+
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
-        for part in (self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits, self._targets):
+        for part in (self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits, self._targets,
+                     self._orders):
             if self.wake is not None and self.wake.is_set():
                 return
             await part(session)

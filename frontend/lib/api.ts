@@ -28,6 +28,8 @@ import type {
   TokenQuery,
   TargetBody,
   Holdings,
+  PriceOrderIn,
+  PriceOrderOut,
 } from "./types";
 
 // Empty string = same origin (production behind nginx: /api and /ws are proxied to the backend).
@@ -155,6 +157,19 @@ export const api = {
       ...adm(password),
       body: JSON.stringify(body),
     }),
+
+  orders: (password: string, all: boolean, signal?: AbortSignal) =>
+    request<{ orders: PriceOrderOut[] }>(`/api/live/orders${all ? "?all=true" : ""}`, { ...adm(password), signal }),
+
+  placeOrder: (password: string, body: PriceOrderIn) =>
+    request<{ ok: boolean; message: string; order: PriceOrderOut }>("/api/live/orders", {
+      method: "POST",
+      ...adm(password),
+      body: JSON.stringify(body),
+    }),
+
+  cancelOrder: (password: string, id: number) =>
+    request<{ ok: boolean; message: string }>(`/api/live/orders/${id}/cancel`, { method: "POST", ...adm(password) }),
 
   overview: (password: string, signal?: AbortSignal) =>
     request<AdminOverview>("/api/live/overview", { ...adm(password), signal }),

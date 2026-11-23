@@ -630,3 +630,36 @@ def test_leader_max_chase_is_saved_and_checked(monkeypatch):
         r = c.patch("/api/live/accounts/chs", headers=h, json={"size_usd": 12, "leaders": leaders})
         assert r.json()["account"]["leaders"][0]["enabled"] is False
     live_api._fails.clear()
+
+
+def test_price_orders_place_list_and_cancel(monkeypatch):
+    from app.api import live as live_api
+
+    s = get_settings()
+    live_api._fails.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "pw-ord")
+    monkeypatch.setattr(s, "live_mode", "dry")
+    mint = "HuN5y4fJU7LNkaPjV9LhxkY7LUwpynW7yhL4qoVhpump"
+
+    async def meta(http, mints):
+        return {mint: {"symbol": "HUN", "price": 1.3}}
+
+    monkeypatch.setattr(live_api, "token_meta", meta)
+    h = {"X-Live-Password": "pw-ord"}
+    body = {"account": "main", "mint": mint, "condition": "below", "trigger_price": 1.0, "amount_usd": 20,
+            "target_price": 2.0, "target_share": 0.5, "stop_price": 0.8, "expires_hours": 24}
+    with TestClient(app) as c:
+        assert c.post("/api/live/orders", json=body).status_code == 401
+        r = c.post("/api/live/orders", json=body, headers=h)
+        assert r.status_code == 200, r.text
+        o = r.json()["order"]
+        assert (o["symbol"], o["status"], o["max_over_pct"], o["then_target_share"]) == ("HUN", "open", 5.0, 0.5)
+        bad = c.post("/api/live/orders", json={**body, "trigger_price": 1.5}, headers=h)       # price already below
+        assert bad.status_code == 400 and "already" in bad.json()["detail"]
+        assert c.post("/api/live/orders", json={**body, "account": "nope"}, headers=h).status_code == 404
+        assert [x["id"] for x in c.get("/api/live/orders", headers=h).json()["orders"]] == [o["id"]]
+        assert c.post(f"/api/live/orders/{o['id']}/cancel", headers=h).status_code == 200
+        assert c.post(f"/api/live/orders/{o['id']}/cancel", headers=h).status_code == 409
+        assert c.get("/api/live/orders", headers=h).json()["orders"] == []
+        assert c.get("/api/live/orders?all=true", headers=h).json()["orders"][0]["status"] == "cancelled"
+    live_api._fails.clear()

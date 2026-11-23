@@ -163,6 +163,10 @@ class Settings(BaseSettings):
     live_size_usd: float = 30.0                  # per buy
     live_max_open_usd: float = 100.0             # total cost of open positions never exceeds this
     live_max_daily_loss_usd: float = 50.0        # realized loss in 24h above this: pause new buys
+    # The owner's price orders (/live, Orders tab; app/orders.py): buy a coin once it reaches a price
+    live_orders_enabled: bool = True
+    live_orders_check_seconds: float = 2.0
+    live_order_max_over_pct: float = 5.0         # default: never pay more than the trigger + this %
     live_slippage_bps: int = 1_500               # 15%: memecoins move fast; the quote's minimum out still applies
     live_slippage_bps_unconditional: int = 2_500 # 25% first try for LIVE_UNCONDITIONAL_WALLETS (fresh launches)
     live_max_slippage_bps: int = 5_000           # retries after a slippage failure widen up to this (50%)

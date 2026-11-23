@@ -466,6 +466,41 @@ export interface Holdings {
   accounts: { name: string; pubkey: string; coins: HoldingCoin[] }[];
 }
 
+/** The owner's price order (/live, Orders tab): buy once the coin reaches a price. */
+export interface PriceOrderOut {
+  id: number;
+  account: string;
+  mint: string;
+  symbol: string;
+  condition: "below" | "above";
+  trigger_price: number;
+  amount_usd: number;
+  max_over_pct: number;
+  then_target_price: number | null;
+  then_target_share: number | null;
+  then_stop_price: number | null;
+  status: "open" | "filled" | "cancelled" | "expired" | "failed";
+  last_price: number | null;
+  position_id: number | null;
+  note: string | null;
+  expires_at: string | null;
+  created_at: string | null;
+  done_at: string | null;
+}
+
+export interface PriceOrderIn {
+  account: string;
+  mint: string;
+  condition: "below" | "above";
+  trigger_price: number;
+  amount_usd: number;
+  max_over_pct?: number | null;
+  target_price?: number | null;
+  target_share?: number | null;
+  stop_price?: number | null;
+  expires_hours?: number | null;
+}
+
 export interface LiveStatus {
   mode: "off" | "dry" | "live";
   paused: boolean;
