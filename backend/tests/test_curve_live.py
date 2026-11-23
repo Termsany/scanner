@@ -251,3 +251,34 @@ def test_curve_buys_and_sells_ask_for_speed():
     finally:
         curve_live.unwatch("curve", set())
     assert seen == [("buy", True), ("sell", True)] and live_mod._FAST.get() is False
+
+
+def test_several_curve_bots_each_at_its_own_entry():
+    from app.accounts import bots_of
+    from app.models import TradingAccount
+
+    s = S()
+    x = FakeExec()
+    a = Account("curve", 10, 100, 50, [], curve_bots={"curve_fast34": 25.0, "curve_fast19": None})
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=a)
+        await eng.step(sess)
+        curve_live.publish("curve_fast34", CURVE_RULES["curve_fast34"], "B34pump", "A", 2e-7, 34.0, "x", 900)
+        curve_live.publish("curve_fast19", CURVE_RULES["curve_fast19"], "B19pump", "B", 2e-7, 20.0, "x", 900)
+        curve_live.publish("curve_30_70_sl", CURVE_RULES["curve_30_70_sl"], "OFFpump", "C", 2e-7, 30.0, "x", 900)
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().all()
+
+    try:
+        pos = _db(body)
+    finally:
+        curve_live.unwatch("curve", set())
+    assert sorted(c for c in x.calls if c[0] == "buy") == [("buy", "B19pump", 10), ("buy", "B34pump", 25.0)]
+    assert {p.leader_wallet for p in pos} == {"curve:curve_fast34", "curve:curve_fast19"}
+    # an account set up before the bots: its single curve_strategy is the one bot, on
+    assert bots_of(TradingAccount(name="z", curve_strategy="curve_fast34")) == {
+        "curve_fast34": {"enabled": True, "size_usd": None}}
+    assert bots_of(TradingAccount(name="z", curve_strategy="curve_fast34",
+                                  curve_bots={"curve_fast34": {"enabled": False, "size_usd": 5}})) == {
+        "curve_fast34": {"enabled": False, "size_usd": 5}}

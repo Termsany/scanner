@@ -72,15 +72,18 @@ def publish(strategy: str, rule: Any, mint: str, symbol: str, px_sol: float, pro
     return sig
 
 
-def take(after_id: int, strategy: str, max_age_s: float, now: float | None = None) -> tuple[list[CurveSignal], int]:
-    """New signals for `strategy` after `after_id`, newest id seen; older than `max_age_s` are dropped (too late)."""
+def take(after_id: int, strategy: str | set[str], max_age_s: float,
+         now: float | None = None) -> tuple[list[CurveSignal], int]:
+    """New signals for `strategy` (one rule or a set) after `after_id`, newest id seen; older than `max_age_s`
+    are dropped (too late)."""
     now = time.monotonic() if now is None else now
+    want = {strategy} if isinstance(strategy, str) else strategy
     out, last = [], after_id
     for sig in list(SIGNALS):
         if sig.id <= after_id:
             continue
         last = max(last, sig.id)
-        if sig.strategy == strategy and now - sig.at <= max_age_s:
+        if sig.strategy in want and now - sig.at <= max_age_s:
             out.append(sig)
     return out, last
 

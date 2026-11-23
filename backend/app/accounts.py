@@ -131,7 +131,18 @@ def to_account(row: TradingAccount, s: Settings, private_key: str | None) -> Acc
                for d in row.leaders or []}
     return Account(row.name, row.size_usd, row.max_open_usd, row.max_daily_loss_usd, list(leaders), private_key,
                    leaders=leaders, paused=bool(row.paused or row.billing_hold), take_capital_at_pct=row.take_capital_at_pct,
-                   max_hold_hours=row.max_hold_hours, curve_strategy=getattr(row, "curve_strategy", None))
+                   max_hold_hours=row.max_hold_hours,
+                   curve_bots={k: v.get("size_usd") for k, v in bots_of(row).items() if v.get("enabled")})
+
+
+def bots_of(row: TradingAccount) -> dict[str, dict[str, Any]]:
+    """The account's curve bots, {rule: {"enabled", "size_usd"}}; before they were set up on /live, the single
+    curve_strategy is the one bot (on, at the account's entry size)."""
+    bots = getattr(row, "curve_bots", None)
+    if bots is not None:
+        return {k: {"enabled": bool(v.get("enabled")), "size_usd": v.get("size_usd")} for k, v in bots.items()}
+    cs = getattr(row, "curve_strategy", None)
+    return {cs: {"enabled": True, "size_usd": None}} if cs else {}
 
 
 async def seed(session: AsyncSession, s: Settings) -> None:
@@ -210,5 +221,6 @@ def public(row: TradingAccount, open_positions: int = 0) -> dict[str, Any]:
         "user_id": row.user_id, "cap_size_usd": row.cap_size_usd, "cap_open_usd": row.cap_open_usd,
         "cap_loss_usd": row.cap_loss_usd, "key_revealed": bool(row.key_revealed),
         "billing_hold": bool(row.billing_hold), "curve_strategy": getattr(row, "curve_strategy", None),
+        "curve_bots": bots_of(row),
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }

@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  Bot,
   Coins,
   TrendingUp,
   Crosshair,
@@ -28,6 +29,7 @@ import type {
   LiveStatus,
   PriceOrderIn,
   PriceOrderOut,
+  CurveBots,
 } from "@/lib/types";
 
 const REFRESH_MS = 3_000;
@@ -479,7 +481,7 @@ function PositionRows({
   );
 }
 
-type LiveTab = "open" | "coins" | "orders" | "history" | "wallets";
+type LiveTab = "open" | "bots" | "coins" | "orders" | "history" | "wallets";
 
 type Peak = { price: number; at: string };
 
@@ -520,7 +522,7 @@ export function LiveView() {
   useEffect(() => {
     const read = () => {
       const h = window.location.hash.slice(1);
-      if (h === "history" || h === "wallets" || h === "open" || h === "coins" || h === "orders") setTabState(h);
+      if (h === "history" || h === "wallets" || h === "open" || h === "coins" || h === "orders" || h === "bots") setTabState(h);
     };
     read();
     window.addEventListener("hashchange", read);
@@ -699,6 +701,7 @@ export function LiveView() {
           <SectionTabs label="Live sections" value={tab} onChange={setTab}
             tabs={[
               { key: "open", label: `Open trades · ${openCount}`, icon: <Activity /> },
+              { key: "bots", label: "Curve bots", icon: <Bot /> },
               { key: "coins", label: "Wallet coins", icon: <Coins /> },
               { key: "orders", label: "Price orders", icon: <ListChecks /> },
               { key: "history", label: `History · ${closedCount}`, icon: <History /> },
@@ -710,6 +713,7 @@ export function LiveView() {
               <OpenAccount key={a.name} a={a} now={tick} busy={busy === a.name} globalPaused={data.paused} peaks={peaks}
                 onToggle={() => toggleAccount(a)} onSell={sellPosition} onTarget={setTarget} />
             ))}
+            {tab === "bots" && <CurveBotsPanel password={password} />}
             {tab === "coins" && <WalletCoins password={password} onSell={sellPosition} onTarget={setTarget} />}
             {tab === "orders" && <OrdersPanel password={password} accounts={data.accounts.map((a) => a.name)} now={tick} />}
             {tab === "history" && <HistoryPanel accounts={data.accounts} now={tick} onSell={sellPosition} />}
@@ -1292,6 +1296,117 @@ function OrdersPanel({ password, accounts, now }: { password: string; accounts: 
               </div>
             )}
       </Panel>
+    </div>
+  );
+}
+
+/** Curve bots: each live-tradeable curve rule with an ON/OFF switch per account and its own entry per trade. */
+function CurveBotsPanel({ password }: { password: string }) {
+  const [d, setD] = useState<CurveBots | null>(null);
+  const [error, setError] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState("");
+  const [sizes, setSizes] = useState<Record<string, string>>({});   // "account/rule" -> typed entry
+  const box = "num w-20 rounded-md border border-line bg-carbon px-2 py-1 text-xs text-ink outline-none focus:border-gold/70";
+
+  const load = useCallback(async (signal?: AbortSignal) => {
+    try {
+      setD(await api.curveBots(password, signal));
+      setError("");
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") setError(e instanceof ApiError ? e.message : "Could not read the curve bots.");
+    }
+  }, [password]);
+
+  useEffect(() => {
+    const ctl = new AbortController();
+    load(ctl.signal);
+    const id = setInterval(() => !document.hidden && load(ctl.signal), 15_000);
+    return () => {
+      clearInterval(id);
+      ctl.abort();
+    };
+  }, [load]);
+
+  async function put(account: string, rule: string, enabled: boolean, size: number | null, ask: boolean) {
+    if (ask && enabled && !confirm(`Turn ${rule} ON with REAL money on ${account}${size ? `, $${size} per trade` : ""}? `
+      + "It buys every time the paper bot enters this rule, within the account's budget and daily loss limit.")) return;
+    const key = `${account}/${rule}`;
+    setBusy(key);
+    setMsg("");
+    try {
+      const r = await api.setCurveBot(password, account, rule, { enabled, size_usd: size });
+      setMsg(r.message);
+      setSizes((x) => Object.fromEntries(Object.entries(x).filter(([k]) => k !== key)));
+      await load();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "Could not save it.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  if (error) return <Panel title="Curve bots"><p className="p-4 text-sm text-bear">{error}</p></Panel>;
+  if (!d) return <span className="skeleton block h-40 rounded-2xl" />;
+  if (!d.rules.length) return <Panel title="Curve bots"><Empty>No curve rule can trade for real yet (it needs an exit level and a stop).</Empty></Panel>;
+
+  const rule = (r: CurveBots["rules"][number]) => [
+    `buy at ${r.level}%`,
+    r.exit_at != null ? `sell at ${r.exit_at}%` : null,
+    r.sl != null ? `stop ${r.sl}%` : null,
+    r.max_hold_s ? `max ${Math.round(r.max_hold_s / 60)} min` : null,
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <div className="flex flex-col gap-6">
+      {msg && <p className="card p-3 text-xs text-muted">{msg}</p>}
+      {d.accounts.map((a) => (
+        <Panel key={a.name} title={`${a.name} · curve bots`}>
+          <div className="flex flex-col divide-y divide-line">
+            {d.rules.map((r) => {
+              const b = a.bots[r.name] ?? { enabled: false, size_usd: null, live_24h: { trades: 0, pnl_usd: 0 } };
+              const key = `${a.name}/${r.name}`;
+              const typed = sizes[key];
+              const shown = typed ?? (b.size_usd != null ? String(b.size_usd) : "");
+              const parsed = shown.trim() === "" ? null : Number(shown.replace(/[$,\s]/g, ""));
+              const changed = typed !== undefined && parsed !== b.size_usd;
+              const valid = parsed === null || (Number.isFinite(parsed) && parsed >= 1);
+              return (
+                <div key={r.name} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 text-xs">
+                  <Toggle on={b.enabled} busy={busy === key} label={`${r.name} on ${a.name}`}
+                    onClick={() => put(a.name, r.name, !b.enabled, valid ? parsed : b.size_usd, true)} />
+                  <span className="min-w-[9rem]">
+                    <b className={b.enabled ? "text-mint" : "text-ink"}>{r.name}</b>
+                    <span className="block text-faint">{rule(r)}</span>
+                  </span>
+                  <span className="flex items-center gap-1.5 text-muted">
+                    $<input className={box} inputMode="decimal" placeholder={String(a.size_usd)} value={shown}
+                      onChange={(e) => setSizes({ ...sizes, [key]: e.target.value })}
+                      onKeyDown={(e) => e.key === "Enter" && changed && valid && put(a.name, r.name, b.enabled, parsed, false)} />
+                    per trade
+                    {changed && (
+                      <button disabled={!valid || busy === key} onClick={() => put(a.name, r.name, b.enabled, parsed, false)}
+                        className="rounded-md bg-gold px-2 py-1 font-semibold text-carbon hover:brightness-110 disabled:opacity-50">
+                        Save
+                      </button>
+                    )}
+                  </span>
+                  <span className="num text-faint">
+                    paper 24h: {r.paper_24h.trades} trades · <span className={tone(r.paper_24h.pnl_usd)}>{money(r.paper_24h.pnl_usd, true)}</span>
+                  </span>
+                  <span className="num text-faint">
+                    real 24h: {b.live_24h.trades} trades · <span className={tone(b.live_24h.pnl_usd)}>{money(b.live_24h.pnl_usd, true)}</span>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="border-t border-line px-4 py-2 text-[11px] text-faint">
+            Empty entry = the account&apos;s entry per trade (${a.size_usd}). One coin is bought once per account, even
+            when two bots pick it. Every bot shares the account&apos;s budget and daily loss limit.
+          </p>
+        </Panel>
+      ))}
     </div>
   );
 }

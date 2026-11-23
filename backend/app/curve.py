@@ -849,10 +849,12 @@ class PaperCurve:
         try:                                       # which rules live accounts trade for real (app/curve_live.py)
             from app.models import TradingAccount
 
+            from app.accounts import bots_of
+
             async with SessionLocal() as session:
-                live = (await session.execute(select(TradingAccount.curve_strategy).where(
-                    TradingAccount.enabled.is_(True), TradingAccount.curve_strategy.is_not(None)))).scalars().all()
-            self.live_signals = {x for x in live if x}
+                accts = (await session.execute(select(TradingAccount).where(
+                    TradingAccount.enabled.is_(True)))).scalars().all()
+            self.live_signals = {k for r in accts for k, v in bots_of(r).items() if v.get("enabled")}
         except Exception:
             log.warning("curve (paper): could not load the live curve accounts", exc_info=True)
 

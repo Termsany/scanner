@@ -197,6 +197,11 @@ class Account:
     user_chat_id: str | None = None            # owner's own Telegram chat (registered users), never told the leader
     user_lang: str = "ar"                      # language of those notes
     curve_strategy: str | None = None          # curve rule traded for real (app/curve_live.py); None = none
+    curve_bots: dict[str, float | None] = field(default_factory=dict)   # rules ON -> entry USD (None: size_usd)
+
+    def __post_init__(self) -> None:
+        if self.curve_strategy and not self.curve_bots:
+            self.curve_bots = {self.curve_strategy: None}
 
 
 # What a user is told about an exit: never which wallet, only what happened
@@ -2124,7 +2129,8 @@ class CopyEngine:
                     p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
             await session.commit()
 
-    async def _curve_skip(self, session: AsyncSession, mint: str) -> str | None:
+    async def _curve_skip(self, session: AsyncSession, mint: str, size: float | None = None) -> str | None:
+        size = self.a.size_usd if size is None else size
         if await is_paused(session):
             return "paused (/live on to resume)"
         if self.a.paused:
@@ -2136,14 +2142,14 @@ class CopyEngine:
             return "already holding"
         open_cost = (await session.execute(select(func.sum(LivePosition.cost_usd)).where(
             LivePosition.status == "open", *self._mine()))).scalar() or 0.0
-        if open_cost + self.a.size_usd > self.a.max_open_usd + 1e-6:
+        if open_cost + size > self.a.max_open_usd + 1e-6:
             return f"limit: ${open_cost:,.0f} already open (max ${self.a.max_open_usd:,.0f})"
         loss = await realized_24h(session, self.x.mode, self.a.name)
         if loss <= -self.a.max_daily_loss_usd:
             return f"daily loss limit hit (${loss:,.2f} in 24h)"
         if self.x.mode == "live":
             bal, px = await self.x.sol_balance(), await self.x.sol_price()
-            if px and bal - self.s.live_sol_reserve < self.a.size_usd / px:
+            if px and bal - self.s.live_sol_reserve < size / px:
                 return f"not enough SOL ({bal:.3f})"
         return None
 
@@ -2151,16 +2157,21 @@ class CopyEngine:
         """Real buys of the account's curve rule (app/curve_live.py): the paper engine decided, we buy now at the
         account's entry size, capped at LIVE_CURVE_MAX_CHASE_PCT above the decision price. The position is
         hands-off: sold at the rule's exit level, at its stop (from our fill) or when its max hold runs out."""
-        strat = self.a.curve_strategy
-        if not strat:
+        bots = self.a.curve_bots
+        if not bots:
+            self._curve_last = None
             return
         from app import curve_live
 
-        sigs, self._curve_last = curve_live.take(self._curve_last, strat, self.s.live_curve_max_signal_age_s)
+        if self._curve_last is None:                 # just switched on: from now on only
+            self._curve_last = curve_live.last_id()
+        sigs, self._curve_last = curve_live.take(self._curve_last, set(bots), self.s.live_curve_max_signal_age_s)
         for sig in sigs:
+            strat = sig.strategy
+            size = bots.get(strat) or self.a.size_usd
             sym = sig.symbol or sig.mint[:6]
             try:
-                why = await self._curve_skip(session, sig.mint)
+                why = await self._curve_skip(session, sig.mint, size)
                 sol_usd = await self.x.sol_price()
             except Exception as exc:
                 why = f"checks failed: {exc}"
@@ -2176,7 +2187,7 @@ class CopyEngine:
             max_price = decision_usd * (1 + self.s.live_curve_max_chase_pct / 100)
             fast = _FAST.set(self.s.live_curve_fast)
             try:
-                f = await self.x.buy(sig.mint, self.a.size_usd, max_price=max_price)
+                f = await self.x.buy(sig.mint, size, max_price=max_price)
             except ChaseError as exc:
                 log.info("live[%s]: curve %s skip %s (%s)", self.a.name, strat, sym, exc)
                 continue

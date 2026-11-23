@@ -182,7 +182,6 @@ function Settings({
   defaultHold: number;
   curves: CurveChoice[];
 }) {
-  const curve = curves.find((c) => c.name === d.curve_strategy);
   return (
     <>
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -213,21 +212,10 @@ function Settings({
       </Field>
     </div>
     {curves.length > 0 && (
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        <Field label="Curve strategy (real money)"
-          hint={curve ? `${curve.title} · entry = "Entry per trade" above` : "none: this account only copies wallets"}>
-          <select className={input} value={d.curve_strategy}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v && !confirm(`Trade ${v} with REAL money from this account's wallet, $${d.size_usd} per buy? `
-                + "It buys every time the paper bot enters this rule, within the budget and daily loss limit.")) return;
-              now({ ...d, curve_strategy: v, curve_loaded: undefined });   // touched: always sent from now on
-            }}>
-            <option value="">None</option>
-            {curves.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-          </select>
-        </Field>
-      </div>
+      <p className="mt-3 text-xs text-faint">
+        Curve bots (real money): switch each one on or off and set its entry per trade on{" "}
+        <a href="/live#bots" className="text-gold hover:underline">Live → Curve bots</a>.
+      </p>
     )}
     </>
   );

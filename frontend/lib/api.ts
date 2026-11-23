@@ -32,6 +32,7 @@ import type {
   Holdings,
   PriceOrderIn,
   PriceOrderOut,
+  CurveBots,
   CurveRuleIn,
   CurveRuleOut,
 } from "./types";
@@ -195,6 +196,16 @@ export const api = {
 
   cancelOrder: (password: string, id: number) =>
     request<{ ok: boolean; message: string }>(`/api/live/orders/${id}/cancel`, { method: "POST", ...adm(password) }),
+
+  curveBots: (password: string, signal?: AbortSignal) =>
+    request<CurveBots>("/api/live/curve-bots", { ...adm(password), signal }),
+
+  setCurveBot: (password: string, account: string, strategy: string, body: { enabled: boolean; size_usd: number | null }) =>
+    request<{ ok: boolean; message: string }>(`/api/live/curve-bots/${encodeURIComponent(account)}/${encodeURIComponent(strategy)}`, {
+      method: "PUT",
+      ...adm(password),
+      body: JSON.stringify(body),
+    }),
 
   overview: (password: string, signal?: AbortSignal) =>
     request<AdminOverview>("/api/live/overview", { ...adm(password), signal }),

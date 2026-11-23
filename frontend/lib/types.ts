@@ -926,3 +926,25 @@ export interface AdminOverview {
   }[];
   signals: { last_24h: number; last_at: string | null };
 }
+
+/** Curve rules traded with real money ("curve bots" on /live): a switch and an entry per trade per account. */
+export interface CurveBotRule {
+  name: string;
+  title: string;
+  level: number;
+  exit_at: number | null;
+  sl: number | null;
+  max_hold_s: number | null;
+  paper_24h: { trades: number; pnl_usd: number };
+}
+
+export interface CurveBotState {
+  enabled: boolean;
+  size_usd: number | null;      // null = the account's entry per trade
+  live_24h: { trades: number; pnl_usd: number };
+}
+
+export interface CurveBots {
+  rules: CurveBotRule[];
+  accounts: { name: string; size_usd: number; bots: Record<string, CurveBotState> }[];
+}

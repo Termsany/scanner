@@ -702,3 +702,38 @@ def test_scorecard_lists_copied_wallets_and_scores_an_address(monkeypatch):
         assert r.status_code == 200 and r.json()["passed"] is True and r.json()["checks"][0]["key"] == "t_stat"
         rows = {w["address"]: w for w in c.get("/api/live/scorecard", headers=h).json()["wallets"]}
         assert rows[other]["score"]["metrics"]["t_stat"] == 2.1 and rows[other]["accounts"] == []
+
+
+def test_curve_bots_switch_and_entry_per_trade(monkeypatch):
+    from app.api import live as live_api
+
+    s = get_settings()
+    live_api._fails.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "s3cret-pass")
+    h = {"X-Live-Password": "s3cret-pass"}
+    with TestClient(app) as c:
+        assert c.get("/api/live/curve-bots").status_code == 401
+        d = c.get("/api/live/curve-bots", headers=h).json()
+        names = {r["name"] for r in d["rules"]}
+        assert "curve_fast34" in names and "curve_70" not in names
+        main = next(a for a in d["accounts"] if a["name"] == "main")
+        assert main["bots"]["curve_fast34"]["enabled"] is False
+        r = c.put("/api/live/curve-bots/main/curve_fast34", headers=h, json={"enabled": True, "size_usd": 15})
+        assert r.status_code == 200, r.text
+        r = c.put("/api/live/curve-bots/main/curve_fast19", headers=h, json={"enabled": True})
+        assert r.status_code == 200
+        main = next(a for a in c.get("/api/live/curve-bots", headers=h).json()["accounts"] if a["name"] == "main")
+        assert main["bots"]["curve_fast34"]["enabled"] and main["bots"]["curve_fast34"]["size_usd"] == 15
+        assert main["bots"]["curve_fast19"]["enabled"] and main["bots"]["curve_fast19"]["size_usd"] is None
+        assert c.put("/api/live/curve-bots/main/curve_70", headers=h, json={"enabled": True}).status_code == 400
+        assert c.put("/api/live/curve-bots/main/curve_fast34", headers=h,
+                     json={"enabled": True, "size_usd": 0}).status_code == 400
+        assert c.put("/api/live/curve-bots/nope/curve_fast34", headers=h, json={"enabled": True}).status_code == 404
+        c.put("/api/live/curve-bots/main/curve_fast19", headers=h, json={"enabled": False})
+        acct = next(a for a in c.get("/api/live/accounts", headers=h).json()["accounts"] if a["name"] == "main")
+        assert acct["curve_bots"]["curve_fast19"]["enabled"] is False
+        # an old page saving "none" doesn't touch the bots
+        c.patch("/api/live/accounts/main", headers=h, json={"curve_strategy": "none"})
+        acct = next(a for a in c.get("/api/live/accounts", headers=h).json()["accounts"] if a["name"] == "main")
+        assert acct["curve_bots"]["curve_fast34"]["enabled"] is True
+    live_api._fails.clear()

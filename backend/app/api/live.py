@@ -831,6 +831,83 @@ def _curve_choices() -> list[dict[str, str]]:
     return [{"name": k, "title": STRATEGIES[k].title if k in STRATEGIES else k} for k in live_rules()]
 
 
+class CurveBotIn(BaseModel):
+    enabled: bool
+    size_usd: float | None = None       # entry per trade; None = the account's "Entry per trade"
+
+
+@router.get("/curve-bots")
+async def curve_bots(session: Session, _: Auth) -> dict[str, Any]:
+    """Curve rules that can trade real money (app/curve_live.py), each account's switch and entry per trade,
+    and the last 24 h of each rule on paper and for real."""
+    from datetime import timedelta
+
+    from sqlalchemy import func, select
+
+    from app.accounts import bots_of, rows
+    from app.curve_live import live_rules
+    from app.models import PaperPosition
+    from app.paper import STRATEGIES
+
+    s = get_settings()
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    rules = live_rules()
+    paper = {k: (n, pnl) for k, n, pnl in (await session.execute(
+        select(PaperPosition.strategy, func.count(PaperPosition.id), func.sum(PaperPosition.pnl_usd)).where(
+            PaperPosition.strategy.in_(list(rules)), PaperPosition.entry_time >= since)
+        .group_by(PaperPosition.strategy))).all()}
+    real: dict[tuple[str, str], tuple[int, float]] = {}
+    for acct, lw, n, pnl in (await session.execute(
+            select(LivePosition.account, LivePosition.leader_wallet, func.count(LivePosition.id),
+                   func.sum(LivePosition.pnl_usd)).where(
+                LivePosition.leader_wallet.like("curve:%"), LivePosition.mode == s.live_mode,
+                LivePosition.opened_at >= since).group_by(LivePosition.account, LivePosition.leader_wallet))).all():
+        real[(acct or "main", lw.split(":", 1)[1])] = (n, float(pnl or 0))
+    out_rules = []
+    for k, r in rules.items():
+        n, pnl = paper.get(k, (0, 0.0))
+        out_rules.append({"name": k, "title": STRATEGIES[k].title if k in STRATEGIES else k, "level": r.level,
+                          "exit_at": r.exit_at, "sl": r.sl, "max_hold_s": r.max_hold_s,
+                          "paper_24h": {"trades": n, "pnl_usd": round(float(pnl or 0), 2)}})
+    accounts = []
+    for row in await rows(session, s):
+        if not row.enabled:
+            continue
+        bots = bots_of(row)
+        accounts.append({"name": row.name, "size_usd": row.size_usd, "bots": {
+            k: {**bots.get(k, {"enabled": False, "size_usd": None}),
+                "live_24h": dict(zip(("trades", "pnl_usd"), real.get((row.name, k), (0, 0.0))))}
+            for k in rules}})
+    return {"rules": out_rules, "accounts": accounts}
+
+
+@router.put("/curve-bots/{account}/{strategy}")
+async def set_curve_bot(account: str, strategy: str, body: CurveBotIn, request: Request, session: Session,
+                        _: Auth) -> dict[str, Any]:
+    """Switch one curve bot on / off for an account and set its entry per trade (real money)."""
+    from app.accounts import bots_of
+    from app.curve_live import live_rules
+
+    if strategy not in live_rules():
+        raise HTTPException(400, f"not a curve rule that can trade for real: {strategy}")
+    if body.size_usd is not None and not 1 <= body.size_usd <= 10_000:
+        raise HTTPException(400, "entry per trade must be between $1 and $10,000")
+    row = await _row(session, account)
+    if row.cap_size_usd is not None and (body.size_usd or row.size_usd) > row.cap_size_usd:
+        raise HTTPException(400, f"entry per trade is capped at ${row.cap_size_usd:,.0f} on this account")
+    bots = bots_of(row)
+    bots[strategy] = {"enabled": body.enabled, "size_usd": body.size_usd}
+    row.curve_bots = bots
+    row.curve_strategy = None            # the bots replace the single rule
+    from app.users import audit
+
+    await audit(session, "admin", "curve_bot", row.name, {"strategy": strategy, **body.model_dump()}, _ip(request))
+    await session.commit()
+    return {"ok": True, "bots": bots,
+            "message": f"{strategy} {'ON' if body.enabled else 'off'} on {row.name}"
+                       + (f" · ${body.size_usd:,.2f} per trade" if body.size_usd else "")}
+
+
 @router.post("/accounts")
 async def create_account(body: AccountIn, session: Session, _: Auth) -> dict[str, Any]:
     from sqlalchemy import select
