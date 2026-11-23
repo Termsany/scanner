@@ -729,6 +729,15 @@ def test_curve_bots_switch_and_entry_per_trade(monkeypatch):
         assert c.put("/api/live/curve-bots/main/curve_fast34", headers=h,
                      json={"enabled": True, "size_usd": 0}).status_code == 400
         assert c.put("/api/live/curve-bots/nope/curve_fast34", headers=h, json={"enabled": True}).status_code == 404
+        r = c.put("/api/live/curve-bots/main/curve_fast34", headers=h,
+                  json={"enabled": True, "size_usd": 15, "exit_at": 80, "tp_pct": 100})
+        assert r.status_code == 200 and "exit at 80% of the curve" in r.json()["message"]
+        main = next(a for a in c.get("/api/live/curve-bots", headers=h).json()["accounts"] if a["name"] == "main")
+        assert main["bots"]["curve_fast34"]["exit_at"] == 80 and main["bots"]["curve_fast34"]["tp_pct"] == 100
+        assert c.put("/api/live/curve-bots/main/curve_fast34", headers=h,
+                     json={"enabled": True, "exit_at": 20}).status_code == 400          # under the entry level
+        assert c.put("/api/live/curve-bots/main/curve_fast34", headers=h,
+                     json={"enabled": True, "tp_pct": 0}).status_code == 400
         c.put("/api/live/curve-bots/main/curve_fast19", headers=h, json={"enabled": False})
         acct = next(a for a in c.get("/api/live/accounts", headers=h).json()["accounts"] if a["name"] == "main")
         assert acct["curve_bots"]["curve_fast19"]["enabled"] is False

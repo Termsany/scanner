@@ -941,10 +941,19 @@ export interface CurveBotRule {
 export interface CurveBotState {
   enabled: boolean;
   size_usd: number | null;      // null = the account's entry per trade
+  exit_at: number | null;       // sell at this curve %; null = the rule's own exit level
+  tp_pct: number | null;        // and / or at +this % from the entry; null = none
   live_24h: { trades: number; pnl_usd: number };
 }
 
 export interface CurveBots {
   rules: CurveBotRule[];
   accounts: { name: string; size_usd: number; bots: Record<string, CurveBotState> }[];
+}
+
+export interface CurveBotIn {
+  enabled: boolean;
+  size_usd: number | null;
+  exit_at: number | null;
+  tp_pct: number | null;
 }

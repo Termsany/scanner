@@ -132,7 +132,7 @@ def to_account(row: TradingAccount, s: Settings, private_key: str | None) -> Acc
     return Account(row.name, row.size_usd, row.max_open_usd, row.max_daily_loss_usd, list(leaders), private_key,
                    leaders=leaders, paused=bool(row.paused or row.billing_hold), take_capital_at_pct=row.take_capital_at_pct,
                    max_hold_hours=row.max_hold_hours,
-                   curve_bots={k: v.get("size_usd") for k, v in bots_of(row).items() if v.get("enabled")})
+                   curve_bots={k: v for k, v in bots_of(row).items() if v.get("enabled")})
 
 
 def bots_of(row: TradingAccount) -> dict[str, dict[str, Any]]:
@@ -140,9 +140,10 @@ def bots_of(row: TradingAccount) -> dict[str, dict[str, Any]]:
     curve_strategy is the one bot (on, at the account's entry size)."""
     bots = getattr(row, "curve_bots", None)
     if bots is not None:
-        return {k: {"enabled": bool(v.get("enabled")), "size_usd": v.get("size_usd")} for k, v in bots.items()}
+        return {k: {"enabled": bool(v.get("enabled")), "size_usd": v.get("size_usd"),
+                    "exit_at": v.get("exit_at"), "tp_pct": v.get("tp_pct")} for k, v in bots.items()}
     cs = getattr(row, "curve_strategy", None)
-    return {cs: {"enabled": True, "size_usd": None}} if cs else {}
+    return {cs: {"enabled": True, "size_usd": None, "exit_at": None, "tp_pct": None}} if cs else {}
 
 
 async def seed(session: AsyncSession, s: Settings) -> None:

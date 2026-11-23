@@ -852,6 +852,8 @@ def _curve_choices() -> list[dict[str, str]]:
 class CurveBotIn(BaseModel):
     enabled: bool
     size_usd: float | None = None       # entry per trade; None = the account's "Entry per trade"
+    exit_at: float | None = None        # sell once the curve is this % sold; None = the rule's own exit level
+    tp_pct: float | None = None         # and / or at +this % from our fill; None = no profit target
 
 
 @router.get("/curve-bots")
@@ -893,7 +895,7 @@ async def curve_bots(session: Session, _: Auth) -> dict[str, Any]:
             continue
         bots = bots_of(row)
         accounts.append({"name": row.name, "size_usd": row.size_usd, "bots": {
-            k: {**bots.get(k, {"enabled": False, "size_usd": None}),
+            k: {**bots.get(k, {"enabled": False, "size_usd": None, "exit_at": None, "tp_pct": None}),
                 "live_24h": dict(zip(("trades", "pnl_usd"), real.get((row.name, k), (0, 0.0))))}
             for k in rules}})
     return {"rules": out_rules, "accounts": accounts}
@@ -910,11 +912,17 @@ async def set_curve_bot(account: str, strategy: str, body: CurveBotIn, request: 
         raise HTTPException(400, f"not a curve rule that can trade for real: {strategy}")
     if body.size_usd is not None and not 1 <= body.size_usd <= 10_000:
         raise HTTPException(400, "entry per trade must be between $1 and $10,000")
+    level = live_rules()[strategy].level
+    if body.exit_at is not None and not level < body.exit_at <= 100:
+        raise HTTPException(400, f"the exit must be a curve level above the entry ({level:g}%) and at most 100%")
+    if body.tp_pct is not None and not 1 <= body.tp_pct <= 100_000:
+        raise HTTPException(400, "the profit target must be between +1% and +100000%")
     row = await _row(session, account)
     if row.cap_size_usd is not None and (body.size_usd or row.size_usd) > row.cap_size_usd:
         raise HTTPException(400, f"entry per trade is capped at ${row.cap_size_usd:,.0f} on this account")
     bots = bots_of(row)
-    bots[strategy] = {"enabled": body.enabled, "size_usd": body.size_usd}
+    bots[strategy] = {"enabled": body.enabled, "size_usd": body.size_usd, "exit_at": body.exit_at,
+                      "tp_pct": body.tp_pct}
     row.curve_bots = bots
     row.curve_strategy = None            # the bots replace the single rule
     from app.users import audit
@@ -923,7 +931,9 @@ async def set_curve_bot(account: str, strategy: str, body: CurveBotIn, request: 
     await session.commit()
     return {"ok": True, "bots": bots,
             "message": f"{strategy} {'ON' if body.enabled else 'off'} on {row.name}"
-                       + (f" · ${body.size_usd:,.2f} per trade" if body.size_usd else "")}
+                       + (f" · ${body.size_usd:,.2f} per trade" if body.size_usd else "")
+                       + (f" · exit at {body.exit_at:g}% of the curve" if body.exit_at else "")
+                       + (f" · or +{body.tp_pct:g}% profit" if body.tp_pct else "")}
 
 
 @router.post("/accounts")

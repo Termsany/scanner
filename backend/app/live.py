@@ -197,7 +197,9 @@ class Account:
     user_chat_id: str | None = None            # owner's own Telegram chat (registered users), never told the leader
     user_lang: str = "ar"                      # language of those notes
     curve_strategy: str | None = None          # curve rule traded for real (app/curve_live.py); None = none
-    curve_bots: dict[str, float | None] = field(default_factory=dict)   # rules ON -> entry USD (None: size_usd)
+    # curve rules ON -> {"size_usd", "exit_at", "tp_pct"} (None: the account's entry / the rule's exit / none);
+    # a plain number is the entry alone
+    curve_bots: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.curve_strategy and not self.curve_bots:
@@ -2168,7 +2170,9 @@ class CopyEngine:
         sigs, self._curve_last = curve_live.take(self._curve_last, set(bots), self.s.live_curve_max_signal_age_s)
         for sig in sigs:
             strat = sig.strategy
-            size = bots.get(strat) or self.a.size_usd
+            cfg = bots.get(strat)
+            cfg = cfg if isinstance(cfg, dict) else {"size_usd": cfg}
+            size = cfg.get("size_usd") or self.a.size_usd
             sym = sig.symbol or sig.mint[:6]
             try:
                 why = await self._curve_skip(session, sig.mint, size)
@@ -2198,13 +2202,17 @@ class CopyEngine:
             finally:
                 _FAST.reset(fast)
             now = _now()
-            target = decision_usd * sig.target_ratio
+            # the owner's exit for this bot (Live -> Curve bots): another curve level, and / or a profit % from
+            # our fill; the position sells at whichever comes first
+            exit_at = cfg.get("exit_at")
+            target = decision_usd * (curve_live.price_ratio(sig.progress, exit_at) if exit_at else sig.target_ratio)
+            tp_pct = cfg.get("tp_pct")
             pos = LivePosition(
                 mode=self.x.mode, account=self.a.name, token_address=sig.mint, symbol=sym[:60],
                 leader_wallet=f"curve:{strat}"[:64], leader_trade_id=0, status="open", cost_usd=f.usd,
                 sol_spent=f.sol, tokens_raw=str(f.tokens_raw), tokens_bought_raw=str(f.tokens_raw),
                 buy_signature=f.signature, hands_off=True, target_price=target, target_share=1.0,
-                stop_pct=sig.sl_pct, sell_by=now + timedelta(seconds=sig.max_hold_s),
+                target_pct=tp_pct, stop_pct=sig.sl_pct, sell_by=now + timedelta(seconds=sig.max_hold_s),
                 fills=[{"side": "buy", "sig": f.signature, "sol": f.sol, "tokens_raw": str(f.tokens_raw),
                         "usd": round(f.usd, 2), "at": now.isoformat(), "curve": strat, "why": sig.why,
                         "late_s": round(time.monotonic() - sig.at, 1),
@@ -2214,7 +2222,8 @@ class CopyEngine:
             log.info("live[%s]: curve %s BUY %s for %.4f SOL ($%.2f) %s", self.a.name, strat, sym, f.sol, f.usd,
                      f.signature)
             await self.notify(f"{self._tag()} 📈 curve {strat}: bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
-                              f"{sig.why} · sell at ${target:.6g} or {sig.sl_pct:+.0f}% or after "
+                              f"{sig.why} · sell at ${target:.6g}{f' or +{tp_pct:g}%' if tp_pct else ''} "
+                              f"or {sig.sl_pct:+.0f}% or after "
                               f"{sig.max_hold_s / 60:.0f} min\n{self._tx(f.signature)}")
 
     async def _curve_exits(self, session: AsyncSession) -> None:
@@ -2253,9 +2262,9 @@ class CopyEngine:
                 stop_usd = p.cost_usd / bought * (1 + p.stop_pct / 100)
             if p.stop_price is not None:
                 stop_usd = max(stop_usd or 0.0, p.stop_price)
-            target_usd = p.target_price
-            if target_usd is None and p.target_pct is not None:
-                target_usd = p.cost_usd / bought * (1 + p.target_pct / 100)
+            targets = [t for t in (p.target_price, None if p.target_pct is None
+                                   else p.cost_usd / bought * (1 + p.target_pct / 100)) if t is not None]
+            target_usd = min(targets) if targets else None          # whichever comes first
             curve_live.watch_exit(mint, self.a.name, stop_usd / sol_usd if stop_usd else None,
                                   target_usd / sol_usd if target_usd else None)
             px = curve_live.price(mint)

@@ -33,6 +33,7 @@ import type {
   PriceOrderIn,
   PriceOrderOut,
   CurveBots,
+  CurveBotIn,
   CurveRuleIn,
   CurveRuleOut,
 } from "./types";
@@ -200,7 +201,7 @@ export const api = {
   curveBots: (password: string, signal?: AbortSignal) =>
     request<CurveBots>("/api/live/curve-bots", { ...adm(password), signal }),
 
-  setCurveBot: (password: string, account: string, strategy: string, body: { enabled: boolean; size_usd: number | null }) =>
+  setCurveBot: (password: string, account: string, strategy: string, body: CurveBotIn) =>
     request<{ ok: boolean; message: string }>(`/api/live/curve-bots/${encodeURIComponent(account)}/${encodeURIComponent(strategy)}`, {
       method: "PUT",
       ...adm(password),

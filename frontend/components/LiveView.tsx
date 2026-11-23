@@ -30,6 +30,7 @@ import type {
   PriceOrderIn,
   PriceOrderOut,
   CurveBots,
+  CurveBotIn,
 } from "@/lib/types";
 
 const REFRESH_MS = 3_000;
@@ -1304,14 +1305,14 @@ function OrdersPanel({ password, accounts, now }: { password: string; accounts: 
   );
 }
 
-/** Curve bots: each live-tradeable curve rule with an ON/OFF switch per account and its own entry per trade. */
+/** Curve bots: each live-tradeable curve rule with an ON/OFF switch per account, its own entry per trade and exit. */
 function CurveBotsPanel({ password }: { password: string }) {
   const [d, setD] = useState<CurveBots | null>(null);
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState("");
-  const [sizes, setSizes] = useState<Record<string, string>>({});   // "account/rule" -> typed entry
-  const box = "num w-20 rounded-md border border-line bg-carbon px-2 py-1 text-xs text-ink outline-none focus:border-gold/70";
+  const [typed, setTyped] = useState<Record<string, string>>({});   // "account/rule/field" -> typed text
+  const box = "num w-16 rounded-md border border-line bg-carbon px-2 py-1 text-xs text-ink outline-none focus:border-gold/70";
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -1332,16 +1333,16 @@ function CurveBotsPanel({ password }: { password: string }) {
     };
   }, [load]);
 
-  async function put(account: string, rule: string, enabled: boolean, size: number | null, ask: boolean) {
-    if (ask && enabled && !confirm(`Turn ${rule} ON with REAL money on ${account}${size ? `, $${size} per trade` : ""}? `
+  async function put(account: string, rule: string, body: CurveBotIn, ask: boolean) {
+    if (ask && body.enabled && !confirm(`Turn ${rule} ON with REAL money on ${account}${body.size_usd ? `, $${body.size_usd} per trade` : ""}? `
       + "It buys every time the paper bot enters this rule, within the account's budget and daily loss limit.")) return;
     const key = `${account}/${rule}`;
     setBusy(key);
     setMsg("");
     try {
-      const r = await api.setCurveBot(password, account, rule, { enabled, size_usd: size });
+      const r = await api.setCurveBot(password, account, rule, body);
       setMsg(r.message);
-      setSizes((x) => Object.fromEntries(Object.entries(x).filter(([k]) => k !== key)));
+      setTyped((x) => Object.fromEntries(Object.entries(x).filter(([k]) => !k.startsWith(`${key}/`))));
       await load();
     } catch (e) {
       setMsg(e instanceof ApiError ? e.message : "Could not save it.");
@@ -1360,6 +1361,7 @@ function CurveBotsPanel({ password }: { password: string }) {
     r.sl != null ? `stop ${r.sl}%` : null,
     r.max_hold_s ? `max ${Math.round(r.max_hold_s / 60)} min` : null,
   ].filter(Boolean).join(" · ");
+  const toNum = (v: string) => (v.trim() === "" ? null : Number(v.replace(/[$,%+\s]/g, "")));
 
   return (
     <div className="flex flex-col gap-6">
@@ -1368,32 +1370,47 @@ function CurveBotsPanel({ password }: { password: string }) {
         <Panel key={a.name} title={`${a.name} · curve bots`}>
           <div className="flex flex-col divide-y divide-line">
             {d.rules.map((r) => {
-              const b = a.bots[r.name] ?? { enabled: false, size_usd: null, live_24h: { trades: 0, pnl_usd: 0 } };
+              const b = a.bots[r.name] ?? { enabled: false, size_usd: null, exit_at: null, tp_pct: null, live_24h: { trades: 0, pnl_usd: 0 } };
               const key = `${a.name}/${r.name}`;
-              const typed = sizes[key];
-              const shown = typed ?? (b.size_usd != null ? String(b.size_usd) : "");
-              const parsed = shown.trim() === "" ? null : Number(shown.replace(/[$,\s]/g, ""));
-              const changed = typed !== undefined && parsed !== b.size_usd;
-              const valid = parsed === null || (Number.isFinite(parsed) && parsed >= 1);
+              const field = (f: "size_usd" | "exit_at" | "tp_pct") => {
+                const t = typed[`${key}/${f}`];
+                const text = t ?? (b[f] != null ? String(b[f]) : "");
+                return { text, value: toNum(text), changed: t !== undefined && toNum(t) !== b[f] };
+              };
+              const size = field("size_usd"), exit = field("exit_at"), tp = field("tp_pct");
+              const valid = (size.value === null || (Number.isFinite(size.value) && size.value >= 1))
+                && (exit.value === null || (Number.isFinite(exit.value) && exit.value > r.level && exit.value <= 100))
+                && (tp.value === null || (Number.isFinite(tp.value) && tp.value >= 1));
+              const changed = size.changed || exit.changed || tp.changed;
+              const body = (enabled: boolean): CurveBotIn => valid
+                ? { enabled, size_usd: size.value, exit_at: exit.value, tp_pct: tp.value }
+                : { enabled, size_usd: b.size_usd, exit_at: b.exit_at, tp_pct: b.tp_pct };
+              const input = (f: "size_usd" | "exit_at" | "tp_pct", v: { text: string }, placeholder: string) => (
+                <input className={box} inputMode="decimal" placeholder={placeholder} value={v.text}
+                  onChange={(e) => setTyped({ ...typed, [`${key}/${f}`]: e.target.value })}
+                  onKeyDown={(e) => e.key === "Enter" && changed && valid && put(a.name, r.name, body(b.enabled), false)} />
+              );
               return (
                 <div key={r.name} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 text-xs">
                   <Toggle on={b.enabled} busy={busy === key} label={`${r.name} on ${a.name}`}
-                    onClick={() => put(a.name, r.name, !b.enabled, valid ? parsed : b.size_usd, true)} />
+                    onClick={() => put(a.name, r.name, body(!b.enabled), true)} />
                   <span className="min-w-[9rem]">
                     <b className={b.enabled ? "text-mint" : "text-ink"}>{r.name}</b>
                     <span className="block text-faint">{rule(r)}</span>
                   </span>
-                  <span className="flex items-center gap-1.5 text-muted">
-                    $<input className={box} inputMode="decimal" placeholder={String(a.size_usd)} value={shown}
-                      onChange={(e) => setSizes({ ...sizes, [key]: e.target.value })}
-                      onKeyDown={(e) => e.key === "Enter" && changed && valid && put(a.name, r.name, b.enabled, parsed, false)} />
-                    per trade
+                  <span className="flex flex-wrap items-center gap-1.5 text-muted">
+                    ${input("size_usd", size, String(a.size_usd))} per trade
+                    <span className="text-faint">·</span>
+                    exit at curve {input("exit_at", exit, r.exit_at != null ? String(r.exit_at) : "")}%
+                    <span className="text-faint">or</span>
+                    +{input("tp_pct", tp, "none")}% profit
                     {changed && (
-                      <button disabled={!valid || busy === key} onClick={() => put(a.name, r.name, b.enabled, parsed, false)}
+                      <button disabled={!valid || busy === key} onClick={() => put(a.name, r.name, body(b.enabled), false)}
                         className="rounded-md bg-gold px-2 py-1 font-semibold text-carbon hover:brightness-110 disabled:opacity-50">
                         Save
                       </button>
                     )}
+                    {changed && !valid && <span className="text-bear">exit must be above {r.level}% and at most 100%</span>}
                   </span>
                   <span className="num text-faint">
                     paper 24h: {r.paper_24h.trades} trades · <span className={tone(r.paper_24h.pnl_usd)}>{money(r.paper_24h.pnl_usd, true)}</span>
@@ -1406,8 +1423,10 @@ function CurveBotsPanel({ password }: { password: string }) {
             })}
           </div>
           <p className="border-t border-line px-4 py-2 text-[11px] text-faint">
-            Empty entry = the account&apos;s entry per trade (${a.size_usd}). One coin is bought once per account, even
-            when two bots pick it. Every bot shares the account&apos;s budget and daily loss limit.
+            Empty = the default: the account&apos;s entry per trade (${a.size_usd}), the rule&apos;s own exit level, no profit
+            target. With both an exit level and a profit %, it sells at whichever comes first; the stop and the time
+            limit stay the rule&apos;s. Changes apply to new trades. The paper bot keeps the rule&apos;s own exit. One coin is
+            bought once per account, even when two bots pick it; every bot shares the account&apos;s budget and daily loss limit.
           </p>
         </Panel>
       ))}

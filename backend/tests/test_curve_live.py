@@ -278,10 +278,10 @@ def test_several_curve_bots_each_at_its_own_entry():
     assert {p.leader_wallet for p in pos} == {"curve:curve_fast34", "curve:curve_fast19"}
     # an account set up before the bots: its single curve_strategy is the one bot, on
     assert bots_of(TradingAccount(name="z", curve_strategy="curve_fast34")) == {
-        "curve_fast34": {"enabled": True, "size_usd": None}}
+        "curve_fast34": {"enabled": True, "size_usd": None, "exit_at": None, "tp_pct": None}}
     assert bots_of(TradingAccount(name="z", curve_strategy="curve_fast34",
                                   curve_bots={"curve_fast34": {"enabled": False, "size_usd": 5}})) == {
-        "curve_fast34": {"enabled": False, "size_usd": 5}}
+        "curve_fast34": {"enabled": False, "size_usd": 5, "exit_at": None, "tp_pct": None}}
 
 
 def test_worker_publishes_the_curve_price_and_the_page_prefers_it():
@@ -317,3 +317,28 @@ def test_worker_publishes_the_curve_price_and_the_page_prefers_it():
     finally:
         curve_live.unwatch("curve", set())
         live_prices._cache = None
+
+
+def test_bot_exit_override_curve_level_and_profit_whichever_first():
+    s = S()
+    x = FakeExec()
+    a = Account("curve", 10, 100, 50, [], curve_bots={"curve_fast34": {"size_usd": None, "exit_at": 70.0,
+                                                                         "tp_pct": 50.0}})
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=a)
+        await eng.step(sess)
+        curve_live.publish("curve_fast34", CURVE_RULES["curve_fast34"], "EXITpump", "E", 2e-7, 34.0, "x", 900)
+        await eng.step(sess)                         # buys: $10 for 1 token -> entry $10
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        assert abs(p.target_price - 2e-7 * 150 * curve_live.price_ratio(34.0, 70.0)) < 1e-12
+        assert p.target_pct == 50.0
+        curve_live.on_price("EXITpump", 15.5 / 150)  # +55%: the profit target comes first (exit level is far)
+        await eng.step(sess)
+        return (await sess.execute(select(LivePosition))).scalars().one()
+
+    try:
+        p = _db(body)
+    finally:
+        curve_live.unwatch("curve", set())
+    assert ("sell", "EXITpump", 1_000_000) in x.calls and p.exit_reason == "your_target"
