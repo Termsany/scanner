@@ -2239,7 +2239,7 @@ class LiveTrader:
         for name in list(running):
             task, key, eng = running[name]
             a = want.get(name)
-            if a is None or not a.wallets or a.private_key != key or task.done():
+            if a is None or a.private_key != key or task.done():
                 task.cancel()
                 running.pop(name)
                 if a is None:
@@ -2251,11 +2251,12 @@ class LiveTrader:
             if name in running:
                 continue
             env = "LIVE_PRIVATE_KEY" if name == "main" else f"LIVE_PRIVATE_KEY_{name.upper()}"
-            if not a.wallets:
-                if name not in said:
-                    log.warning("live[%s]: no wallets to copy", name)
-                    said.add(name)
-                continue
+            if not a.wallets and f"nowallets:{name}" not in said:
+                # no copied wallets: still run its engine, which books hand sales, runs the owner's targets / stops
+                # and the page's Sell button on the positions it holds (2026-11-23: a sale in Phantom on such an
+                # account was never booked because its engine never started)
+                log.info("live[%s]: no wallets to copy; managing its own positions only", name)
+                said.add(f"nowallets:{name}")
             if mode == "live" and not a.private_key:
                 if name not in said:
                     log.warning("live[%s]: no private key, account idle", name)

@@ -2290,3 +2290,41 @@ def test_best_route_sell_falls_back_to_jupiter_when_pumpportal_cannot():
 
     f, calls = asyncio.run(go())
     assert f.signature == "SIGJ" and calls["pp"] == 1 and calls["sent"] == 0
+
+
+def test_account_with_no_copied_wallets_still_gets_an_engine():
+    """2026-11-23: a coin sold in Phantom from an account with no leaders was never booked: its engine (which
+    books hand sales, runs targets / stops and the page's Sell button) was never started."""
+    from solders.keypair import Keypair
+
+    from app.live import Account, LiveTrader
+
+    started = []
+
+    async def go():
+        t = LiveTrader(Settings(live_fast_detection=False, live_screen_enabled=False))
+        t._screener = None
+
+        async def fake_run(a, x, mode, eng):
+            started.append(a.name)
+            await asyncio.sleep(3600)
+
+        t._run_account = fake_run
+
+        async def no_telegram(text):
+            return None
+
+        t._telegram = no_telegram
+        running, said = {}, set()
+        accts = [Account("wallet", 20, 100, 50, [], str(Keypair())), Account("main", 20, 100, 50, ["L1"], str(Keypair()))]
+        await t._sync(accts, "live", running, said, None)
+        await asyncio.sleep(0)
+        names = sorted(running)
+        await t._sync(accts, "live", running, said, None)      # a second pass keeps it running
+        names2 = sorted(running)
+        for task, _, _ in running.values():
+            task.cancel()
+        return names, names2
+
+    names, names2 = asyncio.run(go())
+    assert names == ["main", "wallet"] and names2 == ["main", "wallet"] and sorted(started) == ["main", "wallet"]
