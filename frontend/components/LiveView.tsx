@@ -15,7 +15,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { AdminSignIn, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, Empty, PageHeader, pageMain, Panel, SectionTabs, Segmented, StatTile, Toggle } from "@/components/ui";
+import { Badge, Empty, PageHeader, pageMain, Panel, RangeBar, SectionTabs, Segmented, StatTile, Toggle } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
 import { ago, pct, price } from "@/lib/format";
 import type {
@@ -146,6 +146,29 @@ function SellButtons({
       </button>
     </span>
   );
+}
+
+/** Our average entry price per token: live price x cost / value x (left / bought). */
+function entryPrice(p: LivePositionOut): number | null {
+  const left = Number(p.tokens_left), bought = Number(p.tokens_bought) || left;
+  return p.price_usd && p.value_usd && left > 0 ? (p.price_usd * p.cost_usd / p.value_usd) * (left / bought) : null;
+}
+
+/** The stop-to-target bar of a live trade: the owner's target / stop when set, else the bot's rule. */
+function TradeBar({ p, peak }: { p: LivePositionOut; peak?: Peak }) {
+  const entry = entryPrice(p);
+  const fromEntry = (price?: number | null) => (price && entry ? (price / entry - 1) * 100 : null);
+  const now = fromEntry(p.price_usd) ?? p.unrealized_pct ?? null;
+  const target = p.target_pct ?? fromEntry(p.target_price);
+  const stop = p.stop_pct ?? fromEntry(p.stop_price);
+  const hi = target != null && target > 0 ? target : 100;
+  const lo = stop != null && stop < 0 ? stop : -50;
+  const share = Math.round((p.target_share ?? 1) * 100);
+  const hiLabel = target != null && target > 0
+    ? `🎯 ${share < 100 ? `${share}% at ` : ""}+${target.toFixed(0)}%`
+    : p.hands_off ? "no target" : "2x · bot takes the capital";
+  const loLabel = stop != null && stop < 0 ? `stop ${stop.toFixed(0)}%` : "no stop";
+  return <RangeBar pct={now} lo={lo} hi={hi} loLabel={loLabel} hiLabel={hiLabel} peak={fromEntry(peak?.price)} />;
 }
 
 /** A coin price, USD per token, without exponents: 0.0000042, 0.01234, 1.234. */
@@ -798,6 +821,7 @@ function OpenCard({ p, now, onSell, onTarget, peak }: {
         {peak && <span className="num text-mint" title={`highest since you bought, ${new Date(peak.at).toLocaleString()}`}>high {usdPrice(peak.price)}</span>}
         <span className="flex gap-2">{p.fills.filter((f) => f.side !== "sell_failed").slice(-2).map((f, i) => <TxLink key={i} sig={f.sig} />)}</span>
       </div>
+      <TradeBar p={p} peak={peak} />
       {p.error && <span className="text-[11px] text-bear">sell retrying: {p.error.slice(0, 60)}</span>}
       <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-3 text-xs">
         {onTarget && <TargetEditor p={p} onTarget={onTarget} peak={peak} />}

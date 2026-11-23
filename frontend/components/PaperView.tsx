@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { adminCredential, adminWho } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, PageHeader, pageMain, Panel, SectionTabs, Segmented, Toggle } from "@/components/ui";
+import { Badge, button, Empty, PageHeader, pageMain, Panel, RangeBar, SectionTabs, Segmented, Toggle } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { ago, pct, pctClass, price } from "@/lib/format";
 import type { CurveRuleIn, CurveRuleOut, PaperPositionOut, PaperStrategy, PaperSummary } from "@/lib/types";
@@ -267,10 +267,11 @@ function StrategyCard({ s, on, onClick, onReset }: {
 /** One open paper trade: P&L, and for TP/SL strategies where it sits between the stop and the target. */
 function OpenCard({ p, s, now }: { p: PaperPositionOut; s?: PaperStrategy; now: number }) {
   const up = (p.pnl_pct ?? 0) >= 0;
-  const ranged = s && !s.mirror && s.tp_pct > 0 && s.sl_pct < 0;
-  const at = ranged && p.pnl_pct != null
-    ? Math.max(0, Math.min(100, ((p.pnl_pct - s.sl_pct) / (s.tp_pct - s.sl_pct)) * 100)) : null;
-  const zero = ranged ? ((0 - s.sl_pct) / (s.tp_pct - s.sl_pct)) * 100 : null;
+  // every trade: its stop (or -50% when it has none) to its target (or 2x when it has none)
+  const lo = s && s.sl_pct < 0 ? s.sl_pct : -50;
+  const hi = s && s.tp_pct > 0 && !s.mirror ? s.tp_pct : 100;
+  const loLabel = s && s.sl_pct < 0 ? `SL ${s.sl_pct}%` : "no stop";
+  const hiLabel = !s ? "+100%" : s.mirror ? "2x · exits with the wallet" : s.tp_pct > 0 ? `TP +${s.tp_pct}%` : "2x · no target";
   return (
     <div className="card relative flex flex-col gap-3 overflow-hidden p-4 transition hover:border-line-strong">
       <span className={`absolute inset-y-0 start-0 w-[3px] ${p.pnl_pct == null ? "bg-faint" : up ? "bg-mint" : "bg-bear"}`} />
@@ -292,18 +293,7 @@ function OpenCard({ p, s, now }: { p: PaperPositionOut; s?: PaperStrategy; now: 
           <div className={`num text-[11px] ${pctClass(p.pnl_pct)}`}>{pct(p.pnl_pct)}</div>
         </div>
       </div>
-      {at != null && s && (
-        <div>
-          <div className="relative h-1.5 rounded-full bg-gradient-to-r from-bear/40 via-raised to-mint/40">
-            {zero != null && <span className="absolute inset-y-[-2px] w-px bg-line-strong" style={{ left: `${zero}%` }} />}
-            <span className={`absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-carbon ${up ? "bg-mint" : "bg-bear"} transition-all duration-700`}
-              style={{ left: `${at}%` }} />
-          </div>
-          <div className="num mt-1 flex justify-between text-[10px] text-faint">
-            <span>SL {s.sl_pct}%</span><span>TP +{s.tp_pct}%</span>
-          </div>
-        </div>
-      )}
+      <RangeBar pct={p.pnl_pct} lo={lo} hi={hi} loLabel={loLabel} hiLabel={hiLabel} peak={p.peak_pct} />
       <div className="num flex flex-wrap items-center justify-between gap-x-3 text-[11px] text-muted">
         <span>entry {price(p.entry_price)}</span>
         <span>now {price(p.last_price)}</span>

@@ -83,6 +83,37 @@ export function Toggle({ on, busy, onClick, label }: { on: boolean; busy?: boole
   );
 }
 
+/** Where a trade sits between its stop (left) and its target (right): a dot for now, a tick at the entry and a
+ * faint mark at its best so far. Percentages are from the entry. */
+export function RangeBar({ pct, lo, hi, loLabel, hiLabel, peak }: {
+  pct: number | null | undefined;
+  lo: number;
+  hi: number;
+  loLabel: string;
+  hiLabel: string;
+  peak?: number | null;
+}) {
+  const at = (v: number) => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
+  const up = (pct ?? 0) >= 0;
+  return (
+    <div>
+      <div className="relative h-1.5 rounded-full bg-gradient-to-r from-bear/40 via-raised to-mint/40">
+        <span className="absolute inset-y-[-2px] w-px bg-line-strong" style={{ left: `${at(0)}%` }} title="entry" />
+        {peak != null && peak > 0 && (
+          <span className="absolute inset-y-[-3px] w-0.5 rounded bg-mint/50" style={{ left: `${at(peak)}%` }} title={`best so far +${peak.toFixed(0)}%`} />
+        )}
+        {pct != null && (
+          <span className={cls("absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-carbon transition-all duration-700",
+            up ? "bg-mint" : "bg-bear")} style={{ left: `${at(pct)}%` }} />
+        )}
+      </div>
+      <div className="num mt-1 flex justify-between text-[10px] text-faint">
+        <span>{loLabel}</span><span>{hiLabel}</span>
+      </div>
+    </div>
+  );
+}
+
 /** Small pill switch (time windows, chart types). */
 export function Segmented<T extends string | number>({ value, options, onChange, label, className = "" }: {
   value: T;
