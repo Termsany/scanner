@@ -64,6 +64,7 @@ interface Draft {
   max_hold_hours: string;
   leaders: LeaderCfg[];
   curve_strategy: string;      // "" = none
+  curve_loaded?: string;       // as loaded: only a change on the page is sent (a stale page never clears it)
   cap_size_usd?: string;
   cap_open_usd?: string;
   cap_loss_usd?: string;
@@ -80,6 +81,7 @@ function toDraft(a: TradingAccountCfg): Draft {
     max_hold_hours: a.max_hold_hours != null ? String(a.max_hold_hours) : "",
     leaders: a.leaders.map((l) => ({ ...l })),
     curve_strategy: a.curve_strategy ?? "",
+    curve_loaded: a.curve_strategy ?? "",
     ...(a.user_id != null
       ? {
           cap_size_usd: a.cap_size_usd != null ? String(a.cap_size_usd) : "",
@@ -138,7 +140,9 @@ function payload(d: Draft) {
     size_usd: num(d.size_usd),
     max_open_usd: num(d.max_open_usd),
     max_daily_loss_usd: num(d.max_daily_loss_usd),
-    curve_strategy: d.curve_strategy || "none",
+    curve_strategy: d.curve_loaded !== undefined && d.curve_strategy === d.curve_loaded
+      ? null                                   // unchanged here: the server keeps what it has
+      : d.curve_strategy || "none",
     leaders: d.leaders.map((l) => ({
       ...l,
       wallet: l.wallet.trim(),
@@ -217,7 +221,7 @@ function Settings({
               const v = e.target.value;
               if (v && !confirm(`Trade ${v} with REAL money from this account's wallet, $${d.size_usd} per buy? `
                 + "It buys every time the paper bot enters this rule, within the budget and daily loss limit.")) return;
-              now({ ...d, curve_strategy: v });
+              now({ ...d, curve_strategy: v, curve_loaded: undefined });   // touched: always sent from now on
             }}>
             <option value="">None</option>
             {curves.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
