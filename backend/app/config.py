@@ -268,6 +268,8 @@ class Settings(BaseSettings):
     # Compare open positions with the wallet's real token balance this often; tokens sold by hand (Phantom)
     # are found in the wallet's on-chain history and booked with what they really sold for
     live_reconcile_seconds: float = 120.0
+    live_held_snapshot_seconds: float = 15.0     # list of the wallet's coins reused this long (leader sells of
+    # coins we don't hold then cost no balance read); a hand buy younger than this can miss one leader sell
     # Once a position is up this much (100 = 2x), sell just enough to get its cost back; the rest (pure profit)
     # stays until the leader sells. None = off
     live_take_capital_at_pct: float | None = 100.0

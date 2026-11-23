@@ -1515,6 +1515,7 @@ class CopyEngine:
         self._fast_at = -1e9                # monotonic time of the last Jupiter price call for take-capital
         self._adopted = 0.0                 # monotonic time of the last look for the owner's own hand-bought tokens
         self._adopt_done: dict[str, int] = {}   # mint -> balance already looked up (no buy found / dust)
+        self._held_snap: tuple[float, set[str]] | None = None   # (monotonic time, mints the wallet holds)
         self._said: dict[str, float] = {}    # repeating skip notices -> last time sent
         self._beat = 0.0                     # monotonic time of the last heartbeat written
         self._up_seen: dict[int, int] = {}  # position id -> checks in a row at or above the target
@@ -1821,13 +1822,28 @@ class CopyEngine:
         if self.s.live_sell_manual_with_leader and self.x.mode == "live":
             await self._sell_manual(session, t, share)
 
+    async def _may_hold(self, mint: str) -> bool:
+        """Could this wallet hold `mint`? From one list of the wallet's coins, at most LIVE_HELD_SNAPSHOT_SECONDS
+        old, so a sell by a followed wallet of a coin we don't have costs no RPC call (2026-11-23: one balance
+        read per account on every such sell kept Helius over its per-second limit). True when unsure."""
+        if not hasattr(self.x, "wallet_tokens"):
+            return True
+        now = time.monotonic()
+        if self._held_snap is None or now - self._held_snap[0] >= self.s.live_held_snapshot_seconds:
+            try:
+                held = await self.x.wallet_tokens()
+            except Exception:
+                return True
+            self._held_snap = (now, {m for m, amount in held.items() if amount > 0})
+        return mint in self._held_snap[1]
+
     async def _exit_alert(self, t: WalletTrade, pos: LivePosition | None) -> None:
         """The user's alert: a copied wallet sold ALL of a token this account still holds (bot or hand-bought)."""
         sym = t.symbol or t.token_address[:6]
         who = t.wallet_label or t.wallet[:6]
         held_by_hand = 0
         if pos is None:
-            if self.x.mode != "live":
+            if self.x.mode != "live" or not await self._may_hold(t.token_address):
                 return
             try:
                 held_by_hand = await self.x.token_balance(t.token_address)
@@ -1892,6 +1908,8 @@ class CopyEngine:
     async def _sell_manual(self, session: AsyncSession, t: WalletTrade, share: float) -> None:
         """Tokens the owner bought by hand in this wallet follow the leader out too (same share)."""
         sym = t.symbol or t.token_address[:6]
+        if not await self._may_hold(t.token_address):
+            return
         try:
             held = await self.x.token_balance(t.token_address)
         except Exception as exc:

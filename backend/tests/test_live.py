@@ -2408,6 +2408,32 @@ def test_token_balance_of_a_mint_the_rpc_has_not_seen_yet_is_zero():
         assert asyncio.run(go()) == 0
 
 
+def test_may_hold_reads_the_wallet_once_per_snapshot():
+    import asyncio
+
+    from app.live import CopyEngine
+
+    class X:
+        mode = "live"
+        calls = 0
+
+        async def wallet_tokens(self):
+            X.calls += 1
+            return {"HELDmint": 5, "EMPTYmint": 0}
+
+    eng = CopyEngine.__new__(CopyEngine)
+    eng.x, eng.s, eng._held_snap = X(), Settings(live_held_snapshot_seconds=60), None
+
+    async def go():
+        return [await eng._may_hold("HELDmint"), await eng._may_hold("EMPTYmint"), await eng._may_hold("OTHER")]
+
+    assert asyncio.run(go()) == [True, False, False]
+    assert X.calls == 1                                   # three leader sells, one wallet read
+    eng._held_snap = (eng._held_snap[0] - 61, eng._held_snap[1])
+    asyncio.run(eng._may_hold("OTHER"))
+    assert X.calls == 2                                   # stale: read again
+
+
 def test_rpc_retries_a_rate_limit_then_gives_up_cleanly(monkeypatch):
     import asyncio
 
