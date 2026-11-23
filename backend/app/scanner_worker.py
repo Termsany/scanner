@@ -1019,6 +1019,7 @@ async def _main(once: bool) -> None:
             await scanner.run_cycle()
         else:
             from app.billing import BillingLoop
+            from app.curve import PaperCurve
             from app.grad import PaperGrad
             from app.sniper import PaperSniper
             from app.wallet_scout import WalletScout
@@ -1035,6 +1036,7 @@ async def _main(once: bool) -> None:
                                  PaperSniper(scanner.settings).run_forever(),
                                  WalletScout(scanner.settings).run_forever(),
                                  PaperGrad(scanner.settings).run_forever(),
+                                 PaperCurve(scanner.settings).run_forever(),
                                  watch_loop(scanner.settings))
     finally:
         await tracker.close()

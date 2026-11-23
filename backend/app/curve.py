@@ -1,0 +1,375 @@
+"""Paper "pre-graduation" trades: pump.fun tokens bought late on the bonding curve, before they graduate.
+Simulated only (no keys, no transactions, no money).
+
+Question it answers: if we bought a pump.fun token once its bonding curve is CURVE_xx % sold and held it until
+it graduates to PumpSwap, would it make money after fees, slippage and our delay? On a classic curve the price
+at graduation is ~3.4x the price at 70 % and ~2x the price at 85 %, so the bet is "does it finish the curve or
+turn around first".
+
+Feeds: PumpPortal's free WebSocket `subscribeNewToken` sends every new token with its bonding-curve account.
+Each curve is watched on Helius (accountSubscribe); its reserves give the price (vSol / vTokens) and the
+progress (share of the 793.1M sellable tokens already sold). Tokens that stall are dropped early
+(CURVE_PRUNE_*), so only the few that keep filling stay subscribed.
+
+Strategies (side by side on /paper):
+  curve_70   first time progress reaches 70 %, bought CURVE_LATENCY_S later
+  curve_85   first time progress reaches 85 %, bought CURVE_LATENCY_S later
+Exits: graduation (the curve's `complete` flag) at the final curve price, paying CURVE_GRAD_EXIT_EXTRA_PCT
+more slippage because the real sale would be in the new PumpSwap pool; stop loss CURVE_SL_PCT; optional
+take profit CURVE_TP_PCT (0 = off); anything still open after CURVE_MAX_HOLD_S is sold. Fee + slippage on
+every fill.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import itertools
+import json
+import logging
+import struct
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import select
+
+from app.config import Settings, get_settings
+from app.models import Chain, PaperPosition
+
+log = logging.getLogger("curve")
+
+FEED_URL = "wss://pumpportal.fun/api/data"
+REAL_TOKENS_START = 793_100_000.0          # sellable tokens on a fresh classic pump.fun curve (6 decimals)
+CURVE_STRATEGIES: dict[str, float] = {"curve_70": 70.0, "curve_85": 85.0}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_curve(data_b64: str) -> dict[str, Any] | None:
+    """pump.fun bonding-curve account -> {price, progress, complete} (8-byte discriminator, then u64 virtual
+    token, virtual SOL, real token, real SOL reserves, total supply, then bool complete)."""
+    try:
+        raw = base64.b64decode(data_b64)
+        v_tok, v_sol, r_tok, r_sol, _supply = struct.unpack_from("<5Q", raw, 8)
+        complete = bool(raw[48]) if len(raw) > 48 else False
+    except Exception:
+        return None
+    v_sol_f, v_tok_f, r_tok_f = v_sol / 1e9, v_tok / 1e6, r_tok / 1e6
+    price = v_sol_f / v_tok_f if v_tok_f else None
+    if complete:
+        return {"complete": True, "price": price, "progress": 100.0}
+    # same sanity window as app/sniper.py: anything else is another layout or a misread
+    if not price or not 25 <= v_sol_f <= 130 or not 2e8 <= v_tok_f <= 1.1e9 or r_tok_f > REAL_TOKENS_START * 1.01:
+        return None
+    progress = max(0.0, min(100.0, (1 - r_tok_f / REAL_TOKENS_START) * 100))
+    return {"complete": False, "price": price, "progress": progress, "real_sol": r_sol / 1e9}
+
+
+@dataclass
+class Watch:
+    mint: str
+    symbol: str
+    created: float                    # monotonic time we saw it
+    curve: str
+    price: float | None = None
+    progress: float = 0.0
+    graduated: bool = False
+    pending: dict[str, tuple[float, float, str]] = field(default_factory=dict)   # strat -> (fill at, px, why)
+    held: dict[str, dict[str, Any]] = field(default_factory=dict)
+    decided: set[str] = field(default_factory=set)
+
+
+class PaperCurve:
+    def __init__(self, settings: Settings | None = None, sol_usd: float = 0.0) -> None:
+        self.s = settings or get_settings()
+        self.sol_usd = sol_usd
+        self.watch: dict[str, Watch] = {}
+        self.opened: list[dict[str, Any]] = []
+        self.closed: list[dict[str, Any]] = []
+
+    # ---- events -------------------------------------------------------------
+    def on_create(self, msg: dict[str, Any], now: float) -> str | None:
+        """A new token from PumpPortal. Returns the mint if we should watch its curve."""
+        mint, curve = msg.get("mint"), str(msg.get("bondingCurveKey") or "")
+        if msg.get("txType") != "create" or not mint or not curve or mint in self.watch:
+            return None
+        if self.s.curve_skip_mayhem and msg.get("is_mayhem_mode"):
+            return None
+        if len(self.watch) >= self.s.curve_max_watch:
+            return None
+        self.watch[mint] = Watch(mint, str(msg.get("symbol") or "")[:60], now, curve)
+        return mint
+
+    def on_curve(self, mint: str, data_b64: str, now: float) -> None:
+        """A change of the token's bonding-curve account (from Helius)."""
+        w = self.watch.get(mint)
+        st = parse_curve(data_b64)
+        if w is None or st is None or w.graduated:
+            return
+        if st["complete"]:
+            w.graduated = True
+            w.pending.clear()                         # too late to buy on the curve
+            final = st["price"]
+            if final and (not w.price or w.price / 20 <= final <= w.price * 20):
+                w.price = final
+            w.progress = 100.0
+            self._exits(w, now)
+            return
+        if w.price and not w.price / 20 <= st["price"] <= w.price * 20:
+            return                                    # a 20x jump in one update is a bad reading
+        w.price, w.progress = st["price"], st["progress"]
+        for strat, level in CURVE_STRATEGIES.items():
+            if strat not in w.decided and w.progress >= level:
+                w.decided.add(strat)
+                w.pending[strat] = (now + self.s.curve_latency_s, w.price,
+                                    f"curve {w.progress:.0f}% at {now - w.created:.0f}s")
+        self._fills(w, now)
+        self._exits(w, now)
+
+    def tick(self, now: float) -> list[str]:
+        """Every second: delayed fills, max-hold exits, dropping tokens that stalled. Returns mints to unwatch."""
+        drop = []
+        for mint, w in list(self.watch.items()):
+            self._fills(w, now)
+            self._exits(w, now)
+            if w.held or w.pending:
+                continue
+            age = now - w.created
+            stalled = ((age > self.s.curve_prune1_s and w.progress < self.s.curve_prune1_pct)
+                       or (age > self.s.curve_prune2_s and w.progress < self.s.curve_prune2_pct)
+                       or age > self.s.curve_max_watch_s)
+            done = w.graduated or len(w.decided) == len(CURVE_STRATEGIES)
+            if stalled or done:
+                drop.append(mint)
+                del self.watch[mint]
+        return drop
+
+    # ---- simulated fills ----------------------------------------------------
+    def _cost(self) -> float:
+        return (self.s.curve_fee_pct + self.s.curve_slippage_pct) / 100
+
+    def _open_count(self) -> int:
+        return sum(len(x.held) for x in self.watch.values())
+
+    def _fills(self, w: Watch, now: float) -> None:
+        for strat, (at, decision_px, why) in list(w.pending.items()):
+            if now < at or not w.price:
+                continue
+            del w.pending[strat]
+            if strat in w.held or self._open_count() >= self.s.curve_max_open:
+                continue
+            pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,
+                   "fill": w.price * (1 + self._cost()), "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
+                   "why": f"{why} +{self.s.curve_latency_s:g}s, filled at {w.progress:.0f}%, "
+                          f"paid {(w.price / decision_px - 1) * 100 if decision_px else 0:+.0f}% vs decision"}
+            w.held[strat] = pos
+            self.opened.append(pos)
+
+    def _exits(self, w: Watch, now: float) -> None:
+        if not w.price:
+            return
+        for strat, pos in list(w.held.items()):
+            pct = (w.price / pos["market"] - 1) * 100
+            pos["peak"], pos["trough"] = max(pos["peak"], pct), min(pos["trough"], pct)
+            cost = self._cost()
+            reason = None
+            if w.graduated:
+                reason, cost = "graduated", cost + self.s.curve_grad_exit_extra_pct / 100
+            elif self.s.curve_tp_pct > 0 and pct >= self.s.curve_tp_pct:
+                reason = "take_profit"
+            elif pct <= self.s.curve_sl_pct:
+                reason = "stop_loss"
+            elif now - pos["at"] >= self.s.curve_max_hold_s:
+                reason = "time"
+            if reason:
+                size = self.s.curve_size_usd
+                pnl = size / pos["fill"] * w.price * (1 - cost) - size
+                pos.update(exit=w.price, reason=reason, pnl=pnl, pnl_pct=pnl / size * 100, exit_wall=_now())
+                self.closed.append(pos)
+                del w.held[strat]
+
+    # ---- persistence ----------------------------------------------------------
+    def _usd(self, sol_px: float) -> float:
+        return sol_px * self.sol_usd if self.sol_usd else sol_px
+
+    async def flush(self, session) -> int:
+        """Write opened / closed paper positions (strategy curve_*) so /paper shows them."""
+        n = 0
+        rows: list[tuple[dict[str, Any], PaperPosition]] = []
+        for pos in self.opened:
+            row = PaperPosition(strategy=pos["strategy"], chain=Chain.solana, token_address=pos["mint"],
+                                symbol=pos["symbol"], trigger=pos["why"][:160], status="open",
+                                size_usd=self.s.curve_size_usd, entry_time=pos["wall"],
+                                entry_price=self._usd(pos["market"]), fill_price=self._usd(pos["fill"]),
+                                tp_pct=self.s.curve_tp_pct, sl_pct=self.s.curve_sl_pct,
+                                max_hold_minutes=max(int(self.s.curve_max_hold_s // 60), 1),
+                                remaining_frac=1.0, proceeds_usd=0.0)
+            session.add(row)
+            rows.append((pos, row))
+            n += 1
+        await session.flush()
+        for pos, row in rows:             # keep the id: each flush has its own session
+            pos["row"] = row.id
+        self.opened.clear()
+        for c in self.closed:
+            row = await session.get(PaperPosition, c["row"]) if c.get("row") else None
+            if row is None:
+                continue
+            row.status, row.exit_time, row.exit_reason = "closed", c["exit_wall"], c["reason"]
+            row.exit_price = row.last_price = self._usd(c["exit"])
+            row.peak_pct, row.trough_pct = c["peak"], c["trough"]
+            row.pnl_usd, row.pnl_pct = c["pnl"], c["pnl_pct"]
+            row.proceeds_usd, row.remaining_frac = c["pnl"] + row.size_usd, 0.0
+            n += 1
+        self.closed = [c for c in self.closed if c.get("row") is None]
+        n += await self._mark_open(session)
+        await session.commit()
+        return n
+
+    async def _mark_open(self, session) -> int:
+        size, n, stamp = self.s.curve_size_usd, 0, _now()
+        for w in self.watch.values():
+            if not w.price:
+                continue
+            for pos in w.held.values():
+                row = await session.get(PaperPosition, pos["row"]) if pos.get("row") else None
+                if row is None:
+                    continue
+                pnl = size / pos["fill"] * w.price * (1 - self._cost()) - size
+                row.last_price, row.last_priced_at = self._usd(w.price), stamp
+                row.peak_pct, row.trough_pct = pos["peak"], pos["trough"]
+                row.pnl_usd, row.pnl_pct = pnl, pnl / size * 100
+                n += 1
+        return n
+
+    # ---- loop -------------------------------------------------------------------
+    def _helius_ws(self) -> str | None:
+        url = self.s.live_rpc_url or ""
+        return url.replace("https://", "wss://", 1) if url.startswith("https://") and "helius" in url else None
+
+    async def run_forever(self) -> None:
+        if not self.s.curve_paper_enabled:
+            return
+        hws = self._helius_ws()
+        if not hws:
+            log.warning("curve (paper): needs a Helius LIVE_RPC_URL for prices; not started")
+            return
+        import websockets
+
+        from app.db import SessionLocal
+
+        async with SessionLocal() as session:          # a restart left these with no feed: close them flat
+            stale = (await session.execute(select(PaperPosition).where(
+                PaperPosition.strategy.in_(tuple(CURVE_STRATEGIES)), PaperPosition.status == "open"))).scalars().all()
+            for p in stale:
+                p.status, p.exit_reason, p.exit_time = "closed", "restart", _now()
+                p.exit_price = p.last_price or p.entry_price
+                p.pnl_usd = p.pnl_usd if p.pnl_usd is not None else 0.0
+                p.pnl_pct = p.pnl_pct if p.pnl_pct is not None else 0.0
+            await session.commit()
+        backoff = 2.0
+        while True:
+            try:
+                await self._refresh_sol_usd()
+                async with websockets.connect(FEED_URL, ping_interval=20, max_size=2 ** 20) as pp, \
+                        websockets.connect(hws, ping_interval=20, max_size=2 ** 22) as hl:
+                    await pp.send(json.dumps({"method": "subscribeNewToken"}))
+                    log.info("curve (paper): connected (new tokens: PumpPortal, curves: Helius)")
+                    backoff = 2.0
+                    self._req: dict[int, str] = {}
+                    self._sub: dict[int, str] = {}
+                    self._mint_sub: dict[str, int] = {}
+                    await asyncio.gather(self._read_new(pp, hl), self._read_curves(hl),
+                                         self._housekeep(hl, SessionLocal))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("curve (paper): feed error %s; reconnecting in %.0fs", exc, backoff)
+                # subscriptions died with the socket: open positions can't be priced any more
+                async with SessionLocal() as session:
+                    for w in self.watch.values():
+                        for pos in list(w.held.values()):
+                            pos.update(exit=w.price or pos["market"], reason="feed_lost", exit_wall=_now(),
+                                       pnl=0.0, pnl_pct=0.0)
+                            if w.price:
+                                size = self.s.curve_size_usd
+                                pos["pnl"] = size / pos["fill"] * w.price * (1 - self._cost()) - size
+                                pos["pnl_pct"] = pos["pnl"] / size * 100
+                            self.closed.append(pos)
+                        w.held.clear()
+                    self.watch.clear()
+                    try:
+                        await self.flush(session)
+                    except Exception:
+                        log.exception("curve (paper): flush after feed loss failed")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+
+    _ids = itertools.count(1)
+
+    async def _subscribe(self, hl, mint: str) -> None:
+        w = self.watch.get(mint)
+        if not w:
+            return
+        rid = next(self._ids)
+        self._req[rid] = mint
+        await hl.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": "accountSubscribe",
+                                  "params": [w.curve, {"encoding": "base64", "commitment": "processed"}]}))
+
+    async def _read_new(self, pp, hl) -> None:
+        async for raw in pp:
+            msg = json.loads(raw)
+            if isinstance(msg, dict):
+                mint = self.on_create(msg, time.monotonic())
+                if mint:
+                    await self._subscribe(hl, mint)
+
+    async def _read_curves(self, hl) -> None:
+        async for raw in hl:
+            msg = json.loads(raw)
+            if "id" in msg and "result" in msg:              # subscription confirmed
+                mint = self._req.pop(msg["id"], None)
+                if mint and isinstance(msg["result"], int):
+                    self._sub[msg["result"]] = mint
+                    self._mint_sub[mint] = msg["result"]
+                continue
+            p = msg.get("params") or {}
+            mint = self._sub.get(p.get("subscription"))
+            data = (((p.get("result") or {}).get("value") or {}).get("data") or [None])[0]
+            if mint and data:
+                self.on_curve(mint, data, time.monotonic())
+
+    async def _housekeep(self, hl, SessionLocal) -> None:
+        last_flush = last_px = time.monotonic()
+        while True:
+            await asyncio.sleep(1.0)
+            now = time.monotonic()
+            for mint in self.tick(now):
+                sid = self._mint_sub.pop(mint, None)
+                if sid is not None:
+                    self._sub.pop(sid, None)
+                    await hl.send(json.dumps({"jsonrpc": "2.0", "id": next(self._ids),
+                                              "method": "accountUnsubscribe", "params": [sid]}))
+            if now - last_flush >= 5.0 and (self.opened or self.closed or any(w.held for w in self.watch.values())):
+                last_flush = now
+                async with SessionLocal() as session:
+                    await self.flush(session)
+            if now - last_px >= 60.0:
+                last_px = now
+                await self._refresh_sol_usd()
+
+    async def _refresh_sol_usd(self) -> None:
+        import httpx
+
+        from app.live import SOL_MINT
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(f"{self.s.jupiter_api_url}/price/v3", params={"ids": SOL_MINT})
+                self.sol_usd = float(r.json()[SOL_MINT]["usdPrice"])
+        except Exception:
+            log.warning("curve (paper): SOL price unavailable")

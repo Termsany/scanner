@@ -134,6 +134,25 @@ class Settings(BaseSettings):
     grad_confirm_min_pct: float = 5.0            # ...and buy only if the price is up at least this much
     grad_max_open: int = 40
 
+    # Paper pre-graduation trades (app/curve.py): buy late on the pump.fun bonding curve, sell at graduation.
+    curve_paper_enabled: bool = False
+    curve_size_usd: float = 30.0
+    curve_latency_s: float = 2.0                 # our assumed delay from decision to a landed buy
+    curve_fee_pct: float = 1.0                   # pump.fun fee + priority/tip, each way
+    curve_slippage_pct: float = 2.0              # each way
+    curve_grad_exit_extra_pct: float = 3.0       # graduation exit: the real sale is in the fresh PumpSwap pool
+    curve_tp_pct: float = 0.0                    # 0 = no take profit: hold for graduation
+    curve_sl_pct: float = -25.0
+    curve_max_hold_s: float = 3600.0
+    curve_max_open: int = 40
+    curve_max_watch: int = 800                   # curves subscribed on Helius at once
+    curve_prune1_s: float = 120.0                # unwatch a token still under CURVE_PRUNE1_PCT after this long...
+    curve_prune1_pct: float = 10.0
+    curve_prune2_s: float = 900.0                # ...or under CURVE_PRUNE2_PCT after this long
+    curve_prune2_pct: float = 40.0
+    curve_max_watch_s: float = 7200.0
+    curve_skip_mayhem: bool = True
+
     # Live copy trading (REAL money, Solana via Jupiter). Off unless LIVE_MODE=live AND a key is set.
     #   off     nothing runs
     #   dry     quotes real Jupiter routes and logs what it would do; never signs or sends
