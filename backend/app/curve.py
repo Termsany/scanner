@@ -6,10 +6,18 @@ it graduates to PumpSwap, would it make money after fees, slippage and our delay
 at graduation is ~3.4x the price at 70 % and ~2x the price at 85 %, so the bet is "does it finish the curve or
 turn around first".
 
-Feeds: PumpPortal's free WebSocket `subscribeNewToken` sends every new token with its bonding-curve account.
-Each curve is watched on Helius (accountSubscribe); its reserves give the price (vSol / vTokens) and the
-progress (share of the 793.1M sellable tokens already sold). Tokens that stall are dropped early
-(CURVE_PRUNE_*), so only the few that keep filling stay subscribed.
+Feeds (CURVE_FEED):
+  helius      PumpPortal `subscribeNewToken` for new tokens; every curve watched on Helius (accountSubscribe):
+              its reserves give the price (vSol / vTokens), the progress (share of the 793.1M sellable tokens
+              sold) and the `complete` flag at graduation.
+  hybrid      as helius, and once a token passes CURVE_PP_FROM_PCT it is also streamed from PumpPortal's
+              trade feed (PUMPPORTAL_API_KEY): every trade within ~1 s, billed per event, so only the few
+              tokens that get that far are paid for.
+  pumpportal  no Helius: every new token streamed from PumpPortal until it stalls; graduation from
+              `subscribeMigration`. Simplest, and the most PumpPortal events.
+  auto        (default) hybrid with a Helius URL and a PumpPortal key, helius with only Helius, pumpportal
+              with only the key.
+Tokens that stall are dropped early (CURVE_PRUNE_*), so few stay watched.
 
 Strategies (side by side on /paper):
   curve_70   first time progress reaches 70 %, bought CURVE_LATENCY_S later
@@ -24,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import itertools
 import json
 import logging
@@ -42,6 +51,7 @@ log = logging.getLogger("curve")
 
 FEED_URL = "wss://pumpportal.fun/api/data"
 REAL_TOKENS_START = 793_100_000.0          # sellable tokens on a fresh classic pump.fun curve (6 decimals)
+V_TOKENS_START = 1_073_000_000.0          # virtual tokens at launch: virtual - real stays 279.9M
 CURVE_STRATEGIES: dict[str, float] = {"curve_70": 70.0, "curve_85": 85.0}
 
 
@@ -69,6 +79,19 @@ def parse_curve(data_b64: str) -> dict[str, Any] | None:
     return {"complete": False, "price": price, "progress": progress, "real_sol": r_sol / 1e9}
 
 
+def parse_trade(msg: dict[str, Any]) -> dict[str, Any] | None:
+    """A PumpPortal bonding-curve trade -> {price, progress} from its virtual reserves after the trade."""
+    try:
+        v_sol, v_tok = float(msg.get("vSolInBondingCurve") or 0), float(msg.get("vTokensInBondingCurve") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not 25 <= v_sol <= 130 or not 2e8 <= v_tok <= 1.1e9:
+        return None
+    r_tok = v_tok - (V_TOKENS_START - REAL_TOKENS_START)
+    progress = max(0.0, min(100.0, (1 - r_tok / REAL_TOKENS_START) * 100))
+    return {"complete": False, "price": v_sol / v_tok, "progress": progress}
+
+
 @dataclass
 class Watch:
     mint: str
@@ -90,6 +113,18 @@ class PaperCurve:
         self.watch: dict[str, Watch] = {}
         self.opened: list[dict[str, Any]] = []
         self.closed: list[dict[str, Any]] = []
+        self.feed = self._pick_feed()
+        self.pp_subbed: set[str] = set()
+        self.pp_events = 0
+
+    def _pick_feed(self) -> str | None:
+        """helius / hybrid / pumpportal, or None when what CURVE_FEED needs is missing."""
+        has_h, has_pp = bool(self._helius_ws()), bool(self.s.pumpportal_api_key)
+        feed = (self.s.curve_feed or "auto").lower()
+        if feed == "auto":
+            feed = "hybrid" if has_h and has_pp else "helius" if has_h else "pumpportal" if has_pp else ""
+        ok = {"helius": has_h, "hybrid": has_h and has_pp, "pumpportal": has_pp}.get(feed, False)
+        return feed if ok else None
 
     # ---- events -------------------------------------------------------------
     def on_create(self, msg: dict[str, Any], now: float) -> str | None:
@@ -106,8 +141,19 @@ class PaperCurve:
 
     def on_curve(self, mint: str, data_b64: str, now: float) -> None:
         """A change of the token's bonding-curve account (from Helius)."""
-        w = self.watch.get(mint)
-        st = parse_curve(data_b64)
+        self._update(mint, parse_curve(data_b64), now)
+
+    def on_pp(self, msg: dict[str, Any], now: float) -> None:
+        """A PumpPortal trade or migration on a token we stream."""
+        mint, tx = msg.get("mint"), msg.get("txType")
+        if tx == "migrate":
+            self._update(mint, {"complete": True, "price": None, "progress": 100.0}, now)
+        elif tx in ("buy", "sell") and mint in self.pp_subbed:
+            self.pp_events += 1
+            self._update(mint, parse_trade(msg), now)
+
+    def _update(self, mint: str | None, st: dict[str, Any] | None, now: float) -> None:
+        w = self.watch.get(mint) if mint else None
         if w is None or st is None or w.graduated:
             return
         if st["complete"]:
@@ -129,6 +175,25 @@ class PaperCurve:
                                     f"curve {w.progress:.0f}% at {now - w.created:.0f}s")
         self._fills(w, now)
         self._exits(w, now)
+
+    # ---- PumpPortal trade stream: which tokens to pay for ------------------------
+    def pp_from_pct(self) -> float | None:
+        """Progress from which a token is streamed from PumpPortal (None: not at all)."""
+        return {"hybrid": self.s.curve_pp_from_pct, "pumpportal": 0.0}.get(self.feed)
+
+    def pp_sync(self) -> list[str]:
+        """Subscribe / unsubscribe messages that bring the PumpPortal stream in line with the watch list."""
+        frm = self.pp_from_pct()
+        want = set() if frm is None else {m for m, w in self.watch.items()
+                                          if not w.graduated and (w.progress >= frm or w.held)}
+        add, drop = sorted(want - self.pp_subbed), sorted(self.pp_subbed - want)
+        out = []
+        if add:
+            out.append(json.dumps({"method": "subscribeTokenTrade", "keys": add}))
+        if drop:
+            out.append(json.dumps({"method": "unsubscribeTokenTrade", "keys": drop}))
+        self.pp_subbed = want
+        return out
 
     def tick(self, now: float) -> list[str]:
         """Every second: delayed fills, max-hold exits, dropping tokens that stalled. Returns mints to unwatch."""
@@ -254,9 +319,9 @@ class PaperCurve:
     async def run_forever(self) -> None:
         if not self.s.curve_paper_enabled:
             return
-        hws = self._helius_ws()
-        if not hws:
-            log.warning("curve (paper): needs a Helius LIVE_RPC_URL for prices; not started")
+        if not self.feed:
+            log.warning("curve (paper): CURVE_FEED=%s needs a Helius LIVE_RPC_URL and/or PUMPPORTAL_API_KEY; "
+                        "not started", self.s.curve_feed)
             return
         import websockets
 
@@ -271,41 +336,50 @@ class PaperCurve:
                 p.pnl_usd = p.pnl_usd if p.pnl_usd is not None else 0.0
                 p.pnl_pct = p.pnl_pct if p.pnl_pct is not None else 0.0
             await session.commit()
+        # one PumpPortal connection for new tokens, trades and migrations (keyed when we have a key)
+        pp_url = FEED_URL + (f"?api-key={self.s.pumpportal_api_key}" if self.s.pumpportal_api_key else "")
+        hws = self._helius_ws() if self.feed in ("helius", "hybrid") else None
         backoff = 2.0
         while True:
             try:
                 await self._refresh_sol_usd()
-                async with websockets.connect(FEED_URL, ping_interval=20, max_size=2 ** 20) as pp, \
-                        websockets.connect(hws, ping_interval=20, max_size=2 ** 22) as hl:
+                async with contextlib.AsyncExitStack() as stack:
+                    pp = await stack.enter_async_context(
+                        websockets.connect(pp_url, ping_interval=20, max_size=2 ** 22))
+                    hl = (await stack.enter_async_context(websockets.connect(hws, ping_interval=20, max_size=2 ** 22))
+                          if hws else None)
                     await pp.send(json.dumps({"method": "subscribeNewToken"}))
-                    log.info("curve (paper): connected (new tokens: PumpPortal, curves: Helius)")
+                    if self.feed == "pumpportal":
+                        await pp.send(json.dumps({"method": "subscribeMigration"}))
+                    log.info("curve (paper): connected (feed %s)", self.feed)
                     backoff = 2.0
+                    self.pp_subbed = set()             # a new connection starts with no subscriptions
                     self._req: dict[int, str] = {}
                     self._sub: dict[int, str] = {}
                     self._mint_sub: dict[str, int] = {}
-                    await asyncio.gather(self._read_new(pp, hl), self._read_curves(hl),
-                                         self._housekeep(hl, SessionLocal))
+                    jobs = [self._read_pp(pp, hl), self._housekeep(pp, hl, SessionLocal)]
+                    if hl is not None:
+                        jobs.append(self._read_curves(hl))
+                    await asyncio.gather(*jobs)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.warning("curve (paper): feed error %s; reconnecting in %.0fs", exc, backoff)
                 # subscriptions died with the socket: open positions can't be priced any more
-                async with SessionLocal() as session:
-                    for w in self.watch.values():
-                        for pos in list(w.held.values()):
-                            pos.update(exit=w.price or pos["market"], reason="feed_lost", exit_wall=_now(),
-                                       pnl=0.0, pnl_pct=0.0)
-                            if w.price:
-                                size = self.s.curve_size_usd
-                                pos["pnl"] = size / pos["fill"] * w.price * (1 - self._cost()) - size
-                                pos["pnl_pct"] = pos["pnl"] / size * 100
-                            self.closed.append(pos)
-                        w.held.clear()
-                    self.watch.clear()
-                    try:
+                size = self.s.curve_size_usd
+                for w in self.watch.values():
+                    for pos in list(w.held.values()):
+                        px = w.price or pos["market"]
+                        pnl = size / pos["fill"] * px * (1 - self._cost()) - size
+                        pos.update(exit=px, reason="feed_lost", exit_wall=_now(), pnl=pnl, pnl_pct=pnl / size * 100)
+                        self.closed.append(pos)
+                    w.held.clear()
+                self.watch.clear()
+                try:
+                    async with SessionLocal() as session:
                         await self.flush(session)
-                    except Exception:
-                        log.exception("curve (paper): flush after feed loss failed")
+                except Exception:
+                    log.exception("curve (paper): flush after feed loss failed")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
 
@@ -320,13 +394,24 @@ class PaperCurve:
         await hl.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": "accountSubscribe",
                                   "params": [w.curve, {"encoding": "base64", "commitment": "processed"}]}))
 
-    async def _read_new(self, pp, hl) -> None:
+    async def _read_pp(self, pp, hl) -> None:
         async for raw in pp:
-            msg = json.loads(raw)
-            if isinstance(msg, dict):
-                mint = self.on_create(msg, time.monotonic())
-                if mint:
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("errors"):
+                log.warning("curve (paper): PumpPortal %s", str(msg)[:200])
+                continue
+            now = time.monotonic()
+            if msg.get("txType") == "create":
+                mint = self.on_create(msg, now)
+                if mint and hl is not None:
                     await self._subscribe(hl, mint)
+            else:
+                self.on_pp(msg, now)
 
     async def _read_curves(self, hl) -> None:
         async for raw in hl:
@@ -343,12 +428,16 @@ class PaperCurve:
             if mint and data:
                 self.on_curve(mint, data, time.monotonic())
 
-    async def _housekeep(self, hl, SessionLocal) -> None:
-        last_flush = last_px = time.monotonic()
+    async def _housekeep(self, pp, hl, SessionLocal) -> None:
+        last_flush = last_px = last_cost = time.monotonic()
+        events_at = self.pp_events
         while True:
             await asyncio.sleep(1.0)
             now = time.monotonic()
-            for mint in self.tick(now):
+            dropped = self.tick(now)
+            for m in self.pp_sync():
+                await pp.send(m)
+            for mint in dropped if hl is not None else ():
                 sid = self._mint_sub.pop(mint, None)
                 if sid is not None:
                     self._sub.pop(sid, None)
@@ -361,6 +450,11 @@ class PaperCurve:
             if now - last_px >= 60.0:
                 last_px = now
                 await self._refresh_sol_usd()
+            if self.pp_from_pct() is not None and now - last_cost >= 600.0:
+                n, events_at, last_cost = self.pp_events - events_at, self.pp_events, now
+                # 0.01 SOL per 10,000 events; 144 ten-minute windows a day
+                log.info("curve (paper): %d PumpPortal events in 10 min, %d tokens streamed (~%.3f SOL/day)",
+                         n, len(self.pp_subbed), n * 144 * 0.01 / 10_000)
 
     async def _refresh_sol_usd(self) -> None:
         import httpx

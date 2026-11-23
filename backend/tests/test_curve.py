@@ -130,3 +130,44 @@ def test_rows_written_for_paper_page():
     rows = asyncio.run(run())
     assert {r.strategy for r in rows} == {"curve_70", "curve_85"}
     assert all(r.status == "closed" and r.exit_reason == "graduated" and r.pnl_usd > 0 for r in rows)
+
+
+def pp_trade(progress: float, mint="M", side="buy"):
+    v_tok = 1_073_000_000.0 - REAL_TOKENS_START * progress / 100
+    return {"txType": side, "mint": mint, "vSolInBondingCurve": K / v_tok, "vTokensInBondingCurve": v_tok}
+
+
+HEL = "https://mainnet.helius-rpc.com/?api-key=x"
+
+
+def test_feed_choice():
+    assert PaperCurve(S(live_rpc_url=HEL, pumpportal_api_key="k")).feed == "hybrid"
+    assert PaperCurve(S(live_rpc_url=HEL, pumpportal_api_key=None)).feed == "helius"
+    assert PaperCurve(S(live_rpc_url=None, pumpportal_api_key="k")).feed == "pumpportal"
+    assert PaperCurve(S(live_rpc_url=None, pumpportal_api_key=None)).feed is None
+    assert PaperCurve(S(live_rpc_url=None, pumpportal_api_key="k", curve_feed="hybrid")).feed is None
+
+
+def test_pumpportal_only_trades_and_migration():
+    c = PaperCurve(S(live_rpc_url=None, pumpportal_api_key="k"))
+    c.on_create(create(), 0.0)
+    assert '"subscribeTokenTrade"' in c.pp_sync()[0]          # every new token is streamed
+    c.on_pp(pp_trade(86), 10.0)
+    assert abs(c.watch["M"].progress - 86) < 0.01
+    c.on_pp(pp_trade(88), 12.5)
+    assert set(c.watch["M"].held) == {"curve_70", "curve_85"}
+    c.on_pp({"txType": "migrate", "mint": "M"}, 20.0)
+    assert {p["reason"] for p in c.closed} == {"graduated"} and c.pp_events == 2
+    c.tick(21.0)
+    assert '"unsubscribeTokenTrade"' in c.pp_sync()[0]
+
+
+def test_hybrid_pays_only_for_tokens_past_the_threshold():
+    c = PaperCurve(S(live_rpc_url=HEL, pumpportal_api_key="k", curve_pp_from_pct=50.0))
+    c.on_create(create("A"), 0.0)
+    c.on_create(create("B"), 0.0)
+    c.on_curve("A", acct(20), 5.0)
+    c.on_curve("B", acct(55), 5.0)
+    assert c.pp_sync() == ['{"method": "subscribeTokenTrade", "keys": ["B"]}']
+    c.on_pp(pp_trade(30, mint="A"), 6.0)                        # not streamed: ignored, not counted
+    assert c.watch["A"].progress < 25 and c.pp_events == 0
