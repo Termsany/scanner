@@ -131,7 +131,7 @@ def test_rows_written_for_paper_page():
 
     rows = asyncio.run(run())
     assert {r.strategy for r in rows} == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail",
-                                          "curve_70_filter", "curve_85_half40"}
+                                          "curve_70_filter", "curve_85_half40"}    # first seen at 85%: no 30% buy
     done = [r for r in rows if r.strategy != "curve_70_trail"]
     assert all(r.status == "closed" and r.exit_reason == "graduated" and r.pnl_usd > 0 for r in done)
     trail = next(r for r in rows if r.strategy == "curve_70_trail")
@@ -304,3 +304,46 @@ def test_filter_sells_half_at_plus_20_and_half40_at_plus_40():
     c.on_curve("M", acct(85), 32.5)                              # curve_85_half40 in at 85%
     c.on_curve("M", acct(_up_progress(85, 40)), 40.0)
     assert c.watch["M"].held["curve_85_half40"]["half"]
+
+
+def test_30_to_70_buys_at_30_and_sells_everything_at_70():
+    c = PaperCurve(S())
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(30), 10.0)                              # decision at 30%
+    c.on_curve("M", acct(31), 12.5)                              # filled
+    held = c.watch["M"].held
+    assert {"curve_30_70", "curve_30_70_sl"} <= set(held) and held["curve_30_70"]["size"] == 10.0
+    assert "curve_70" not in held
+    c.on_curve("M", acct(71), 20.0)                              # past 70%: everything out
+    out = {p["strategy"]: p for p in c.closed}
+    assert out["curve_30_70"]["reason"] == "curve_target" and out["curve_30_70"]["pnl"] > 10.0   # ~2.5x on $10
+
+
+def test_30_to_70_stop_variant_stops_at_minus_30_the_other_holds():
+    c = PaperCurve(S())
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(30), 10.0)
+    c.on_curve("M", acct(30), 12.5)
+    c.on_curve("M", acct(5), 20.0)                               # price -35% from the entry
+    reasons = {p["strategy"]: p["reason"] for p in c.closed}
+    assert reasons.get("curve_30_70_sl") == "stop_loss" and "curve_30_70" in c.watch["M"].held
+
+
+def test_each_strategy_has_its_own_open_limit():
+    c = PaperCurve(S(curve_max_open=1))
+    for m in ("A", "B"):
+        c.on_create(create(m), 0.0)
+        c.on_curve(m, acct(30), 10.0)
+        c.on_curve(m, acct(31), 12.5)
+    assert c._open_count("curve_30_70") == 1                    # the second token waits for a free slot
+    c.on_curve("A", acct(70), 20.0)
+    c.on_curve("A", acct(71), 22.5)
+    assert "curve_70" in c.watch["A"].held                       # 30% buys did not take the 70% slots
+
+
+def test_30_to_70_skips_a_token_first_seen_well_past_30():
+    c = PaperCurve(S())
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(45), 10.0)                              # first reading already 45%
+    c.on_curve("M", acct(46), 12.5)
+    assert "curve_30_70" not in c.watch["M"].held and not c.watch["M"].pending.get("curve_30_70")
