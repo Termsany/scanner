@@ -451,6 +451,8 @@ class CurveCustom(Base):
     skip_drop: Mapped[float | None] = mapped_column(Float, nullable=True)  # skip the buy if it fell this % first
     max_secs: Mapped[float | None] = mapped_column(Float, nullable=True)   # skip a token slower than this to the level
     skip_backslide: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # skip if the curve slid back first
+    grad_trail: Mapped[float | None] = mapped_column(Float, nullable=True)  # at graduation keep riding: sell this % off
+                                                                            # the high (None = sell at graduation)
     size_usd: Mapped[float] = mapped_column(Float, default=10.0)
     max_hold_min: Mapped[float] = mapped_column(Float, default=60.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

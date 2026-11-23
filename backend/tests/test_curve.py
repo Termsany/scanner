@@ -420,3 +420,21 @@ def test_speed_and_backslide_filters():
     c.on_curve("M", acct(68), 102.5)                             # slid back before the buy
     held = set(c.watch["M"].held)
     assert "cc1" not in held and "cc2" not in held and "cc3" in held
+
+
+def test_custom_rule_rides_after_graduation_on_a_trailing_stop():
+    c = PaperCurve(S())
+    c.set_custom({"cc1": _custom(level=70.0, grad_trail=30.0), "cc2": _custom(level=70.0)})
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(70), 10.0)
+    c.on_curve("M", acct(70), 12.5)
+    c.on_curve("M", acct(100, complete=True), 20.0)              # graduation: cc2 sells, cc1 rides
+    reasons = {p["strategy"]: p["reason"] for p in c.closed}
+    assert reasons.get("cc2") == "graduated" and "cc1" in c.watch["M"].held
+    assert c.riding() == ["M"]
+    grad = c.watch["M"].price
+    c.on_riding_price("M", grad * 1.5, 30.0)                     # new high
+    assert "cc1" in c.watch["M"].held
+    c.on_riding_price("M", grad * 1.5 * 0.65, 40.0)              # 35% off the high: out
+    out = next(p for p in c.closed if p["strategy"] == "cc1")
+    assert out["reason"] == "trailing_stop" and out["pnl"] > 0

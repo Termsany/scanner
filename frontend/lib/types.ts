@@ -363,6 +363,7 @@ export interface CurveRuleOut {
   skip_drop: number | null;
   max_secs: number | null;
   skip_backslide: boolean;
+  grad_trail: number | null;
   size_usd: number;
   max_hold_min: number;
   curve_gain_pct: number | null;
@@ -378,6 +379,7 @@ export interface CurveRuleIn {
   skip_drop: number | null;
   max_secs: number | null;
   skip_backslide: boolean;
+  grad_trail: number | null;
   size_usd: number;
   max_hold_min: number;
 }

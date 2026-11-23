@@ -70,6 +70,7 @@ class CurveRule:
     title: str = ""
     max_secs: float | None = None   # skip a token that took longer than this (from its launch) to reach the level
     skip_backslide: bool = False    # skip if the curve slid back below the decision level before our buy
+    grad_trail: float | None = None  # custom: at graduation keep riding, sell this % below the high since then
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -102,7 +103,7 @@ def custom_rule(row: Any) -> CurveRule:
                      skip_drop=row.skip_drop, exit_at=row.exit_at, sl=row.sl_pct, tp=row.tp_pct,
                      half=row.half_at, size=float(row.size_usd or 10.0), max_hold_s=float(row.max_hold_min or 60) * 60,
                      enabled=bool(row.enabled), title=custom_title(row), max_secs=row.max_secs,
-                     skip_backslide=bool(row.skip_backslide))
+                     skip_backslide=bool(row.skip_backslide), grad_trail=getattr(row, "grad_trail", None))
 
 
 def custom_title(row: Any) -> str:
@@ -120,7 +121,9 @@ def custom_title(row: Any) -> str:
         parts.append(f"skip if slower than {float(row.max_secs):g}s to the level")
     if getattr(row, "skip_backslide", None):
         parts.append("skip if the curve slid back")
-    parts.append(f"graduation sells, {float(row.max_hold_min or 60):g} min max")
+    trail = getattr(row, "grad_trail", None)
+    parts.append(f"at graduation keep riding, sell {float(trail):g}% off the high" if trail else "graduation sells")
+    parts.append(f"{float(row.max_hold_min or 60):g} min max")
     return ", ".join(parts)
 
 
@@ -453,9 +456,15 @@ class PaperCurve:
                     pos["proceeds"] += pos["size"] * 0.5 / pos["fill"] * w.price * (1 - sale_cost)
                     pos["rem"], pos["half"] = 0.5, True
                     pos["why"] = (pos.get("why") or "")[:120] + f" | half sold at +{rule.half:g}%"
-                if w.graduated:
+                riding = w.graduated and rule.grad_trail is not None
+                if riding:                                       # the rest rides on PumpSwap from the graduation
+                    pos["gpeak"] = max(pos["gpeak"] or w.price, w.price)
+                    cost = sale_cost
+                if w.graduated and not riding:
                     reason, cost = "graduated", sale_cost
-                elif rule.exit_at is not None and w.progress >= rule.exit_at:
+                elif riding and w.price <= pos["gpeak"] * (1 - rule.grad_trail / 100):
+                    reason = "trailing_stop"
+                elif rule.exit_at is not None and w.progress >= rule.exit_at and not riding:
                     reason = "curve_target"
                 elif rule.tp is not None and pct >= rule.tp:
                     reason = "take_profit"

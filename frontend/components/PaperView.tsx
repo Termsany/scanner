@@ -374,12 +374,12 @@ function curveGain(from: number, to: number): number {
 type Draft = {
   level: string; exitOn: boolean; exitAt: string; tpOn: boolean; tp: string; halfOn: boolean; half: string;
   slOn: boolean; sl: string; skipOn: boolean; skip: string; size: string; hold: string;
-  slowOn: boolean; slow: string; backOn: boolean;
+  slowOn: boolean; slow: string; backOn: boolean; gradRide: boolean; trail: string;
 };
 const START: Draft = {
   level: "30", exitOn: true, exitAt: "70", tpOn: false, tp: "50", halfOn: false, half: "40",
   slOn: true, sl: "30", skipOn: true, skip: "10", size: "10", hold: "60",
-  slowOn: true, slow: "120", backOn: true,
+  slowOn: true, slow: "120", backOn: true, gradRide: false, trail: "30",
 };
 
 /** Admin: build your own curve paper strategies; the curve bot runs them within 30 s. */
@@ -418,6 +418,7 @@ function CurveBuilder({ onChange }: { onChange: () => void }) {
         level, exit_at: d.exitOn ? exitAt : null, tp_pct: d.tpOn ? n(d.tp) : null, half_at: d.halfOn ? n(d.half) : null,
         sl_pct: d.slOn ? -Math.abs(n(d.sl)) : null, skip_drop: d.skipOn ? n(d.skip) : null,
         max_secs: d.slowOn ? n(d.slow) : null, skip_backslide: d.backOn,
+        grad_trail: d.gradRide ? n(d.trail) : null,
         size_usd: n(d.size), max_hold_min: n(d.hold),
       };
       if (Object.values(body).some((v) => typeof v === "number" && !Number.isFinite(v))) {
@@ -481,9 +482,25 @@ function CurveBuilder({ onChange }: { onChange: () => void }) {
               sell half at +<input className={num} inputMode="decimal" value={d.half} disabled={!d.halfOn}
                 onChange={(e) => set({ half: e.target.value })} /> %, then a stop at the entry
             </label>
-            <div className="text-xs text-faint">
-              Graduation always sells what is left{toGrad != null ? ` (≈ +${toGrad.toFixed(0)}% from your buy level)` : ""}.
+            <div className="text-[11px] tracking-[0.1em] text-muted uppercase">
+              At graduation{toGrad != null ? <span className="normal-case tracking-normal text-mint"> · ≈ +{toGrad.toFixed(0)}% from your buy level</span> : null}
             </div>
+            <div className={row}>
+              <Segmented label="At graduation" value={d.gradRide ? "ride" : "sell"}
+                onChange={(v) => set({ gradRide: v === "ride" })}
+                options={[{ value: "sell", label: "Sell everything" }, { value: "ride", label: "Keep riding" }]} />
+              {d.gradRide && (
+                <span className="flex flex-wrap items-center gap-2">
+                  sell when it falls <input className={num} inputMode="decimal" value={d.trail}
+                    onChange={(e) => set({ trail: e.target.value })} /> % from its high after graduation
+                </span>
+              )}
+            </div>
+            {d.gradRide && (
+              <div className="text-xs text-faint">
+                After graduation the coin trades on PumpSwap; the max-hold time below still sells what is left.
+              </div>
+            )}
             <div className="text-[11px] tracking-[0.1em] text-muted uppercase">Protection</div>
             <label className={row}>
               <Toggle on={d.slOn} label="Stop loss" onClick={() => set({ slOn: !d.slOn })} />

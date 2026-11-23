@@ -478,6 +478,7 @@ class CurveRuleIn(BaseModel):
     skip_drop: float | None = None     # skip the buy if the price fell this % before it landed
     max_secs: float | None = None      # skip a token that took longer than this (from launch) to reach the level
     skip_backslide: bool = False       # skip if the curve slid back below the decision level before the buy
+    grad_trail: float | None = None    # at graduation keep riding and sell this % off the high (None = sell)
     size_usd: float = 10.0
     max_hold_min: float = 60.0
 
@@ -489,6 +490,7 @@ def _curve_rule_out(r: Any) -> dict[str, Any]:
     return {"id": r.id, "name": r.name, "title": rule.title, "enabled": r.enabled, "level": r.level,
             "exit_at": r.exit_at, "tp_pct": r.tp_pct, "half_at": r.half_at, "sl_pct": r.sl_pct,
             "skip_drop": r.skip_drop, "max_secs": r.max_secs, "skip_backslide": bool(r.skip_backslide),
+            "grad_trail": r.grad_trail,
             "size_usd": r.size_usd, "max_hold_min": r.max_hold_min,
             "curve_gain_pct": _range_gain(rule) if r.exit_at else None,
             "created_at": utc(r.created_at).isoformat() if r.created_at else None}
@@ -522,6 +524,8 @@ async def curve_rule_create(body: CurveRuleIn, session: Session, _: Auth) -> dic
         raise HTTPException(400, "The skip filter must be between 1% and 90%")
     if body.max_secs is not None and not 1 <= body.max_secs <= 86_400:
         raise HTTPException(400, "The speed filter must be between 1 second and 24 hours")
+    if body.grad_trail is not None and not 5 <= body.grad_trail <= 90:
+        raise HTTPException(400, "The trailing stop after graduation must be between 5% and 90%")
     if not 1 <= body.size_usd <= 1000:
         raise HTTPException(400, "Size must be between $1 and $1000")
     if not 1 <= body.max_hold_min <= 24 * 60:
@@ -531,7 +535,7 @@ async def curve_rule_create(body: CurveRuleIn, session: Session, _: Auth) -> dic
         raise HTTPException(400, f"At most {MAX_CUSTOM_CURVE} of your strategies can be on: switch one off first")
     row = CurveCustom(level=body.level, exit_at=body.exit_at if body.exit_at and body.exit_at < 100 else None,
                       tp_pct=body.tp_pct, half_at=body.half_at, sl_pct=sl, skip_drop=body.skip_drop,
-                      max_secs=body.max_secs, skip_backslide=body.skip_backslide or None,
+                      max_secs=body.max_secs, skip_backslide=body.skip_backslide or None, grad_trail=body.grad_trail,
                       size_usd=body.size_usd, max_hold_min=body.max_hold_min, enabled=True)
     session.add(row)
     await session.flush()
