@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import statistics as st
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -27,7 +29,7 @@ from sqlalchemy import select
 
 from app.config import Settings, get_settings
 from app.models import (Chain, LivePosition, PaperPosition, SmartWallet, TradingAccount, TrackerCursor,
-                        WalletCandidate, WalletSource, WalletTrade)
+                        WalletCandidate, WalletScore, WalletSource, WalletTrade)
 from app.repository import utc
 
 log = logging.getLogger("scout")
@@ -44,7 +46,7 @@ def _now() -> datetime:
 
 
 # ---- scoring (pure) ---------------------------------------------------------------------------------------
-def summarize(txs: list[dict[str, Any]], wallet: str, sol_usd: float) -> dict[str, Any]:
+def summarize(txs: list[dict[str, Any]], wallet: str, sol_usd: float, now_ts: float | None = None) -> dict[str, Any]:
     """A wallet's Helius-parsed swaps -> round trips per token in USD (SOL and stablecoin legs; swaps against any
     other token are skipped) -> the numbers the filter looks at."""
     tok: dict[str, dict[str, float]] = defaultdict(lambda: {"in": 0.0, "out": 0.0, "b": 0.0, "s": 0.0,
@@ -92,6 +94,13 @@ def summarize(txs: list[dict[str, Any]], wallet: str, sol_usd: float) -> dict[st
     holds = [(d["t1"] - d["t0"]) / 60 for d in closed if d["t0"] and d["t1"] >= d["t0"]]
     sizes = [d["in"] for d in tok.values() if d["in"] > 0]
     net = sum(res)
+    # per-trade return (profit / cost) and how steady it is (arXiv 2601.08641: copy wallets whose average return is
+    # statistically above zero, t > 1.645, and not a lottery, return std < 1)
+    rets = [(d["out"] - d["in"]) / d["in"] for d in closed]
+    mean_r = st.mean(rets) if rets else 0.0
+    std_r = st.stdev(rets) if len(rets) >= 2 else 0.0
+    t_stat = mean_r / (std_r / math.sqrt(len(rets))) if len(rets) >= 2 and std_r > 0 else 0.0
+    newest = max(times) if times else 0
     return {
         "swaps": len(txs), "days": round(days, 2), "per_day": round(len(txs) / max(days, 0.01), 1),
         "tokens": len(tok), "closed": len(closed),
@@ -101,27 +110,49 @@ def summarize(txs: list[dict[str, Any]], wallet: str, sol_usd: float) -> dict[st
         "turnover_usd": round(sum(d["in"] for d in closed), 2),
         "hold_min": round(st.median(holds), 1) if holds else 0.0,
         "buy_usd": round(st.median(sizes), 2) if sizes else 0.0,
+        "mean_ret_pct": round(mean_r * 100, 1), "ret_std": round(std_r, 2), "t_stat": round(t_stat, 2),
+        "idle_h": round(((now_ts or time.time()) - newest) / 3600, 1) if newest else None,
     }
+
+
+def checks(m: dict[str, Any], s: Settings) -> list[dict[str, Any]]:
+    """Every test of the strict filter, passed or not, for the scorecard (in the order judge() applies them)."""
+    def row(key: str, ok: bool, label: str) -> dict[str, Any]:
+        return {"key": key, "ok": bool(ok), "label": label}
+
+    idle = m.get("idle_h")
+    return [
+        row("history", m["days"] >= s.scout_min_days or m["closed"] >= 3 * s.scout_min_closed,
+            f"{m['days']:.1f} days of history (need {s.scout_min_days:g})"),
+        row("pace", m["per_day"] <= s.scout_max_swaps_per_day,
+            f"{m['per_day']:.0f} swaps/day (bot above {s.scout_max_swaps_per_day:g})"),
+        row("trades", m["closed"] >= s.scout_min_closed, f"{m['closed']} closed trades (need {s.scout_min_closed})"),
+        row("net", m["net_usd"] > 0, f"net ${m['net_usd']:,.0f}"),
+        row("without_best", m["net_wo_best"] > 0, f"${m['net_wo_best']:,.0f} without its best trade"),
+        row("profit_factor", m["profit_factor"] >= s.scout_min_profit_factor,
+            f"profit factor {m['profit_factor']} (need {s.scout_min_profit_factor:g})"),
+        row("win_rate", m["win_rate"] >= s.scout_min_win_rate,
+            f"win rate {m['win_rate']:.0f}% (need {s.scout_min_win_rate:g}%)"),
+        row("hold", m["hold_min"] >= s.scout_min_hold_minutes,
+            f"median hold {m['hold_min']:.1f} min (need {s.scout_min_hold_minutes:g})"),
+        row("t_stat", m.get("t_stat", 0.0) >= s.scout_min_tstat,
+            f"t-stat {m.get('t_stat', 0.0):.2f}: average return {m.get('mean_ret_pct', 0.0):+.0f}% "
+            f"(need {s.scout_min_tstat:g}: steady, not luck)"),
+        row("steady", m.get("ret_std", 9.0) <= s.scout_max_ret_std,
+            f"return spread {m.get('ret_std', 0.0):.2f} (max {s.scout_max_ret_std:g}: not a lottery wallet)"),
+        row("active", idle is not None and idle <= s.scout_max_idle_hours,
+            f"last swap {idle:.0f} h ago (max {s.scout_max_idle_hours:g})" if idle is not None else "no recent swap"),
+    ]
 
 
 def judge(m: dict[str, Any], s: Settings) -> tuple[bool, str]:
     """The strict filter. Returns (passed, why not / summary)."""
-    checks = [
-        (m["days"] >= s.scout_min_days or m["closed"] >= 3 * s.scout_min_closed,
-         f"only {m['days']:.1f} days of history"),
-        (m["per_day"] <= s.scout_max_swaps_per_day, f"{m['per_day']:.0f} swaps/day: a bot we can't copy"),
-        (m["closed"] >= s.scout_min_closed, f"{m['closed']} closed trades"),
-        (m["net_usd"] > 0, f"net ${m['net_usd']:,.0f}"),
-        (m["net_wo_best"] > 0, f"loses without its best trade (${m['net_wo_best']:,.0f})"),
-        (m["profit_factor"] >= s.scout_min_profit_factor, f"profit factor {m['profit_factor']}"),
-        (m["win_rate"] >= s.scout_min_win_rate, f"win rate {m['win_rate']:.0f}%"),
-        (m["hold_min"] >= s.scout_min_hold_minutes, f"holds {m['hold_min']:.1f} min: too fast to copy"),
-    ]
-    for ok, why in checks:
-        if not ok:
-            return False, why
+    for c in checks(m, s):
+        if not c["ok"]:
+            return False, c["label"]
     return True, (f"{m['closed']} trades, {m['win_rate']:.0f}% wins, net ${m['net_usd']:,.0f} "
-                  f"(${m['net_wo_best']:,.0f} without the best), PF {m['profit_factor']}, hold {m['hold_min']:.0f} min")
+                  f"(${m['net_wo_best']:,.0f} without the best), PF {m['profit_factor']}, "
+                  f"t {m.get('t_stat', 0):.1f}, hold {m['hold_min']:.0f} min")
 
 
 def trial_result(rows: list[PaperPosition]) -> dict[str, Any]:
@@ -350,6 +381,31 @@ class WalletScout:
             except Exception:
                 log.exception("scout run failed")
             await asyncio.sleep(600)
+
+
+async def score_wallet(session, wallet: str, settings: Settings | None = None,
+                       scout: WalletScout | None = None) -> WalletScore:
+    """Scorecard for one wallet: its swap history from Helius, the strict filter's numbers and every check. Stored
+    (wallet_scores) and returned. Read-only on chain; nothing is copied or traded."""
+    s = settings or get_settings()
+    scout = scout or WalletScout(s)
+    row = await session.get(WalletScore, wallet) or WalletScore(address=wallet)
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(f"{s.jupiter_api_url}/price/v3", params={"ids": WSOL})
+        sol_usd = float(r.json()[WSOL]["usdPrice"])
+        txs = await scout._history(c, wallet)
+    if len(txs) < 10:
+        row.metrics, row.checks, row.passed = {"swaps": len(txs)}, [], False
+        row.reason = f"only {len(txs)} swaps found: too few to judge"
+    else:
+        m = summarize(txs, wallet, sol_usd)
+        row.metrics, row.checks = m, checks(m, s)
+        row.passed, row.reason = judge(m, s)
+        row.reason = row.reason[:240]
+    row.scored_at = _now()
+    session.add(row)
+    await session.commit()
+    return row
 
 
 async def trial_wallets(session) -> set[str]:

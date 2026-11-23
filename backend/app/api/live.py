@@ -1146,6 +1146,58 @@ async def scout_list(session: Session, _: Auth) -> dict[str, Any]:
     return {"enabled": s.scout_enabled, "hour_utc": s.scout_hour_utc, "candidates": out}
 
 
+class ScoreIn(BaseModel):
+    wallet: str
+
+
+def _score_out(r: Any) -> dict[str, Any]:
+    return {"address": r.address, "passed": r.passed, "reason": r.reason, "metrics": r.metrics, "checks": r.checks,
+            "scored_at": r.scored_at.isoformat() if r.scored_at else None}
+
+
+@router.get("/scorecard")
+async def scorecard_list(session: Session, _: Auth) -> dict[str, Any]:
+    """The copied wallets (every account) and any looked-up wallet, with their last scorecard (if any)."""
+    from sqlalchemy import select
+
+    from app.models import TradingAccount, WalletScore
+
+    leaders: dict[str, dict[str, Any]] = {}
+    for a in (await session.execute(select(TradingAccount).order_by(TradingAccount.id))).scalars().all():
+        for l in a.leaders or []:
+            w = l.get("wallet")
+            if not w:
+                continue
+            d = leaders.setdefault(w, {"label": l.get("label") or "", "accounts": []})
+            d["accounts"].append({"account": a.name, "enabled": l.get("enabled", True) is not False})
+            d["label"] = d["label"] or l.get("label") or ""
+    scores = {r.address: r for r in (await session.execute(select(WalletScore))).scalars().all()}
+    out = [{"address": w, "label": d["label"], "accounts": d["accounts"],
+            "score": _score_out(scores[w]) if w in scores else None} for w, d in leaders.items()]
+    out += [{"address": w, "label": "", "accounts": [], "score": _score_out(r)}
+            for w, r in sorted(scores.items(), key=lambda x: x[1].scored_at or 0, reverse=True) if w not in leaders]
+    return {"wallets": out}
+
+
+@router.post("/scorecard")
+async def scorecard_run(body: ScoreIn, session: Session, _: Auth) -> dict[str, Any]:
+    """Score one wallet now (its swap history from Helius; read-only)."""
+    from solders.pubkey import Pubkey
+
+    from app.wallet_scout import score_wallet
+
+    w = body.wallet.strip()
+    try:
+        Pubkey.from_string(w)
+    except Exception:
+        raise HTTPException(400, "not a Solana address") from None
+    try:
+        row = await score_wallet(session, w)
+    except Exception as exc:
+        raise HTTPException(502, f"could not read the wallet's history: {exc}"[:200]) from None
+    return _score_out(row)
+
+
 class ScoutAddIn(BaseModel):
     account: str = "main"
 

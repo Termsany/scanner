@@ -25,7 +25,7 @@ import {
   Wallet,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
@@ -33,7 +33,8 @@ import { Badge, button, Empty, PageHeader, pageMain, Panel, SectionTabs, Toggle 
 import { api, ApiError, SESSION } from "@/lib/api";
 import { pct, pctClass } from "@/lib/format";
 import type {
-  AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount, ScoutCandidate, ScoutList, TelegramPrefs,
+  AdminOverview, Bill, BillingAdmin, BillingConfig, Coupon, OverviewAccount, ScorecardWallet, ScoutCandidate,
+  ScoutList, TelegramPrefs,
 } from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live and Accounts pages
@@ -222,6 +223,162 @@ const STATUS_CLS: Record<Bill["status"], string> = {
 const SCOUT_TONE: Record<ScoutCandidate["status"], string> = {
   passed: "text-mint", trial: "text-sky", new: "text-ink", failed: "text-bear", rejected: "text-faint", added: "text-muted",
 };
+
+/** Scorecard: the strict filter (plus the research's t-stat / spread / activity checks) on the copied wallets and on
+ * any address. Read-only: scoring looks at the wallet's swap history, it never changes what is copied. */
+function ScorecardPanel({ password }: { password: string }) {
+  const [rows, setRows] = useState<ScorecardWallet[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [addr, setAddr] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
+  const [msg, setMsg] = useState("");
+
+  const load = useCallback(() => {
+    api.scorecard(password).then((d) => setRows(d.wallets)).catch((e) =>
+      setMsg(e instanceof ApiError ? e.message : "Could not load the scorecards."));
+  }, [password]);
+  useEffect(load, [load]);
+
+  async function score(wallets: string[]) {
+    setMsg("");
+    for (const w of wallets) {
+      setBusy(w);
+      try {
+        await api.scoreWallet(password, w);
+      } catch (e) {
+        setMsg(`${w.slice(0, 6)}…: ${e instanceof ApiError ? e.message : "could not score"}`);
+      }
+    }
+    setBusy(null);
+    load();
+  }
+
+  const fmt = (v: number | undefined | null, d = 0, suffix = "") => (v == null ? "—" : `${v.toFixed(d)}${suffix}`);
+  return (
+    <Panel title="Wallet scorecard">
+      <p className="mb-3 text-xs text-muted">
+        Each wallet&apos;s own swaps over several days, scored like the scout does, plus three checks from the
+        copy-trading research: the average return per trade must be clearly above zero (t-stat ≥ 1.645), not a few
+        lottery wins (return spread ≤ 1), and the wallet must still be trading. Scoring only reads the history; it
+        changes nothing.
+      </p>
+      <form className="mb-3 flex flex-wrap gap-2" onSubmit={(e) => {
+        e.preventDefault();
+        if (addr.trim()) score([addr.trim()]).then(() => setAddr(""));
+      }}>
+        <input className="num min-w-0 flex-1 rounded-md border border-line bg-raised px-2 py-1 text-sm sm:min-w-[22rem]"
+          placeholder="Any Solana wallet address" value={addr} onChange={(e) => setAddr(e.target.value)} />
+        <button type="submit" className={button("primary")} disabled={!!busy || !addr.trim()}>Score</button>
+        <button type="button" className={button("ghost")} disabled={!!busy || !rows?.length}
+          onClick={() => score((rows ?? []).filter((r) => r.accounts.length).map((r) => r.address))}>
+          Score all copied wallets
+        </button>
+      </form>
+      {msg && <p className="mb-2 text-xs text-bear">{msg}</p>}
+      {!rows ? (
+        <p className="text-sm text-muted">Loading…</p>
+      ) : rows.length === 0 ? (
+        <Empty>No wallets yet.</Empty>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="data-table w-full text-sm">
+            <thead>
+              <tr>
+                <th className="text-left">Wallet</th>
+                <th className="text-left">Verdict</th>
+                <th className="text-right">Trades · wins</th>
+                <th className="text-right">Avg / trade</th>
+                <th className="text-right">t-stat</th>
+                <th className="text-right">Spread</th>
+                <th className="text-right">Net (w/o best)</th>
+                <th className="text-right">Pace · hold</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const sc = r.score;
+                const m = sc?.metrics;
+                const failed = (sc?.checks ?? []).filter((c) => !c.ok).length;
+                return (
+                  <Fragment key={r.address}>
+                    <tr>
+                      <td>
+                        <a className="num hover:underline" target="_blank" rel="noreferrer"
+                          href={`https://solscan.io/account/${r.address}`}>{r.address.slice(0, 6)}…{r.address.slice(-4)}</a>
+                        <div className="text-[11px] text-faint">
+                          {r.label || (r.accounts.length ? "" : "looked up")}
+                          {r.accounts.map((a) => (
+                            <span key={a.account} className={`ml-1 ${a.enabled ? "text-mint" : "text-faint"}`}>
+                              {a.account}{a.enabled ? "" : " (off)"}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                      <td>
+                        {!sc ? <span className="text-xs text-faint">not scored</span> : (
+                          <button type="button" className="text-left"
+                            onClick={() => setOpen(open === r.address ? null : r.address)}>
+                            <span className={`font-medium ${sc.passed ? "text-mint" : "text-bear"}`}>
+                              {sc.passed ? "passes" : `fails ${failed || ""}`}
+                            </span>
+                            <div className="max-w-[30ch] text-[11px] text-muted">{sc.reason}</div>
+                          </button>
+                        )}
+                      </td>
+                      <td className="num text-right text-xs">{m ? `${fmt(m.closed)} · ${fmt(m.win_rate, 0, "%")}` : "—"}</td>
+                      <td className={`num text-right text-xs ${(m?.mean_ret_pct ?? 0) >= 0 ? "text-mint" : "text-bear"}`}>
+                        {m?.mean_ret_pct == null ? "—" : `${m.mean_ret_pct >= 0 ? "+" : ""}${m.mean_ret_pct.toFixed(0)}%`}
+                      </td>
+                      <td className={`num text-right text-xs ${(m?.t_stat ?? 0) >= 1.645 ? "text-mint" : "text-bear"}`}>
+                        {fmt(m?.t_stat, 2)}
+                      </td>
+                      <td className={`num text-right text-xs ${(m?.ret_std ?? 9) <= 1 ? "" : "text-bear"}`}>{fmt(m?.ret_std, 2)}</td>
+                      <td className="num text-right text-xs">
+                        {m?.net_usd == null ? "—" : (
+                          <>
+                            <span className={m.net_usd >= 0 ? "text-mint" : "text-bear"}>${m.net_usd.toFixed(0)}</span>
+                            <span className="text-faint"> (${fmt(m.net_wo_best)})</span>
+                          </>
+                        )}
+                      </td>
+                      <td className="num text-right text-xs">
+                        {m?.per_day == null ? "—" : `${m.per_day.toFixed(0)}/day · ${fmt(m.hold_min)}m`}
+                        {m?.idle_h != null && <div className="text-faint">last {m.idle_h.toFixed(0)} h ago</div>}
+                      </td>
+                      <td className="whitespace-nowrap text-right">
+                        <button type="button" className="text-xs text-sky hover:underline" disabled={!!busy}
+                          onClick={() => score([r.address])}>
+                          {busy === r.address ? "Scoring…" : sc ? "Rescore" : "Score"}
+                        </button>
+                        {sc?.scored_at && (
+                          <div className="text-[11px] text-faint">{new Date(sc.scored_at).toLocaleString()}</div>
+                        )}
+                      </td>
+                    </tr>
+                    {open === r.address && sc?.checks && (
+                      <tr>
+                        <td colSpan={9}>
+                          <ul className="grid gap-1 py-1 text-xs sm:grid-cols-2">
+                            {sc.checks.map((c) => (
+                              <li key={c.key} className={c.ok ? "text-mint" : "text-bear"}>
+                                {c.ok ? "✓" : "✗"} {c.label}
+                              </li>
+                            ))}
+                          </ul>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+}
 
 /** Wallet scout: candidates found, filtered and tried on paper. Passed ones can be added (switched off). */
 function ScoutPanel({ password }: { password: string }) {
@@ -1539,7 +1696,12 @@ export function AdminView() {
             )}
 
             {tab === "trades" && <TradesFeed items={data.recent} now={now} />}
-            {tab === "scout" && <ScoutPanel password={password} />}
+            {tab === "scout" && (
+              <div className="space-y-6">
+                <ScorecardPanel password={password} />
+                <ScoutPanel password={password} />
+              </div>
+            )}
             {tab === "billing" && (
               <>
                 <BillingPanel password={password} now={now} />

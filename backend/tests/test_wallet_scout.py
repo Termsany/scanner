@@ -10,7 +10,7 @@ from app.config import Settings
 from app.models import (Base, Chain, LivePosition, PaperPosition, SmartWallet, WalletCandidate, WalletSource,
                         WalletTrade)
 from app.paper import process_entries, process_exits
-from app.wallet_scout import TRIAL_STRATEGY, WalletScout, judge, summarize
+from app.wallet_scout import TRIAL_STRATEGY, WalletScout, checks, judge, summarize
 
 W = "5hqZDJQidTDmjCrLLYi1NiwNUuCZYFc4vo9bPPMr3w85"     # a real (on-curve) address for the candidate
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -49,7 +49,7 @@ def S(**kw):
     base = dict(scout_enabled=True, scout_min_hits=2, scout_max_trials=4, scout_trial_days=3.0, scout_min_days=3.0,
                 scout_max_swaps_per_day=150, scout_min_closed=15, scout_min_profit_factor=1.3, scout_min_win_rate=40,
                 scout_min_hold_minutes=5, scout_trial_min_trades=2, live_rpc_url="https://rpc.test/?api-key=k",
-                paper_size_usd=100.0, paper_slippage_pct=1.5)
+                paper_size_usd=100.0, paper_slippage_pct=1.5, scout_max_idle_hours=1e9)
     base.update(kw)
     return Settings(**base)
 
@@ -75,7 +75,7 @@ def test_strict_filter():
     fast = [dict(t, timestamp=t["timestamp"] if t["tokenTransfers"][0]["toUserAccount"] == W else t["timestamp"] - 1740)
             for t in _history()]
     ok, why = judge(summarize(fast, W, 100.0), s)
-    assert not ok and "too fast" in why
+    assert not ok and "hold" in why
 
 
 def _db(body):
@@ -194,3 +194,27 @@ def test_history_reads_more_pages_until_it_covers_the_days():
     scout._get = fake_get
     txs = asyncio.run(scout._history(None, W))
     assert len(pages) == 4 and len(txs) == 400          # 3.3 days covered after 4 pages, then it stops
+
+
+def test_scorecard_stats_t_stat_spread_and_idle():
+    m = summarize(_history(), W, 100.0, now_ts=T0 + 5 * 86400)
+    # +60% / -20% half and half: mean +20%, spread ~0.41, t ~2.2 over 20 trades
+    assert m["mean_ret_pct"] == 20.0 and 0.38 < m["ret_std"] < 0.44 and m["t_stat"] > 1.645
+    assert 20 < m["idle_h"] < 30
+    s = S(scout_max_idle_hours=72)
+    rows = {c["key"]: c["ok"] for c in checks(m, s)}
+    assert all(rows.values()) and len(rows) == 11
+    # same trades, last seen 10 days ago: no longer active
+    stale = summarize(_history(), W, 100.0, now_ts=T0 + 14 * 86400)
+    ok, why = judge(stale, s)
+    assert not ok and "last swap" in why
+
+    # a lottery wallet: mostly small losses, two +900% hits -> profitable, but a wild spread and a weak t-stat
+    txs = []
+    for i in range(20):
+        t = T0 + i * 15000
+        out = 1000 if i in (3, 11) else 85
+        txs += [_swap(t, f"L{i}", 1000, usdc=-100), _swap(t + 1800, f"L{i}", -1000, usdc=out)]
+    lot = summarize(txs, W, 100.0, now_ts=T0 + 4 * 86400)
+    bad = {c["key"] for c in checks(lot, S()) if not c["ok"]}
+    assert lot["net_usd"] > 0 and {"steady", "t_stat"} <= bad

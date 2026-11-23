@@ -93,6 +93,11 @@ class Settings(BaseSettings):
     scout_min_profit_factor: float = 1.3
     scout_min_win_rate: float = 40.0
     scout_min_hold_minutes: float = 5.0
+    # from arXiv 2601.08641 (smart-money copy trading): the average return per trade must be statistically above
+    # zero and not driven by a few lottery wins, and the wallet must still be trading
+    scout_min_tstat: float = 1.645
+    scout_max_ret_std: float = 1.0               # std of per-trade return (1.0 = 100 %)
+    scout_max_idle_hours: float = 72.0
     scout_trial_min_trades: int = 5
     paper_size_usd: float = 100.0
     paper_slippage_pct: float = 1.5             # charged on entry AND exit (pump.fun fee + slippage)

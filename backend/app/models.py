@@ -490,6 +490,20 @@ class WalletCandidate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class WalletScore(Base):
+    """Scorecard of any wallet (app/wallet_scout.score_wallet): the strict filter's numbers and every check, kept so
+    /admin can show the copied wallets and any address the operator looks up without asking Helius again."""
+
+    __tablename__ = "wallet_scores"
+
+    address: Mapped[str] = mapped_column(String(64), primary_key=True)
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    checks: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    reason: Mapped[str] = mapped_column(String(240), default="")
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class BirdeyeCall(Base):
     """One row per Birdeye request: enforces the daily budget (free plan: ~1,000 calls / month)."""
 

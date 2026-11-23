@@ -1,4 +1,6 @@
 import type {
+  ScorecardWallet,
+  WalletScore,
   ScoutList,
   TelegramPrefs,
   AIAnalysis,
@@ -252,6 +254,14 @@ export const api = {
   scoutAdd: (password: string, id: number, account = "main") =>
     request<{ ok: boolean }>(`/api/live/scout/${id}/add`, {
       method: "POST", ...adm(password), body: JSON.stringify({ account }),
+    }),
+
+  scorecard: (password: string) =>
+    request<{ wallets: ScorecardWallet[] }>("/api/live/scorecard", { ...adm(password) }),
+
+  scoreWallet: (password: string, wallet: string) =>
+    request<WalletScore>("/api/live/scorecard", {
+      method: "POST", ...adm(password), body: JSON.stringify({ wallet }),
     }),
 
   scoutDismiss: (password: string, id: number) =>

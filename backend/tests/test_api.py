@@ -663,3 +663,42 @@ def test_price_orders_place_list_and_cancel(monkeypatch):
         assert c.get("/api/live/orders", headers=h).json()["orders"] == []
         assert c.get("/api/live/orders?all=true", headers=h).json()["orders"][0]["status"] == "cancelled"
     live_api._fails.clear()
+
+
+def test_scorecard_lists_copied_wallets_and_scores_an_address(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from app import wallet_scout
+    from app.api import live as live_api
+    from app.models import WalletScore
+
+    s = get_settings()
+    live_api._fails.clear()
+    monkeypatch.setattr(s, "live_dashboard_password", "s3cret-pass")
+    monkeypatch.setattr(s, "live_key_encryption_key", Fernet.generate_key().decode())
+    h = {"X-Live-Password": "s3cret-pass"}
+    leader = "C7dbXbgrRiLkhvtQDCJkiLj1NShARZGrQ21Rz2DwtqW1"
+    other = "GCZuKXmLZ3QgXsA7AE3fCtMLBUG6L78QUUrAaGpL5ibk"
+
+    async def fake_score(session, wallet, settings=None, scout=None):
+        row = await session.get(WalletScore, wallet) or WalletScore(address=wallet)
+        row.metrics, row.checks, row.passed, row.reason = {"closed": 20, "t_stat": 2.1}, [
+            {"key": "t_stat", "ok": True, "label": "t-stat 2.10"}], True, "20 trades"
+        session.add(row)
+        await session.commit()
+        return row
+
+    monkeypatch.setattr(wallet_scout, "score_wallet", fake_score)
+    with TestClient(app) as c:
+        r = c.post("/api/live/accounts", headers=h, json={"name": "scorec", "size_usd": 10, "max_open_usd": 100,
+                                                          "max_daily_loss_usd": 50,
+                                                          "leaders": [{"wallet": leader, "label": "speedy"}]})
+        assert r.status_code == 200, r.text
+        assert c.get("/api/live/scorecard").status_code == 401
+        rows = {w["address"]: w for w in c.get("/api/live/scorecard", headers=h).json()["wallets"]}
+        assert rows[leader]["label"] == "speedy" and rows[leader]["accounts"][0]["account"] == "scorec"
+        assert c.post("/api/live/scorecard", headers=h, json={"wallet": "not-an-address"}).status_code == 400
+        r = c.post("/api/live/scorecard", headers=h, json={"wallet": other})
+        assert r.status_code == 200 and r.json()["passed"] is True and r.json()["checks"][0]["key"] == "t_stat"
+        rows = {w["address"]: w for w in c.get("/api/live/scorecard", headers=h).json()["wallets"]}
+        assert rows[other]["score"]["metrics"]["t_stat"] == 2.1 and rows[other]["accounts"] == []

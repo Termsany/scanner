@@ -583,6 +583,32 @@ export interface ScoutCandidate {
   trial_end: string | null;
 }
 
+export interface WalletScoreCheck {
+  key: string;
+  ok: boolean;
+  label: string;
+}
+
+export interface WalletScore {
+  address: string;
+  passed: boolean;
+  reason: string;
+  metrics: {
+    swaps: number; days?: number; per_day?: number; closed?: number; win_rate?: number; net_usd?: number;
+    net_wo_best?: number; profit_factor?: number; hold_min?: number; buy_usd?: number; mean_ret_pct?: number;
+    ret_std?: number; t_stat?: number; idle_h?: number | null;
+  } | null;
+  checks: WalletScoreCheck[] | null;
+  scored_at: string | null;
+}
+
+export interface ScorecardWallet {
+  address: string;
+  label: string;
+  accounts: { account: string; enabled: boolean }[];
+  score: WalletScore | null;
+}
+
 export interface ScoutList {
   enabled: boolean;
   hour_utc: number;
