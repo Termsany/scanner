@@ -56,7 +56,8 @@ class Strategy:
 
 
 # priced and closed by their own loops (app/sniper.py, app/grad.py), second by second
-SELF_PRICED = ("snipe_all", "snipe_momentum", "grad_all", "grad_confirm", "curve_70", "curve_85")
+SELF_PRICED = ("snipe_all", "snipe_momentum", "grad_all", "grad_confirm", "curve_70", "curve_85",
+               "curve_70_half", "curve_70_trail")
 
 STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("wallet_follow", "Follow a tracked wallet (exit when it sells)"),
@@ -86,6 +87,11 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              max_hold_minutes=60),
     Strategy("curve_85", "Bonding curve: buy at 85% sold, sell at graduation", tp_pct=0.0, sl_pct=-25.0,
              max_hold_minutes=60),
+    # user's rule (2026-11-23): $10, no stop loss, half at 2x then a stop at the entry; two ways to exit the rest
+    Strategy("curve_70_half", "Bonding curve 70%: $10, no stop, half at 2x then stop at entry, rest at graduation",
+             tp_pct=100.0, sl_pct=0.0, max_hold_minutes=60),
+    Strategy("curve_70_trail", "Bonding curve 70%: $10, no stop, half at 2x then stop at entry, rest rides "
+             "after graduation (trailing stop)", tp_pct=100.0, sl_pct=0.0, max_hold_minutes=120),
 )}
 
 # (chain, [addresses]) -> {address: price}

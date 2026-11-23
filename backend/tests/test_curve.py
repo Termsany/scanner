@@ -62,12 +62,13 @@ def test_buy_at_70_and_85_then_sell_at_graduation():
     assert abs(c.watch["M"].held["curve_70"]["market"] - price_at(74)) / price_at(74) < 1e-6
     c.on_curve("M", acct(86), 30.0)
     c.tick(32.5)                                                           # no trade: fill on the tick
-    assert set(c.watch["M"].held) == {"curve_70", "curve_85"}
+    assert set(c.watch["M"].held) == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail"}
     c.on_curve("M", acct(100, complete=True), 40.0)
     reasons = {p["strategy"]: p for p in c.closed}
     assert {p["reason"] for p in c.closed} == {"graduated"}
     assert reasons["curve_70"]["pnl"] > reasons["curve_85"]["pnl"] > 0      # earlier entry, bigger gain
-    assert c.tick(41.0) == ["M"]                                            # nothing left to watch
+    assert set(c.watch["M"].held) == {"curve_70_trail"}                     # the trail rides on after graduation
+    assert c.tick(41.0) == []
 
 
 def test_stop_loss_when_the_curve_turns():
@@ -128,8 +129,11 @@ def test_rows_written_for_paper_page():
             return rows
 
     rows = asyncio.run(run())
-    assert {r.strategy for r in rows} == {"curve_70", "curve_85"}
-    assert all(r.status == "closed" and r.exit_reason == "graduated" and r.pnl_usd > 0 for r in rows)
+    assert {r.strategy for r in rows} == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail"}
+    done = [r for r in rows if r.strategy != "curve_70_trail"]
+    assert all(r.status == "closed" and r.exit_reason == "graduated" and r.pnl_usd > 0 for r in done)
+    trail = next(r for r in rows if r.strategy == "curve_70_trail")
+    assert trail.status == "open" and trail.size_usd == 10.0 and trail.sl_pct == 0.0   # rides after graduation
 
 
 def pp_trade(progress: float, mint="M", side="buy"):
@@ -155,7 +159,7 @@ def test_pumpportal_only_trades_and_migration():
     c.on_pp(pp_trade(86), 10.0)
     assert abs(c.watch["M"].progress - 86) < 0.01
     c.on_pp(pp_trade(88), 12.5)
-    assert set(c.watch["M"].held) == {"curve_70", "curve_85"}
+    assert set(c.watch["M"].held) == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail"}
     c.on_pp({"txType": "migrate", "mint": "M"}, 20.0)
     assert {p["reason"] for p in c.closed} == {"graduated"} and c.pp_events == 2
     c.tick(21.0)
@@ -171,3 +175,62 @@ def test_hybrid_pays_only_for_tokens_past_the_threshold():
     assert c.pp_sync() == ['{"method": "subscribeTokenTrade", "keys": ["B"]}']
     c.on_pp(pp_trade(30, mint="A"), 6.0)                        # not streamed: ignored, not counted
     assert c.watch["A"].progress < 25 and c.pp_events == 0
+
+
+# ---- user's rule: $10, no stop loss, half at 2x, then a stop at the entry --------------------------------
+def _two_x_progress(entry: float) -> float:
+    p = entry
+    while price_at(p) < 2 * price_at(entry):
+        p += 0.1
+    return p + 0.2
+
+
+def _filled_at_70():
+    c = PaperCurve(S())
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(70), 10.0)
+    c.on_curve("M", acct(70), 12.5)
+    assert {"curve_70_half", "curve_70_trail"} <= set(c.watch["M"].held)
+    return c
+
+
+def test_half_and_trail_have_no_stop_loss_and_are_10_dollars():
+    c = _filled_at_70()
+    assert c.watch["M"].held["curve_70_half"]["size"] == 10.0
+    c.on_curve("M", acct(45), 20.0)                              # price far down: curve_70 stops out at -25%
+    held = set(c.watch["M"].held)
+    assert "curve_70" not in held and {"curve_70_half", "curve_70_trail"} <= held
+
+
+def test_half_sold_at_2x_then_the_rest_stops_at_the_entry():
+    c = _filled_at_70()
+    c.on_curve("M", acct(_two_x_progress(70)), 20.0)            # 2x: half out, capital back
+    pos = c.watch["M"].held["curve_70_half"]
+    assert pos["half"] and pos["rem"] == 0.5 and pos["proceeds"] > 9.0
+    c.on_curve("M", acct(69), 30.0)                              # back under the entry: the rest out
+    half = next(p for p in c.closed if p["strategy"] == "curve_70_half")
+    assert half["reason"] == "breakeven_stop" and half["pnl"] > 3.0          # ~+40% on $10 after costs
+
+
+def test_trail_rides_after_graduation_and_sells_30_percent_off_the_high():
+    c = _filled_at_70()
+    c.on_curve("M", acct(100, complete=True), 20.0)             # graduated: half sold on the way, the rest rides
+    pos = c.watch["M"].held["curve_70_trail"]
+    grad = c.watch["M"].price
+    assert pos["half"] and pos["gpeak"] == grad and c.riding() == ["M"]
+    c.on_riding_price("M", grad * 1.5, 30.0)                    # keeps running on PumpSwap
+    assert "curve_70_trail" in c.watch["M"].held
+    c.on_riding_price("M", grad * 1.5 * 0.69, 40.0)             # 31% off the high
+    trail = next(p for p in c.closed if p["strategy"] == "curve_70_trail")
+    assert trail["reason"] == "trailing_stop" and trail["pnl"] > 0
+    assert c.tick(41.0) == ["M"]                                 # now nothing left on it
+
+
+def test_trail_time_limit_after_graduation():
+    c = PaperCurve(S(curve_trail_max_hold_s=100.0))
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(70), 10.0)
+    c.on_curve("M", acct(70), 12.5)
+    c.on_curve("M", acct(100, complete=True), 20.0)
+    c.on_riding_price("M", c.watch["M"].price, 120.0)           # 107 s after the fill
+    assert next(p for p in c.closed if p["strategy"] == "curve_70_trail")["reason"] == "time"

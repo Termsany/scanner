@@ -154,6 +154,11 @@ class Settings(BaseSettings):
     curve_prune2_pct: float = 40.0
     curve_max_watch_s: float = 7200.0
     curve_skip_mayhem: bool = True
+    # curve_70_half / curve_70_trail (user's rule 2026-11-23): $10, no stop loss, half at 2x, then a stop at entry
+    curve_half_size_usd: float = 10.0
+    curve_trail_pct: float = 30.0                # trail: after graduation, sell the rest 30% below its high
+    curve_trail_max_hold_s: float = 7200.0       # trail: sell whatever is left after this long
+    curve_trail_price_seconds: float = 3.0       # trail: Jupiter price of graduated coins this often
 
     # Live copy trading (REAL money, Solana via Jupiter). Off unless LIVE_MODE=live AND a key is set.
     #   off     nothing runs

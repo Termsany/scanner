@@ -52,7 +52,21 @@ log = logging.getLogger("curve")
 FEED_URL = "wss://pumpportal.fun/api/data"
 REAL_TOKENS_START = 793_100_000.0          # sellable tokens on a fresh classic pump.fun curve (6 decimals)
 V_TOKENS_START = 1_073_000_000.0          # virtual tokens at launch: virtual - real stays 279.9M
-CURVE_STRATEGIES: dict[str, float] = {"curve_70": 70.0, "curve_85": 85.0}
+@dataclass(frozen=True)
+class CurveRule:
+    level: float        # buy the first time the curve is this % sold
+    mode: str           # grad: all out at graduation (stop / time) | half: $10, no stop, 50% at 2x, stop at entry,
+                        # rest at graduation | trail: like half, the rest rides after graduation on a trailing stop
+
+
+CURVE_RULES: dict[str, CurveRule] = {
+    "curve_70": CurveRule(70.0, "grad"),
+    "curve_85": CurveRule(85.0, "grad"),
+    # user's rule (2026-11-23): $10, no stop loss, at 2x sell half and put a stop at the entry; exit variants
+    "curve_70_half": CurveRule(70.0, "half"),
+    "curve_70_trail": CurveRule(70.0, "trail"),
+}
+CURVE_STRATEGIES: dict[str, float] = {k: r.level for k, r in CURVE_RULES.items()}
 
 
 def _now() -> datetime:
@@ -229,10 +243,26 @@ class PaperCurve:
                 continue
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,
                    "fill": w.price * (1 + self._cost()), "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
+                   "size": self._size(strat), "rem": 1.0, "proceeds": 0.0, "half": False, "gpeak": None,
                    "why": f"{why} +{self.s.curve_latency_s:g}s, filled at {w.progress:.0f}%, "
                           f"paid {(w.price / decision_px - 1) * 100 if decision_px else 0:+.0f}% vs decision"}
             w.held[strat] = pos
             self.opened.append(pos)
+
+    def _size(self, strat: str) -> float:
+        return self.s.curve_half_size_usd if CURVE_RULES[strat].mode in ("half", "trail") else self.s.curve_size_usd
+
+    @staticmethod
+    def worth(pos: dict[str, Any], price: float, cost: float) -> float:
+        """What the position brought in so far plus what is left would fetch at `price` (after cost)."""
+        return pos["proceeds"] + pos["size"] * pos["rem"] / pos["fill"] * price * (1 - cost)
+
+    def _close(self, w: Watch, strat: str, pos: dict[str, Any], reason: str, cost: float) -> None:
+        pnl = self.worth(pos, w.price, cost) - pos["size"]
+        pos.update(exit=w.price, reason=reason, pnl=pnl, pnl_pct=pnl / pos["size"] * 100, exit_wall=_now(),
+                   proceeds=pnl + pos["size"], rem=0.0)
+        self.closed.append(pos)
+        del w.held[strat]
 
     def _exits(self, w: Watch, now: float) -> None:
         if not w.price:
@@ -241,21 +271,53 @@ class PaperCurve:
             pct = (w.price / pos["market"] - 1) * 100
             pos["peak"], pos["trough"] = max(pos["peak"], pct), min(pos["trough"], pct)
             cost = self._cost()
+            mode = CURVE_RULES[strat].mode
             reason = None
-            if w.graduated:
-                reason, cost = "graduated", cost + self.s.curve_grad_exit_extra_pct / 100
-            elif self.s.curve_tp_pct > 0 and pct >= self.s.curve_tp_pct:
-                reason = "take_profit"
-            elif pct <= self.s.curve_sl_pct:
-                reason = "stop_loss"
+            if mode == "grad":
+                if w.graduated:
+                    reason, cost = "graduated", cost + self.s.curve_grad_exit_extra_pct / 100
+                elif self.s.curve_tp_pct > 0 and pct >= self.s.curve_tp_pct:
+                    reason = "take_profit"
+                elif pct <= self.s.curve_sl_pct:
+                    reason = "stop_loss"
+                elif now - pos["at"] >= self.s.curve_max_hold_s:
+                    reason = "time"
+                if reason:
+                    self._close(w, strat, pos, reason, cost)
+                continue
+            # half / trail: no stop loss; at 2x sell half (the capital comes back), then a stop at the entry
+            sale_cost = cost + (self.s.curve_grad_exit_extra_pct / 100 if w.graduated and pos["gpeak"] is None else 0)
+            if not pos["half"] and pct >= 100:
+                pos["proceeds"] += pos["size"] * 0.5 / pos["fill"] * w.price * (1 - sale_cost)
+                pos["rem"], pos["half"] = 0.5, True
+                pos["why"] = (pos.get("why") or "")[:120] + " | half sold at 2x"
+            if pos["half"] and w.price <= pos["market"]:
+                reason = "breakeven_stop"                    # gave back the move: the rest out at the entry
+            elif w.graduated and mode == "half":
+                reason, cost = "graduated", sale_cost
+            elif w.graduated:                                # trail: the rest rides on PumpSwap
+                if pos["gpeak"] is None:
+                    pos["gpeak"] = w.price                   # graduation price: the trail starts here
+                pos["gpeak"] = max(pos["gpeak"], w.price)
+                if w.price <= pos["gpeak"] * (1 - self.s.curve_trail_pct / 100):
+                    reason = "trailing_stop"
+                elif now - pos["at"] >= self.s.curve_trail_max_hold_s:
+                    reason = "time"
             elif now - pos["at"] >= self.s.curve_max_hold_s:
                 reason = "time"
             if reason:
-                size = self.s.curve_size_usd
-                pnl = size / pos["fill"] * w.price * (1 - cost) - size
-                pos.update(exit=w.price, reason=reason, pnl=pnl, pnl_pct=pnl / size * 100, exit_wall=_now())
-                self.closed.append(pos)
-                del w.held[strat]
+                self._close(w, strat, pos, reason, cost)
+
+    def riding(self) -> list[str]:
+        """Graduated tokens a trail position still holds: priced from Jupiter (the curve is gone)."""
+        return [m for m, w in self.watch.items() if w.graduated and w.held]
+
+    def on_riding_price(self, mint: str, price_sol: float, now: float) -> None:
+        w = self.watch.get(mint)
+        if w is None or not w.graduated or not price_sol or (w.price and not w.price / 20 <= price_sol <= w.price * 20):
+            return
+        w.price = price_sol
+        self._exits(w, now)
 
     # ---- persistence ----------------------------------------------------------
     def _usd(self, sol_px: float) -> float:
@@ -266,12 +328,15 @@ class PaperCurve:
         n = 0
         rows: list[tuple[dict[str, Any], PaperPosition]] = []
         for pos in self.opened:
+            grad = CURVE_RULES[pos["strategy"]].mode == "grad"
+            hold_s = self.s.curve_max_hold_s if CURVE_RULES[pos["strategy"]].mode != "trail" else self.s.curve_trail_max_hold_s
             row = PaperPosition(strategy=pos["strategy"], chain=Chain.solana, token_address=pos["mint"],
                                 symbol=pos["symbol"], trigger=pos["why"][:160], status="open",
-                                size_usd=self.s.curve_size_usd, entry_time=pos["wall"],
+                                size_usd=pos["size"], entry_time=pos["wall"],
                                 entry_price=self._usd(pos["market"]), fill_price=self._usd(pos["fill"]),
-                                tp_pct=self.s.curve_tp_pct, sl_pct=self.s.curve_sl_pct,
-                                max_hold_minutes=max(int(self.s.curve_max_hold_s // 60), 1),
+                                tp_pct=self.s.curve_tp_pct if grad else 100.0,
+                                sl_pct=self.s.curve_sl_pct if grad else 0.0,
+                                max_hold_minutes=max(int(hold_s // 60), 1),
                                 remaining_frac=1.0, proceeds_usd=0.0)
             session.add(row)
             rows.append((pos, row))
@@ -289,6 +354,7 @@ class PaperCurve:
             row.peak_pct, row.trough_pct = c["peak"], c["trough"]
             row.pnl_usd, row.pnl_pct = c["pnl"], c["pnl_pct"]
             row.proceeds_usd, row.remaining_frac = c["pnl"] + row.size_usd, 0.0
+            row.trigger = (c.get("why") or row.trigger or "")[:160]
             n += 1
         self.closed = [c for c in self.closed if c.get("row") is None]
         n += await self._mark_open(session)
@@ -296,7 +362,7 @@ class PaperCurve:
         return n
 
     async def _mark_open(self, session) -> int:
-        size, n, stamp = self.s.curve_size_usd, 0, _now()
+        n, stamp = 0, _now()
         for w in self.watch.values():
             if not w.price:
                 continue
@@ -304,10 +370,12 @@ class PaperCurve:
                 row = await session.get(PaperPosition, pos["row"]) if pos.get("row") else None
                 if row is None:
                     continue
-                pnl = size / pos["fill"] * w.price * (1 - self._cost()) - size
+                pnl = self.worth(pos, w.price, self._cost()) - pos["size"]
                 row.last_price, row.last_priced_at = self._usd(w.price), stamp
                 row.peak_pct, row.trough_pct = pos["peak"], pos["trough"]
-                row.pnl_usd, row.pnl_pct = pnl, pnl / size * 100
+                row.pnl_usd, row.pnl_pct = pnl, pnl / pos["size"] * 100
+                row.remaining_frac, row.proceeds_usd = pos["rem"], pos["proceeds"]
+                row.trigger = (pos.get("why") or row.trigger or "")[:160]
                 n += 1
         return n
 
@@ -366,12 +434,12 @@ class PaperCurve:
             except Exception as exc:
                 log.warning("curve (paper): feed error %s; reconnecting in %.0fs", exc, backoff)
                 # subscriptions died with the socket: open positions can't be priced any more
-                size = self.s.curve_size_usd
                 for w in self.watch.values():
                     for pos in list(w.held.values()):
                         px = w.price or pos["market"]
-                        pnl = size / pos["fill"] * px * (1 - self._cost()) - size
-                        pos.update(exit=px, reason="feed_lost", exit_wall=_now(), pnl=pnl, pnl_pct=pnl / size * 100)
+                        pnl = self.worth(pos, px, self._cost()) - pos["size"]
+                        pos.update(exit=px, reason="feed_lost", exit_wall=_now(), pnl=pnl,
+                                   pnl_pct=pnl / pos["size"] * 100)
                         self.closed.append(pos)
                     w.held.clear()
                 self.watch.clear()
@@ -429,7 +497,7 @@ class PaperCurve:
                 self.on_curve(mint, data, time.monotonic())
 
     async def _housekeep(self, pp, hl, SessionLocal) -> None:
-        last_flush = last_px = last_cost = time.monotonic()
+        last_flush = last_px = last_cost = last_ride = time.monotonic()
         events_at = self.pp_events
         while True:
             await asyncio.sleep(1.0)
@@ -450,11 +518,36 @@ class PaperCurve:
             if now - last_px >= 60.0:
                 last_px = now
                 await self._refresh_sol_usd()
+            if self.riding() and now - last_ride >= self.s.curve_trail_price_seconds:
+                last_ride = now
+                await self._price_riding(now)
             if self.pp_from_pct() is not None and now - last_cost >= 600.0:
                 n, events_at, last_cost = self.pp_events - events_at, self.pp_events, now
                 # 0.01 SOL per 10,000 events; 144 ten-minute windows a day
                 log.info("curve (paper): %d PumpPortal events in 10 min, %d tokens streamed (~%.3f SOL/day)",
                          n, len(self.pp_subbed), n * 144 * 0.01 / 10_000)
+
+    async def _price_riding(self, now: float) -> None:
+        """Graduated coins a trail position still holds: Jupiter's price (USD -> SOL per token)."""
+        import httpx
+
+        from app.live import JUPITER
+
+        mints = self.riding()[:50]
+        if not mints or not self.sol_usd:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await JUPITER.request(c, "GET", f"{self.s.jupiter_api_url}/price/v3", background=True,
+                                          params={"ids": ",".join(mints)})
+            data = (r.json() or {}) if r is not None and r.status_code == 200 else {}
+        except Exception:
+            log.debug("curve (paper): riding prices failed", exc_info=True)
+            return
+        for m in mints:
+            usd = (data.get(m) or {}).get("usdPrice")
+            if usd:
+                self.on_riding_price(m, float(usd) / self.sol_usd, now)
 
     async def _refresh_sol_usd(self) -> None:
         import httpx
