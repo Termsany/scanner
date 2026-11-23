@@ -1408,7 +1408,7 @@ def test_take_capital_uses_the_fast_price_near_target_and_one_strong_reading_sel
         [_trade()],                                             # $30 for 1 token
         lambda: x.price.update(M1=31.0),                         # far from target: Jupiter not asked
         lambda: (x.price.update(M1=50.0), x.fast.update(M1=75.0)),  # Dex 1.67x (near) -> Jupiter says 2.5x: sell now
-    ], x)
+    ], x, live_copy_sl_pct=None)      # counts take-capital's own price calls
     sells = [c for c in x.calls if c[0] == "sell"]
     assert sells == [("sell", "M1", 400_000)]                    # $30 of $75 = 40%
     assert x.fast_calls == 2      # right after the buy (no DexScreener price yet) and near the target
@@ -1650,9 +1650,21 @@ def test_quick_exit_off_keeps_the_2x_rule():
     pos = _run_quick([
         [_trade()],
         lambda: x.price.update(M1=46.0), [],          # +53% with the switch off: nothing
-        lambda: x.price.update(M1=20.0), [],          # -33%: nothing either (no stop loss in the user's rule)
-    ], x, quick=False)
+        lambda: x.price.update(M1=20.0), [],          # -33%: nothing either with the copy stop off
+    ], x, quick=False, live_copy_sl_pct=None)
     assert [c for c in x.calls if c[0] == "sell"] == [] and pos[0].status == "open"
+
+
+def test_normal_copy_mode_has_a_25_pct_stop():
+    x = PricedExec()
+    pos = _run_quick([
+        [_trade()],                                   # $30 for 1 token
+        lambda: x.price.update(M1=23.0), [],          # -23%: nothing
+        lambda: x.price.update(M1=22.0),              # -27%: first reading
+        [],                                           # second reading: sell everything
+    ], x, quick=False)
+    assert [c for c in x.calls if c[0] == "sell"] == [("sell", "M1", 1_000_000)]
+    assert pos[0].status == "closed" and pos[0].exit_reason == "stop_loss"
 
 
 def test_quick_exit_time_limit():

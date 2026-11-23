@@ -1502,6 +1502,8 @@ class CopyEngine:
         self._quick_seen: dict[int, int] = {}   # position id -> quick-exit readings in a row past TP / SL
         self.wake: asyncio.Event | None = None  # set by the WebSocket watcher when a copied wallet trades
         self._target_at = 0.0                   # last check of owner-set targets
+        self._copy_sl_at = 0.0                  # last check of the copy stop loss
+        self._copy_sl_seen: dict[int, int] = {}  # position id -> readings in a row under the stop
         self._target_seen: dict[int, int] = {}  # position id -> readings in a row past its target / stop
         self._orders_at = 0.0                   # last check of the owner's price orders (app/orders.py)
         from app import curve_live
@@ -2298,6 +2300,55 @@ class CopyEngine:
             await self._sell(session, p, 1.0, "take_profit" if r >= tp else "stop_loss")
             await session.commit()
 
+    async def _copy_stops(self, session: AsyncSession) -> None:
+        """Positions copied from a wallet in the normal mode (not quick exit, not the owner's, not curve trades):
+        sell everything once the price is LIVE_COPY_SL_PCT under our average entry. Two readings in a row, one
+        when far past (like quick exit); the on-chain pool / Jupiter price first, DexScreener as a backup."""
+        sl = self.s.live_copy_sl_pct
+        if sl is None or time.monotonic() - self._copy_sl_at < self.s.live_quick_check_seconds:
+            return
+        self._copy_sl_at = time.monotonic()
+        rows = [p for p in (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine()))).scalars().all()
+            if int(p.tokens_raw or 0) > 0 and not p.manual_sell_frac and not p.hands_off
+            and p.leader_wallet != MANUAL and not (p.leader_wallet or "").startswith("curve:")
+            and not self._quick(p) and not self._hold(p.token_address)
+            and p.stop_pct is None and p.stop_price is None
+            and not any(x.get("side") == "sell_failed" for x in (p.fills or []))]
+        if not rows or not hasattr(self.x, "token_prices"):
+            return
+        mints = sorted({p.token_address for p in rows})
+        prices: dict[str, dict[str, float]] = {}
+        if hasattr(self.x, "token_prices_fast"):
+            try:
+                prices = dict(await self.x.token_prices_fast(mints) or {})
+            except Exception as exc:
+                log.warning("live: copy-stop prices failed: %s", exc)
+        missing = [m for m in mints if m not in prices]
+        if missing:
+            try:
+                prices.update(await self.x.token_prices(missing) or {})
+            except Exception as exc:
+                log.warning("live: copy-stop backup prices failed: %s", exc)
+        for p in rows:
+            px = prices.get(p.token_address)
+            if not px or not px.get("usd") or not p.cost_usd:
+                continue
+            bought = int(p.tokens_bought_raw or p.tokens_raw) / 10 ** int(px["decimals"])
+            if bought <= 0:
+                continue
+            r = float(px["usd"]) / (p.cost_usd / bought)          # price now / our average entry price
+            if r > 1 + sl / 100:
+                self._copy_sl_seen.pop(p.id, None)
+                continue
+            self._copy_sl_seen[p.id] = self._copy_sl_seen.get(p.id, 0) + 1
+            if self._copy_sl_seen[p.id] < 2 and r > (1 + sl / 100) * 0.9:
+                continue                                         # two readings in a row, unless far past
+            self._copy_sl_seen.pop(p.id, None)
+            log.info("live[%s]: copy stop %s at %+.0f%% from entry", self.a.name, p.symbol, (r - 1) * 100)
+            await self._sell(session, p, 1.0, "stop_loss")
+            await session.commit()
+
     async def _targets(self, session: AsyncSession) -> None:
         """Owner-set targets on single positions (/live): sell the chosen share at +target, everything at the stop.
         Two readings in a row, like quick exit; Jupiter's price first, DexScreener as a backup."""
@@ -2612,7 +2663,7 @@ class CopyEngine:
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
-        for part in (self._curve, self._curve_exits, self._trails, self._publish_prices, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits,
+        for part in (self._curve, self._curve_exits, self._trails, self._publish_prices, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits, self._copy_stops,
                      self._targets, self._sell_by, self._orders):
             if self.wake is not None and self.wake.is_set():
                 return
