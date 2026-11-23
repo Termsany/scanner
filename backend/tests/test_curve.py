@@ -395,3 +395,28 @@ def test_custom_rule_switched_off_buys_nothing_and_a_deleted_one_finishes_its_tr
     assert "cc1" in c.rules and not c.rules["cc1"].enabled
     c.on_curve("M", acct(61), 20.0)
     assert any(p["strategy"] == "cc1" and p["reason"] == "curve_target" for p in c.closed)
+
+
+def test_entry_snapshot_has_speed_dev_and_recent_buying():
+    c = PaperCurve(S())
+    c.on_create({**create(), "traderPublicKey": "Dev1", "initialBuy": 79_310_000, "uri": "https://x/meta.json"}, 0.0)
+    for i, p in enumerate((40, 50, 60, 66, 70)):
+        c.on_curve("M", acct(p), 2.0 + i * 5)                    # five buys in the last minute
+    c.on_curve("M", acct(70), 25.0)
+    pos = c.watch["M"].held["curve_70"]
+    f = pos["features"]
+    assert f["dev_pct"] == 10.0 and f["uri"] == "https://x/meta.json" and f["dev_sold"] is False
+    assert f["buys_60s"] >= 4 and f["sells_60s"] == 0 and f["sol_in_60s"] > 0
+    assert f["secs_to_level"] == 22.0 and f["fill_level"] == 70.0 and f["progress_60s"] > 20
+
+
+def test_speed_and_backslide_filters():
+    c = PaperCurve(S())
+    c.set_custom({"cc1": _custom(level=70.0, exit_at=90.0, max_secs=60.0),
+                  "cc2": _custom(level=70.0, exit_at=90.0, skip_backslide=True),
+                  "cc3": _custom(level=70.0, exit_at=90.0)})
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(70), 100.0)                             # 100 s to 70%: slower than cc1 allows
+    c.on_curve("M", acct(68), 102.5)                             # slid back before the buy
+    held = set(c.watch["M"].held)
+    assert "cc1" not in held and "cc2" not in held and "cc3" in held

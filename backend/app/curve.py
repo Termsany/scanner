@@ -34,12 +34,13 @@ import asyncio
 import base64
 import contextlib
 import itertools
+from collections import deque
 import json
 import logging
 import struct
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -67,6 +68,8 @@ class CurveRule:
     max_hold_s: float | None = None  # custom: sell whatever is left after this long
     enabled: bool = True            # custom: off = no new buys (open ones are still managed)
     title: str = ""
+    max_secs: float | None = None   # skip a token that took longer than this (from its launch) to reach the level
+    skip_backslide: bool = False    # skip if the curve slid back below the decision level before our buy
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -98,7 +101,8 @@ def custom_rule(row: Any) -> CurveRule:
     return CurveRule(float(row.level), "custom", half_at=float(row.half_at or 0) or 100.0,
                      skip_drop=row.skip_drop, exit_at=row.exit_at, sl=row.sl_pct, tp=row.tp_pct,
                      half=row.half_at, size=float(row.size_usd or 10.0), max_hold_s=float(row.max_hold_min or 60) * 60,
-                     enabled=bool(row.enabled), title=custom_title(row))
+                     enabled=bool(row.enabled), title=custom_title(row), max_secs=row.max_secs,
+                     skip_backslide=bool(row.skip_backslide))
 
 
 def custom_title(row: Any) -> str:
@@ -112,6 +116,10 @@ def custom_title(row: Any) -> str:
     parts.append(f"stop {float(row.sl_pct):g}%" if row.sl_pct else "no stop")
     if row.skip_drop:
         parts.append(f"skip if it fell {float(row.skip_drop):g}% first")
+    if getattr(row, "max_secs", None):
+        parts.append(f"skip if slower than {float(row.max_secs):g}s to the level")
+    if getattr(row, "skip_backslide", None):
+        parts.append("skip if the curve slid back")
     parts.append(f"graduation sells, {float(row.max_hold_min or 60):g} min max")
     return ", ".join(parts)
 
@@ -167,7 +175,12 @@ def parse_trade(msg: dict[str, Any]) -> dict[str, Any] | None:
         return None
     r_tok = v_tok - (V_TOKENS_START - REAL_TOKENS_START)
     progress = max(0.0, min(100.0, (1 - r_tok / REAL_TOKENS_START) * 100))
-    return {"complete": False, "price": v_sol / v_tok, "progress": progress}
+    try:
+        sol = float(msg.get("solAmount") or 0)
+    except (TypeError, ValueError):
+        sol = 0.0
+    return {"complete": False, "price": v_sol / v_tok, "progress": progress,
+            "trade": (msg.get("txType"), msg.get("traderPublicKey"), sol)}
 
 
 @dataclass
@@ -182,6 +195,14 @@ class Watch:
     pending: dict[str, tuple[float, float, str]] = field(default_factory=dict)   # strat -> (fill at, px, why)
     held: dict[str, dict[str, Any]] = field(default_factory=dict)
     decided: set[str] = field(default_factory=set)
+    creator: str | None = None
+    dev_pct: float | None = None          # share of the curve the creator bought at launch
+    uri: str | None = None
+    dev_sold: bool = False                # the creator sold (seen on PumpPortal's trade stream)
+    real_sol: float | None = None         # last SOL in the curve (Helius): its change is a trade's size
+    trades: deque = field(default_factory=lambda: deque(maxlen=600))   # (t, side +1/-1, sol, trader|None)
+    path: deque = field(default_factory=lambda: deque(maxlen=600))     # (t, progress)
+    pre: dict[str, dict[str, Any]] = field(default_factory=dict)       # strat -> snapshot at the decision
 
 
 class PaperCurve:
@@ -195,6 +216,7 @@ class PaperCurve:
         self.pp_subbed: set[str] = set()
         self.pp_events = 0
         self.rules: dict[str, CurveRule] = dict(CURVE_RULES)
+        self._social_todo: set[str] = set()
 
     def set_custom(self, rules: dict[str, CurveRule]) -> None:
         """The owner's strategies from the database. One that was deleted keeps running for its open trades,
@@ -226,12 +248,26 @@ class PaperCurve:
             return None
         if len(self.watch) >= self.s.curve_max_watch:
             return None
-        self.watch[mint] = Watch(mint, str(msg.get("symbol") or "")[:60], now, curve)
+        w = Watch(mint, str(msg.get("symbol") or "")[:60], now, curve)
+        w.creator, w.uri = msg.get("traderPublicKey"), (str(msg.get("uri") or "")[:300] or None)
+        try:
+            w.dev_pct = round(float(msg.get("initialBuy") or 0) / REAL_TOKENS_START * 100, 2)
+        except (TypeError, ValueError):
+            w.dev_pct = None
+        self.watch[mint] = w
         return mint
 
     def on_curve(self, mint: str, data_b64: str, now: float) -> None:
         """A change of the token's bonding-curve account (from Helius)."""
-        self._update(mint, parse_curve(data_b64), now)
+        st = parse_curve(data_b64)
+        w = self.watch.get(mint)
+        if w is not None and st and not st["complete"] and st.get("real_sol") is not None:
+            if w.real_sol is not None and mint not in self.pp_subbed:     # PumpPortal has the details when streamed
+                d = st["real_sol"] - w.real_sol
+                if abs(d) > 1e-6:
+                    w.trades.append((now, 1 if d > 0 else -1, abs(d), None))
+            w.real_sol = st["real_sol"]
+        self._update(mint, st, now)
 
     def on_pp(self, msg: dict[str, Any], now: float) -> None:
         """A PumpPortal trade or migration on a token we stream."""
@@ -240,7 +276,14 @@ class PaperCurve:
             self._update(mint, {"complete": True, "price": None, "progress": 100.0}, now)
         elif tx in ("buy", "sell") and mint in self.pp_subbed:
             self.pp_events += 1
-            self._update(mint, parse_trade(msg), now)
+            st = parse_trade(msg)
+            w = self.watch.get(mint)
+            if w is not None and st:
+                side, trader, sol = st["trade"]
+                w.trades.append((now, 1 if side == "buy" else -1, sol, trader))
+                if side == "sell" and trader and trader == w.creator:
+                    w.dev_sold = True
+            self._update(mint, st, now)
 
     def _update(self, mint: str | None, st: dict[str, Any] | None, now: float) -> None:
         w = self.watch.get(mint) if mint else None
@@ -258,6 +301,7 @@ class PaperCurve:
         if w.price and not w.price / 20 <= st["price"] <= w.price * 20:
             return                                    # a 20x jump in one update is a bad reading
         w.price, w.progress = st["price"], st["progress"]
+        w.path.append((now, w.progress))
         for strat, rule in self.rules.items():
             level = rule.level
             if strat not in w.decided and w.progress >= level:
@@ -266,6 +310,9 @@ class PaperCurve:
                     continue
                 if rule.mode in ("range", "custom") and w.progress > level + RANGE_LATE_PTS:
                     continue                          # first seen far past its entry level: not this trade
+                if rule.max_secs is not None and now - w.created > rule.max_secs:
+                    continue                          # a slow climb: the buying is weak
+                w.pre[strat] = self.snapshot(w, now)
                 w.pending[strat] = (now + self.s.curve_latency_s, w.price,
                                     f"curve {w.progress:.0f}% at {now - w.created:.0f}s")
         self._fills(w, now)
@@ -315,6 +362,23 @@ class PaperCurve:
     def _open_count(self, strat: str | None = None) -> int:
         return sum(len(x.held) if strat is None else int(strat in x.held) for x in self.watch.values())
 
+    def snapshot(self, w: Watch, now: float) -> dict[str, Any]:
+        """What the token looks like at our decision: kept on the paper trade to find what winners share."""
+        last = [t for t in w.trades if now - t[0] <= 60]
+        buys = [t for t in last if t[1] > 0]
+        sells = [t for t in last if t[1] < 0]
+        known = [t for t in last if t[3]]
+        back = [p for (t, p) in w.path if now - t <= 60]
+        return {
+            "secs_to_level": round(now - w.created, 1), "level_at": round(w.progress, 1),
+            "dev_pct": w.dev_pct, "dev_sold": w.dev_sold if w.creator else None,
+            "buys_60s": len(buys), "sells_60s": len(sells),
+            "sol_in_60s": round(sum(t[2] for t in buys), 3), "sol_out_60s": round(sum(t[2] for t in sells), 3),
+            "buyers_60s": len({t[3] for t in known if t[1] > 0}) if known else None,
+            "progress_60s": round(w.progress - back[0], 1) if back else None,
+            "uri": w.uri,
+        }
+
     def _fills(self, w: Watch, now: float) -> None:
         for strat, (at, decision_px, why) in list(w.pending.items()):
             if now < at or not w.price:
@@ -328,9 +392,14 @@ class PaperCurve:
             drop = rule.skip_drop
             if drop is not None and decision_px and w.price < decision_px * (1 - drop / 100):
                 continue                                  # being sold into: the price fell before our buy landed
+            pre = w.pre.get(strat) or {}
+            if rule.skip_backslide and pre.get("level_at") is not None and w.progress < pre["level_at"]:
+                continue                                  # the curve went back down before our buy landed
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,
                    "fill": w.price * (1 + self._cost()), "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
                    "size": self._size(strat), "rem": 1.0, "proceeds": 0.0, "half": False, "gpeak": None,
+                   "features": {**pre, "paid_pct": round((w.price / decision_px - 1) * 100, 1) if decision_px else None,
+                                "fill_level": round(w.progress, 1)},
                    "why": f"{why} +{self.s.curve_latency_s:g}s, filled at {w.progress:.0f}%, "
                           f"paid {(w.price / decision_px - 1) * 100 if decision_px else 0:+.0f}% vs decision"}
             w.held[strat] = pos
@@ -466,10 +535,11 @@ class PaperCurve:
                                 tp_pct=_shown_tp(rule, self.s.curve_tp_pct),
                                 sl_pct=self.s.curve_sl_pct if grad else (rule.sl or 0.0),
                                 max_hold_minutes=max(int(hold_s // 60), 1),
-                                remaining_frac=1.0, proceeds_usd=0.0)
+                                remaining_frac=1.0, proceeds_usd=0.0, features=pos.get("features"))
             session.add(row)
             rows.append((pos, row))
             n += 1
+        await self._socials(rows)
         await session.flush()
         for pos, row in rows:             # keep the id: each flush has its own session
             pos["row"] = row.id
@@ -490,6 +560,52 @@ class PaperCurve:
         n += await self._mark_open(session)
         await session.commit()
         return n
+
+    _social_cache: dict[str, dict[str, bool]] = {}
+
+    async def _socials(self, rows: list[tuple[dict[str, Any], PaperPosition]]) -> None:
+        """has_twitter / has_website / has_telegram: from the cache now; unknown tokens are read in the background
+        (never inside a flush: a slow metadata host must not stall the bot)."""
+        for _, row in rows:
+            f = dict(row.features or {})
+            if f.get("uri") in self._social_cache:
+                f.update({f"has_{k}": v for k, v in self._social_cache[f["uri"]].items()})
+                row.features = f
+        self._social_todo.update((row.features or {}).get("uri") for _, row in rows)
+        self._social_todo -= {None, ""} | set(self._social_cache)
+
+    async def fetch_socials(self, SessionLocal) -> None:
+        """Background: read queued token metadata and add the socials to their paper rows."""
+        try:
+            await self._fetch_socials(SessionLocal)
+        except Exception:
+            log.warning("curve (paper): socials lookup failed", exc_info=True)
+
+    async def _fetch_socials(self, SessionLocal) -> None:
+        import httpx
+
+        todo = list(self._social_todo)[:5]
+        self._social_todo -= set(todo)
+        if not todo:
+            return
+        async with httpx.AsyncClient(timeout=4, follow_redirects=True) as c:
+            for uri in todo:
+                try:
+                    meta = (await c.get(uri)).json()
+                    meta = meta if isinstance(meta, dict) else {}
+                except Exception:
+                    meta = {}
+                self._social_cache[uri] = {k: bool(meta.get(k)) for k in ("twitter", "website", "telegram")}
+        async with SessionLocal() as session:
+            rows = (await session.execute(select(PaperPosition).where(
+                PaperPosition.entry_time >= _now() - timedelta(hours=3),
+                PaperPosition.features.is_not(None)))).scalars().all()
+            for row in rows:
+                f = dict(row.features or {})
+                if f.get("uri") in todo and "has_twitter" not in f:
+                    f.update({f"has_{k}": v for k, v in self._social_cache[f["uri"]].items()})
+                    row.features = f
+            await session.commit()
 
     async def _mark_open(self, session) -> int:
         n, stamp = 0, _now()
@@ -632,6 +748,7 @@ class PaperCurve:
     async def _housekeep(self, pp, hl, SessionLocal) -> None:
         last_flush = last_px = last_cost = last_ride = time.monotonic()
         last_rules = 0.0
+        self._social_task: asyncio.Task | None = None
         events_at = self.pp_events
         while True:
             await asyncio.sleep(1.0)
@@ -655,6 +772,8 @@ class PaperCurve:
             if now - last_px >= 60.0:
                 last_px = now
                 await self._refresh_sol_usd()
+            if self._social_todo and not (self._social_task and not self._social_task.done()):
+                self._social_task = asyncio.create_task(self.fetch_socials(SessionLocal))
             if self.riding() and now - last_ride >= self.s.curve_trail_price_seconds:
                 last_ride = now
                 await self._price_riding(now)

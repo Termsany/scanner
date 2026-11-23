@@ -361,6 +361,8 @@ export interface CurveRuleOut {
   half_at: number | null;
   sl_pct: number | null;
   skip_drop: number | null;
+  max_secs: number | null;
+  skip_backslide: boolean;
   size_usd: number;
   max_hold_min: number;
   curve_gain_pct: number | null;
@@ -374,6 +376,8 @@ export interface CurveRuleIn {
   half_at: number | null;
   sl_pct: number | null;
   skip_drop: number | null;
+  max_secs: number | null;
+  skip_backslide: boolean;
   size_usd: number;
   max_hold_min: number;
 }

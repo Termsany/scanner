@@ -384,10 +384,12 @@ function curveGain(from: number, to: number): number {
 type Draft = {
   level: string; exitOn: boolean; exitAt: string; tpOn: boolean; tp: string; halfOn: boolean; half: string;
   slOn: boolean; sl: string; skipOn: boolean; skip: string; size: string; hold: string;
+  slowOn: boolean; slow: string; backOn: boolean;
 };
 const START: Draft = {
   level: "30", exitOn: true, exitAt: "70", tpOn: false, tp: "50", halfOn: false, half: "40",
   slOn: true, sl: "30", skipOn: true, skip: "10", size: "10", hold: "60",
+  slowOn: true, slow: "120", backOn: true,
 };
 
 /** Admin: build your own curve paper strategies; the curve bot runs them within 30 s. */
@@ -425,6 +427,7 @@ function CurveBuilder({ onChange }: { onChange: () => void }) {
       const body: CurveRuleIn = {
         level, exit_at: d.exitOn ? exitAt : null, tp_pct: d.tpOn ? n(d.tp) : null, half_at: d.halfOn ? n(d.half) : null,
         sl_pct: d.slOn ? -Math.abs(n(d.sl)) : null, skip_drop: d.skipOn ? n(d.skip) : null,
+        max_secs: d.slowOn ? n(d.slow) : null, skip_backslide: d.backOn,
         size_usd: n(d.size), max_hold_min: n(d.hold),
       };
       if (Object.values(body).some((v) => typeof v === "number" && !Number.isFinite(v))) {
@@ -503,6 +506,15 @@ function CurveBuilder({ onChange }: { onChange: () => void }) {
               skip the buy if the price fell <input className={num} inputMode="decimal" value={d.skip} disabled={!d.skipOn}
                 onChange={(e) => set({ skip: e.target.value })} /> % before it landed
             </label>
+            <label className={row}>
+              <Toggle on={d.slowOn} label="Skip slow tokens" onClick={() => set({ slowOn: !d.slowOn })} />
+              skip a token that took more than <input className={num} inputMode="decimal" value={d.slow} disabled={!d.slowOn}
+                onChange={(e) => set({ slow: e.target.value })} /> s from launch to the buy level
+            </label>
+            <label className={row}>
+              <Toggle on={d.backOn} label="Skip if the curve slid back" onClick={() => set({ backOn: !d.backOn })} />
+              skip the buy if the curve slid back below the level before it landed
+            </label>
             <div className={row}>
               $<input className={num} inputMode="decimal" value={d.size} onChange={(e) => set({ size: e.target.value })} /> per trade ·
               sell after <input className={num} inputMode="decimal" value={d.hold} onChange={(e) => set({ hold: e.target.value })} /> min at most
@@ -521,6 +533,8 @@ function CurveBuilder({ onChange }: { onChange: () => void }) {
                 <li>Buys whose price fell 10%+ in the 2 s before the fill lost 8 of 8: keep the skip filter on.</li>
                 <li>A −25% stop filled at about −41% on average (prices gap down): a stop protects less than it looks.</li>
                 <li>Most trades were up 20–40% before they turned: selling half early often beats waiting for graduation.</li>
+                <li>Of 71 entries, tokens slower than 2 min to the level did worse (20% good vs 38%), and so did buys
+                  where the curve slid back first (28% vs 41%).</li>
                 <li>Compare one change at a time (same buy level, stop on vs off) and wait for 20–30 trades.</li>
               </ul>
             </div>

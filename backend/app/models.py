@@ -272,6 +272,8 @@ class PaperPosition(Base):
     token_address: Mapped[str] = mapped_column(String(64))
     symbol: Mapped[str] = mapped_column(String(64), default="")
     trigger: Mapped[str] = mapped_column(String(160), default="")      # e.g. "auto 2/3 bought $380", "score 86"
+    # what the token looked like when we bought (curve strategies): speed, dev, recent buying, socials
+    features: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     trigger_wallet: Mapped[str | None] = mapped_column(String(64))     # wallet_follow: exit when it sells
     status: Mapped[str] = mapped_column(String(8), default="open")    # open | closed
     size_usd: Mapped[float] = mapped_column(Float)
@@ -447,6 +449,8 @@ class CurveCustom(Base):
     half_at: Mapped[float | None] = mapped_column(Float, nullable=True)   # sell half at +this %, then stop at entry
     sl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)    # stop loss (negative %), None = none
     skip_drop: Mapped[float | None] = mapped_column(Float, nullable=True)  # skip the buy if it fell this % first
+    max_secs: Mapped[float | None] = mapped_column(Float, nullable=True)   # skip a token slower than this to the level
+    skip_backslide: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # skip if the curve slid back first
     size_usd: Mapped[float] = mapped_column(Float, default=10.0)
     max_hold_min: Mapped[float] = mapped_column(Float, default=60.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
