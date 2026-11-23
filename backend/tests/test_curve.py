@@ -438,3 +438,26 @@ def test_custom_rule_rides_after_graduation_on_a_trailing_stop():
     c.on_riding_price("M", grad * 1.5 * 0.65, 40.0)              # 35% off the high: out
     out = next(p for p in c.closed if p["strategy"] == "cc1")
     assert out["reason"] == "trailing_stop" and out["pnl"] > 0
+
+
+def test_a_short_feed_drop_keeps_open_trades_and_watches_them_again():
+    c = PaperCurve(S())
+    c.on_create(create("A"), 0.0)
+    c.on_create(create("B"), 0.0)
+    c.on_curve("A", acct(70), 10.0)
+    c.on_curve("A", acct(70), 12.5)                              # bought A; B is only watched
+    c.on_feed_lost(20.0)
+    assert "A" in c.watch and "B" not in c.watch and not c.closed
+    assert c.after_reconnect(30.0) == ["A"]                      # back in 10 s: watch A again
+    c.on_curve("A", acct(100, complete=True), 40.0)
+    assert {p["reason"] for p in c.closed} >= {"graduated"}      # the trade finished normally
+
+
+def test_a_long_feed_outage_closes_open_trades_as_feed_lost():
+    c = PaperCurve(S())
+    c.on_create(create("A"), 0.0)
+    c.on_curve("A", acct(70), 10.0)
+    c.on_curve("A", acct(70), 12.5)
+    c.on_feed_lost(20.0)
+    assert c.after_reconnect(20.0 + PaperCurve.FEED_GRACE_S + 1) == []
+    assert c.closed and {p["reason"] for p in c.closed} == {"feed_lost"} and not c.watch

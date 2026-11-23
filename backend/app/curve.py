@@ -220,6 +220,7 @@ class PaperCurve:
         self.pp_events = 0
         self.rules: dict[str, CurveRule] = dict(CURVE_RULES)
         self._social_todo: set[str] = set()
+        self._lost_at: float | None = None      # when the sockets dropped (None: connected)
 
     def set_custom(self, rules: dict[str, CurveRule]) -> None:
         """The owner's strategies from the database. One that was deleted keeps running for its open trades,
@@ -683,6 +684,8 @@ class PaperCurve:
                     self._req: dict[int, str] = {}
                     self._sub: dict[int, str] = {}
                     self._mint_sub: dict[str, int] = {}
+                    for mint in self.after_reconnect(time.monotonic()) if hl is not None else ():
+                        await self._subscribe(hl, mint)    # the coins we still hold: watch them again
                     jobs = [self._read_pp(pp, hl), self._housekeep(pp, hl, SessionLocal)]
                     if hl is not None:
                         jobs.append(self._read_curves(hl))
@@ -691,16 +694,7 @@ class PaperCurve:
                 raise
             except Exception as exc:
                 log.warning("curve (paper): feed error %s; reconnecting in %.0fs", exc, backoff)
-                # subscriptions died with the socket: open positions can't be priced any more
-                for w in self.watch.values():
-                    for pos in list(w.held.values()):
-                        px = w.price or pos["market"]
-                        pnl = self.worth(pos, px, self._cost()) - pos["size"]
-                        pos.update(exit=px, reason="feed_lost", exit_wall=_now(), pnl=pnl,
-                                   pnl_pct=pnl / pos["size"] * 100)
-                        self.closed.append(pos)
-                    w.held.clear()
-                self.watch.clear()
+                self.on_feed_lost(time.monotonic())     # open trades wait for the reconnect (up to a limit)
                 try:
                     async with SessionLocal() as session:
                         await self.flush(session)
@@ -708,6 +702,35 @@ class PaperCurve:
                     log.exception("curve (paper): flush after feed loss failed")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
+
+    FEED_GRACE_S = 300.0      # a reconnect within this keeps the open trades; a longer outage closes them
+
+    def on_feed_lost(self, now: float) -> None:
+        """The sockets dropped: forget tokens we only watch, keep the ones we hold (no buys pending; they are
+        watched again after the reconnect). Short outages (a 502, a dropped frame) cost nothing."""
+        if self._lost_at is None:
+            self._lost_at = now
+        for mint, w in list(self.watch.items()):
+            w.pending.clear()
+            if not w.held:
+                del self.watch[mint]
+        self.pp_subbed = set()
+
+    def after_reconnect(self, now: float) -> list[str]:
+        """Back online: held coins to watch again, or, after an outage longer than FEED_GRACE_S, their trades
+        closed at the last price we had (feed_lost)."""
+        lost, self._lost_at = self._lost_at, None
+        if lost is not None and now - lost > self.FEED_GRACE_S:
+            for w in self.watch.values():
+                for pos in list(w.held.values()):
+                    px = w.price or pos["market"]
+                    pnl = self.worth(pos, px, self._cost()) - pos["size"]
+                    pos.update(exit=px, reason="feed_lost", exit_wall=_now(), pnl=pnl, pnl_pct=pnl / pos["size"] * 100)
+                    self.closed.append(pos)
+                w.held.clear()
+            self.watch.clear()
+            return []
+        return [m for m, w in self.watch.items() if w.held and not w.graduated]
 
     _ids = itertools.count(1)
 
