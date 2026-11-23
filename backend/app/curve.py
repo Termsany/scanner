@@ -77,12 +77,17 @@ class CurveRule:
     # either one sends its live signal only once they pass, never at the decision.
     min_fill: float | None = None   # buy only if the curve is at least this % sold when our buy would land
     max_dev: float | None = None    # skip if the dev holds this % of the supply or more
+    # the curve must have risen this many points between our decision and our fill (2026-11-23: coins launched
+    # already past 40 % by their own bundle passed min_fill with nobody buying after; on the day's curve_fast34
+    # trades a 5-point rise turned the filtered group from +$18.5 into +$54.8)
+    min_rise: float | None = None
     # copycats (2026-11-23, BOBCAT): a coin named like one launched shortly before it (CURVE_COPYCAT_WINDOW_S) is
     # usually a copy riding the original's name, pumped by one wallet; on the day's curve_fast34 trades 1 of 26 won
     skip_copycat: bool = False
 
     def waits(self) -> bool:
-        return self.min_fill is not None or self.max_dev is not None or self.skip_copycat
+        return (self.min_fill is not None or self.max_dev is not None or self.min_rise is not None
+                or self.skip_copycat)
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -109,9 +114,9 @@ CURVE_RULES: dict[str, CurveRule] = {
     # user's choice (2026-11-23): curve_fast34, buying only coins still being bought after the signal (40 %+ sold at
     # the fill) whose dev holds under 25 %. On the day's trades: 48 of 149 passed, +$18.5, against -$198 for the rest.
     "curve_fast34_mom": CurveRule(33.8, "custom", exit_at=96.6, sl=-25.0, size=10.0, max_hold_s=900.0, max_secs=60.0,
-                                  min_fill=40.0, max_dev=25.0, skip_copycat=True,
-                                  title="curve_fast34 with momentum: still bought after the signal (40%+ at the "
-                                        "fill), dev under 25%, no copycat names"),
+                                  min_fill=40.0, min_rise=5.0, max_dev=25.0, skip_copycat=True,
+                                  title="curve_fast34 with momentum: still bought after the signal (up 5+ points, "
+                                        "40%+ at the fill), dev under 25%, no copycat names"),
     # user's choice (2026-11-23): curve_70 with real money at $10. curve_70 sells at graduation, which a real
     # account can't (it needs an exit level and a stop), so this is curve_70 with the exit just before
     # graduation (99 % sold, ~+225 % on a classic curve), the same -25 % stop and 60 min max hold.
@@ -474,6 +479,8 @@ class PaperCurve:
                 continue                                  # stalled at the level: nobody kept buying
             if rule.max_dev is not None and (pre.get("dev_pct") or 0) >= rule.max_dev:
                 continue                                  # the dev holds too much of it
+            if rule.min_rise is not None and w.progress - (pre.get("level_at") or w.progress) < rule.min_rise:
+                continue                                  # nobody kept buying after the signal
             if rule.skip_copycat and w.copycat:
                 continue                                  # a copy of a coin launched just before it
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,

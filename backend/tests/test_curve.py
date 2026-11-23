@@ -550,3 +550,15 @@ def test_mom_skips_a_copycat_named_like_a_coin_launched_just_before():
     assert "curve_fast34_mom" in c.watch["ORIG"].held
     assert "curve_fast34_mom" not in c.watch["COPY"].held and "curve_fast34" in c.watch["COPY"].held
     assert c.watch["COPY"].held["curve_fast34"]["features"]["copycat"] is True
+
+
+def test_mom_needs_a_real_rise_after_the_signal_not_a_launch_already_past_40():
+    c = PaperCurve(S())
+    c.on_create({**create("BUNDLE"), "symbol": "PLAN", "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+    c.on_curve("BUNDLE", acct(43.3), 0.1)             # launched at 43 % (its own bundle)
+    c.on_curve("BUNDLE", acct(44.4), 2.6)             # +1 point: nobody kept buying
+    assert "curve_fast34_mom" not in c.watch["BUNDLE"].held and "curve_fast34" in c.watch["BUNDLE"].held
+    c.on_create({**create("REAL"), "symbol": "REAL", "initialBuy": 0.10 * REAL_TOKENS_START}, 10.0)
+    c.on_curve("REAL", acct(36.6), 10.1)
+    c.on_curve("REAL", acct(42.7), 12.6)              # +6 points and past 40 %
+    assert "curve_fast34_mom" in c.watch["REAL"].held
