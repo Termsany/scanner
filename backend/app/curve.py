@@ -327,7 +327,8 @@ class PaperCurve:
         """Write opened / closed paper positions (strategy curve_*) so /paper shows them."""
         n = 0
         rows: list[tuple[dict[str, Any], PaperPosition]] = []
-        for pos in self.opened:
+        opened, self.opened = self.opened, []          # buys that land while this awaits wait for the next flush
+        for pos in opened:
             grad = CURVE_RULES[pos["strategy"]].mode == "grad"
             hold_s = self.s.curve_max_hold_s if CURVE_RULES[pos["strategy"]].mode != "trail" else self.s.curve_trail_max_hold_s
             row = PaperPosition(strategy=pos["strategy"], chain=Chain.solana, token_address=pos["mint"],
@@ -344,8 +345,8 @@ class PaperCurve:
         await session.flush()
         for pos, row in rows:             # keep the id: each flush has its own session
             pos["row"] = row.id
-        self.opened.clear()
-        for c in self.closed:
+        batch = list(self.closed)                     # closes that land while this awaits wait for the next flush
+        for c in batch:
             row = await session.get(PaperPosition, c["row"]) if c.get("row") else None
             if row is None:
                 continue
@@ -356,17 +357,20 @@ class PaperCurve:
             row.proceeds_usd, row.remaining_frac = c["pnl"] + row.size_usd, 0.0
             row.trigger = (c.get("why") or row.trigger or "")[:160]
             n += 1
-        self.closed = [c for c in self.closed if c.get("row") is None]
+        done = {id(c) for c in batch if c.get("row") is not None}
+        self.closed = [c for c in self.closed if id(c) not in done]
         n += await self._mark_open(session)
         await session.commit()
         return n
 
     async def _mark_open(self, session) -> int:
         n, stamp = 0, _now()
-        for w in self.watch.values():
+        # copies: the feed readers add and drop tokens while this awaits the database (a live view of the dicts
+        # raised "dictionary changed size during iteration" and closed every open position as feed_lost)
+        for w in list(self.watch.values()):
             if not w.price:
                 continue
-            for pos in w.held.values():
+            for pos in list(w.held.values()):
                 row = await session.get(PaperPosition, pos["row"]) if pos.get("row") else None
                 if row is None:
                     continue

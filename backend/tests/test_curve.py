@@ -234,3 +234,39 @@ def test_trail_time_limit_after_graduation():
     c.on_curve("M", acct(100, complete=True), 20.0)
     c.on_riding_price("M", c.watch["M"].price, 120.0)           # 107 s after the fill
     assert next(p for p in c.closed if p["strategy"] == "curve_70_trail")["reason"] == "time"
+
+
+def test_flush_survives_tokens_added_and_closed_while_it_waits_on_the_database():
+    """2026-11-23: a new token arriving while flush awaited the database raised "dictionary changed size during
+    iteration"; the feed loop then closed every open position as feed_lost."""
+    async def run():
+        with tempfile.TemporaryDirectory() as d:
+            eng = create_async_engine(f"sqlite+aiosqlite:///{d}/t.db")
+            async with eng.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            Session = async_sessionmaker(eng, expire_on_commit=False)
+            c = PaperCurve(S(), sol_usd=200.0)
+            c.on_create(create("A"), 0.0)
+            c.on_curve("A", acct(85), 10.0)
+            c.on_curve("A", acct(86), 12.5)               # bought
+            async with Session() as s:
+                await c.flush(s)
+            async with Session() as s:
+                real_get = s.get
+
+                async def get(*a, **kw):                  # the feed runs while flush waits: new token, a close
+                    c.on_create(create(f"N{len(c.watch)}"), 13.0)
+                    c.on_curve("A", acct(100, complete=True), 14.0)
+                    return await real_get(*a, **kw)
+
+                s.get = get
+                await c.flush(s)                          # must not raise
+            async with Session() as s:
+                await c.flush(s)                          # the close that landed mid-flush is written now
+                rows = (await s.execute(select(PaperPosition))).scalars().all()
+            await eng.dispose()
+            return rows
+
+    rows = asyncio.run(run())
+    grads = [r for r in rows if r.strategy in ("curve_70", "curve_85", "curve_70_half")]
+    assert grads and all(r.status == "closed" and r.exit_reason == "graduated" for r in grads)
