@@ -196,6 +196,11 @@ class Settings(BaseSettings):
     # 2026-11-21: ~0.5% PumpPortal fee for skipping the shared Jupiter queue). Sells stay on Jupiter.
     live_direct_pump_buys: bool = False
     live_direct_priority_fee_sol: float = 0.0005
+    # Helius Sender for PumpPortal trades (app/live.py with_tip): staked connection, tip added to the transaction
+    live_sender: bool = True
+    live_sender_url: str = "https://sender.helius-rpc.com/fast"
+    live_sender_swqos_only: bool = True             # one staked path, min tip 0.000005 SOL (all paths: 0.001 SOL)
+    live_sender_tip_sol: float = 0.00005
     live_direct_slippage_cap_pct: float = 15.0      # direct buys with a chase limit: slippage at most this
     live_direct_retry_slippage_pct: float = 40.0    # one retry when PumpPortal's own slippage check fails (6004)
     live_direct_max_overspend_pct: float = 3.0      # simulated cost above the entry size: rebuild smaller / use Jupiter

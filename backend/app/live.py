@@ -40,6 +40,87 @@ LAMPORTS = 1_000_000_000
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 PUMPPORTAL_TRADE = "https://pumpportal.fun/api/trade-local"
+# Helius Sender (2026-11-23): sends over Helius's staked connection (swqos_only) so a transaction lands sooner than
+# through a plain RPC (confirmations took 0.5-14 s). It needs a tip transfer to one of these accounts in the
+# transaction, plus a compute-unit price (PumpPortal's transactions carry one).
+SENDER_TIP_ACCOUNTS = (
+    "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE", "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ",
+    "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta", "5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn",
+    "2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD", "2q5pghRs6arqVjRvT5gfgWfWcHWmw1ZuCzphgd5KfWGJ",
+    "wyvPkWjVZz1M8fHQnMMCDTQDbkManefNNhweYk5WkcF", "3KCKozbAaF75qEU33jtzozcJ29yJuaLJTy2jFdzUY8bT",
+    "4vieeGHPYPG2MmyPRcYjdiDmmhN3ww7hsFNap8pVN3Ey", "4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or",
+)
+TX_MAX_BYTES = 1232
+
+
+def sender_url(s: Any) -> str | None:
+    """Helius Sender's endpoint with our Helius key (50 sends/s instead of 1) when LIVE_SENDER is on."""
+    from urllib.parse import parse_qs, urlencode, urlparse
+
+    if not s.live_sender or not s.live_sender_url:
+        return None
+    q: dict[str, str] = {}
+    if s.live_sender_swqos_only:
+        q["swqos_only"] = "true"
+    key = (parse_qs(urlparse(s.live_rpc_url or "").query).get("api-key") or [None])[0]
+    if key:
+        q["api-key"] = key
+    return s.live_sender_url + ("?" + urlencode(q) if q else "")
+
+
+_ALTS: dict[str, list[Any]] = {}       # address lookup table -> its addresses (PumpPortal's tables don't change)
+
+
+def with_tip(tx_bytes: bytes, kp: Any, tip_lamports: int, tables: dict[str, list[Any]] | None = None) -> str | None:
+    """PumpPortal's unsigned transaction with a Sender tip appended, signed (base64); None when it can't be done
+    (a lookup table not loaded, too big): the caller sends it the old way. `tables`: the addresses of the lookup
+    tables the transaction uses (PumpPortal's use one)."""
+    import random
+
+    from solders.address_lookup_table_account import AddressLookupTableAccount
+    from solders.instruction import AccountMeta, Instruction
+    from solders.message import MessageV0
+    from solders.pubkey import Pubkey
+    from solders.system_program import TransferParams, transfer
+    from solders.transaction import VersionedTransaction
+
+    tables = _ALTS if tables is None else tables
+    try:
+        msg = VersionedTransaction.from_bytes(tx_bytes).message
+        if not isinstance(msg, MessageV0):
+            return None
+        static = list(msg.account_keys)
+        writable_loaded, readonly_loaded, alts = [], [], []
+        for lk in msg.address_table_lookups:
+            addrs = tables.get(str(lk.account_key))
+            if addrs is None:
+                return None
+            writable_loaded += [addrs[i] for i in bytes(lk.writable_indexes)]
+            readonly_loaded += [addrs[i] for i in bytes(lk.readonly_indexes)]
+            alts.append(AddressLookupTableAccount(lk.account_key, addrs))
+        keys = static + writable_loaded + readonly_loaded
+        h, n = msg.header, len(static)
+        signers, ro_signed, ro_unsigned = (h.num_required_signatures, h.num_readonly_signed_accounts,
+                                           h.num_readonly_unsigned_accounts)
+
+        def writable(i: int) -> bool:
+            if i < n:
+                return i < signers - ro_signed or signers <= i < n - ro_unsigned
+            return i < n + len(writable_loaded)
+
+        ixs = [Instruction(keys[ci.program_id_index], bytes(ci.data),
+                           [AccountMeta(keys[i], i < signers, writable(i)) for i in bytes(ci.accounts)])
+               for ci in msg.instructions]
+        payer = kp.pubkey()
+        if static[0] != payer:
+            return None
+        ixs.append(transfer(TransferParams(from_pubkey=payer, to_pubkey=Pubkey.from_string(
+            random.choice(SENDER_TIP_ACCOUNTS)), lamports=int(tip_lamports))))
+        raw = bytes(VersionedTransaction(MessageV0.try_compile(payer, ixs, alts, msg.recent_blockhash), [kp]))
+    except Exception as exc:
+        log.info("sender tip not added: %s", str(exc)[:120])
+        return None
+    return base64.b64encode(raw).decode() if len(raw) <= TX_MAX_BYTES else None
 TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 PUMPPORTAL_FEE = 0.005      # PumpPortal's own fee on each trade (included in the simulated SOL spent)
 MAX_TRADE_AGE_SECONDS = 180
@@ -355,6 +436,8 @@ class JupiterExecutor:
         self.rpc_url = s.live_rpc_url or s.solana_rpc_url
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(20.0), headers={"User-Agent": "alpha-scanner/0.1"})
         self._dry_n = 0
+        self._tipped: set[str] = set()          # signed transactions carrying a Sender tip
+        self.sender_url = sender_url(s) if live else None
 
     async def close(self) -> None:
         await self.http.aclose()
@@ -645,6 +728,64 @@ class JupiterExecutor:
         _took("swap_build", time.monotonic() - t_build)
         return await self._send_tx(base64.b64decode(body["swapTransaction"]), last_valid)
 
+    async def _load_alts(self, txo: Any) -> None:
+        """Read the lookup tables a transaction uses, once each (cached for good)."""
+        from solders.address_lookup_table_account import AddressLookupTable
+
+        for lk in getattr(txo.message, "address_table_lookups", None) or []:
+            key = str(lk.account_key)
+            if key in _ALTS:
+                continue
+            try:
+                res = await self._rpc("getAccountInfo", [key, {"encoding": "base64", "commitment": "confirmed"}])
+                data = base64.b64decode(((res or {}).get("value") or {})["data"][0])
+                _ALTS[key] = list(AddressLookupTable.deserialize(data).addresses)
+            except Exception as exc:
+                log.info("lookup table %s not read: %s", key[:8], str(exc)[:120])
+
+    async def _sign_direct(self, tx_bytes: bytes, txo: Any) -> str:
+        """Sign a PumpPortal transaction; with Helius Sender on, with its tip added (sent through Sender then)."""
+        from solders.transaction import VersionedTransaction
+
+        if self.sender_url:
+            await self._load_alts(txo)
+            raw = with_tip(tx_bytes, self.kp, int(self.s.live_sender_tip_sol * LAMPORTS))
+            if raw is not None:
+                self._tipped.add(raw)
+                return raw
+        return base64.b64encode(bytes(VersionedTransaction(txo.message, [self.kp]))).decode()
+
+    def _warm_sender(self) -> None:
+        """Open (or keep open) the connection to Sender while the transaction is being built: no TLS handshake on
+        the send itself. Fire and forget."""
+        if not self.sender_url or time.monotonic() - getattr(self, "_warmed", 0.0) < 3.0:
+            return
+        self._warmed = time.monotonic()
+        ping = self.sender_url.split("/fast")[0] + "/ping"
+
+        async def go():
+            try:
+                await self.http.get(ping, timeout=5)
+            except Exception:
+                pass
+
+        asyncio.ensure_future(go())
+
+    async def _send_sender(self, raw: str) -> str | None:
+        """One send through Helius Sender; None when it refused (the plain RPC send still goes)."""
+        try:
+            r = await self.http.post(self.sender_url, timeout=5, json={
+                "jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
+                "params": [raw, {"encoding": "base64", "skipPreflight": True, "maxRetries": 0}]})
+            body = r.json()
+            if body.get("error"):
+                log.info("sender: %s", str(body["error"])[:160])
+                return None
+            return body.get("result")
+        except Exception as exc:
+            log.info("sender: %s", str(exc)[:120])
+            return None
+
     async def _send_tx(self, tx_bytes: bytes, last_valid: int | None = None,
                        signed_b64: str | None = None) -> tuple[str, bool]:
         """Sign an unsigned swap transaction and get it on-chain (see _send). `signed_b64`: already signed and
@@ -657,14 +798,23 @@ class JupiterExecutor:
         # transaction every ~2 s until it confirms or its blockhash expires: under load, nodes drop transactions
         # and a single send often never lands.
         t_send = time.monotonic()
+        via_sender = raw in self._tipped
+        self._tipped.discard(raw)
+        sender = asyncio.ensure_future(self._send_sender(raw)) if via_sender else None
         try:
             sig = await self._rpc("sendTransaction", [raw, {
                 "encoding": "base64", "skipPreflight": bool(signed_b64), "maxRetries": 0,
                 "preflightCommitment": "confirmed"}])
-        except SwapError as exc:
-            if _is_slippage(exc):
+        except Exception as exc:
+            if sender is not None and await sender:
+                # the RPC refused it but Sender took it: it may land, so the status poll decides, as for any send
+                sig = str(VersionedTransaction.from_bytes(base64.b64decode(raw)).signatures[0])
+            elif isinstance(exc, SwapError) and _is_slippage(exc):
                 raise SlippageError("price moved past the slippage limit (simulation)") from exc
-            raise
+            else:
+                raise
+        if sender is not None:
+            _took("sender", 1.0)                      # sent through Sender too (its answer is not waited for)
         t_sent = time.monotonic()
         _took("send", t_sent - t_send)                # includes the RPC's preflight simulation
         deadline = time.monotonic() + 90
@@ -693,6 +843,8 @@ class JupiterExecutor:
                                                              {"commitment": "processed"}])
                 if isinstance(valid, dict) and valid.get("value") is False:
                     raise Dropped(f"{sig[:12]}… expired without landing")
+            if via_sender:
+                await self._send_sender(raw)
             try:
                 await self._rpc("sendTransaction", [raw, {"encoding": "base64", "skipPreflight": True,
                                                           "maxRetries": 0}])
@@ -804,6 +956,7 @@ class JupiterExecutor:
         if time.monotonic() - _NO_DIRECT.get(mint, -1e9) < NO_DIRECT_SECONDS:
             raise DirectUnavailable("PumpPortal can't trade this token (seen earlier)")
         before = asyncio.ensure_future(asyncio.gather(self.token_balance(mint), self.sol_balance()))
+        self._warm_sender()
         try:
             t0 = time.monotonic()
             px = await self.sol_price()
@@ -834,7 +987,7 @@ class JupiterExecutor:
                     txo = VersionedTransaction.from_bytes(resp.content)
                 except Exception as exc:
                     raise DirectUnavailable(f"PumpPortal sent no transaction: {exc}") from exc
-                raw_b64 = base64.b64encode(bytes(VersionedTransaction(txo.message, [self.kp]))).decode()
+                raw_b64 = await self._sign_direct(resp.content, txo)
                 if tok0 is None:
                     t1 = time.monotonic()
                     tok0, sol0 = await before
@@ -987,6 +1140,7 @@ class JupiterExecutor:
         from solders.transaction import VersionedTransaction
 
         decimals = await self.decimals(mint)
+        self._warm_sender()
         try:
             resp = await self.http.post(PUMPPORTAL_TRADE, data={
                 "publicKey": self.pubkey, "action": "sell", "mint": mint,
@@ -1002,7 +1156,7 @@ class JupiterExecutor:
             txo = VersionedTransaction.from_bytes(resp.content)
         except Exception as exc:
             raise DirectUnavailable(f"PumpPortal sent no transaction: {exc}") from exc
-        raw = base64.b64encode(bytes(VersionedTransaction(txo.message, [self.kp]))).decode()
+        raw = await self._sign_direct(resp.content, txo)
         try:
             tok_after, lam_after, err = await self._simulate_buy(raw, mint)
         except Exception as exc:

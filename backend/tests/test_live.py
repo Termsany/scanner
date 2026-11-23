@@ -2394,3 +2394,96 @@ def test_token_balance_of_a_mint_the_rpc_has_not_seen_yet_is_zero():
         respx.post("https://rpc.test/").mock(return_value=httpx.Response(200, json={"error": {
             "code": -32602, "message": "Error getting token program id and mint: Invalid param: could not find mint"}}))
         assert asyncio.run(go()) == 0
+
+
+def test_sender_tip_is_added_keeping_every_instruction_and_lookup_table():
+    import base64 as b64
+
+    from solders.address_lookup_table_account import AddressLookupTableAccount
+    from solders.hash import Hash
+    from solders.instruction import AccountMeta, Instruction
+    from solders.keypair import Keypair
+    from solders.message import MessageV0
+    from solders.pubkey import Pubkey
+    from solders.transaction import VersionedTransaction
+
+    from app.live import SENDER_TIP_ACCOUNTS, sender_url, with_tip
+
+    kp = Keypair()
+    prog, w1, r1 = Pubkey.new_unique(), Pubkey.new_unique(), Pubkey.new_unique()
+    table = Pubkey.new_unique()
+    ix = Instruction(prog, b"\x01\x02", [AccountMeta(kp.pubkey(), True, True), AccountMeta(w1, False, True),
+                                         AccountMeta(r1, False, False)])
+    msg = MessageV0.try_compile(kp.pubkey(), [ix], [AddressLookupTableAccount(table, [w1, r1])], Hash.default())
+    unsigned = bytes(VersionedTransaction.populate(msg, [kp.sign_message(bytes([0]))]))
+    assert with_tip(unsigned, kp, 50_000, tables={}) is None                     # table not loaded: old way
+    raw = with_tip(unsigned, kp, 50_000, tables={str(table): [w1, r1]})
+    tx = VersionedTransaction.from_bytes(b64.b64decode(raw))
+    m = tx.message
+    assert len(m.instructions) == 2 and len(m.address_table_lookups) == 1
+    keys = list(m.account_keys)
+    lk = m.address_table_lookups[0]
+    loaded_w = [[w1, r1][i] for i in bytes(lk.writable_indexes)]
+    loaded_r = [[w1, r1][i] for i in bytes(lk.readonly_indexes)]
+    full = keys + loaded_w + loaded_r
+    first = [full[i] for i in bytes(m.instructions[0].accounts)]
+    assert first == [kp.pubkey(), w1, r1] and bytes(m.instructions[0].data) == b"\x01\x02"
+    assert w1 in loaded_w and r1 in loaded_r                                     # writability kept
+    tip = full[bytes(m.instructions[1].accounts)[1]]
+    assert str(tip) in SENDER_TIP_ACCOUNTS
+    assert tx.verify_with_results() == [True]                                     # signed by us
+
+    s = Settings(live_rpc_url="https://mainnet.helius-rpc.com/?api-key=K1")
+    assert sender_url(s) == "https://sender.helius-rpc.com/fast?swqos_only=true&api-key=K1"
+    assert sender_url(Settings(live_sender=False)) is None
+
+
+def test_a_tipped_transaction_goes_through_sender_and_the_rpc():
+    import asyncio
+    import base64 as b64
+
+    import httpx
+    import respx
+    from solders.hash import Hash
+    from solders.keypair import Keypair
+    from solders.message import MessageV0
+    from solders.system_program import TransferParams, transfer
+    from solders.transaction import VersionedTransaction
+
+    from app.live import JupiterExecutor
+
+    kp = Keypair()
+    msg = MessageV0.try_compile(kp.pubkey(), [transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=kp.pubkey(),
+                                                                      lamports=1))], [], Hash.default())
+    signed = b64.b64encode(bytes(VersionedTransaction(msg, [kp]))).decode()
+    sig = str(VersionedTransaction(msg, [kp]).signatures[0])
+    hits = {"sender": 0, "rpc_send": 0}
+
+    def rpc(request):
+        import json as _json
+        m = _json.loads(request.content)["method"]
+        if m == "sendTransaction":
+            hits["rpc_send"] += 1
+            return httpx.Response(200, json={"error": {"code": -32002, "message": "node is behind"}})
+        if m == "getSignatureStatuses":
+            return httpx.Response(200, json={"result": {"value": [{"confirmationStatus": "confirmed", "err": None}]}})
+        return httpx.Response(200, json={"result": None})
+
+    def sender(request):
+        hits["sender"] += 1
+        return httpx.Response(200, json={"result": sig})
+
+    async def go():
+        x = JupiterExecutor(Settings(live_rpc_url="https://rpc.test/?api-key=K"), live=True, private_key=str(kp))
+        x._tipped.add(signed)
+        try:
+            return await x._send_tx(bytes(VersionedTransaction(msg, [kp])), signed_b64=signed)
+        finally:
+            await x.close()
+
+    with respx.mock:
+        respx.post(url__startswith="https://rpc.test/").mock(side_effect=rpc)
+        respx.post(url__startswith="https://sender.helius-rpc.com/fast").mock(side_effect=sender)
+        got = asyncio.run(go())
+    # the RPC refused the send but Sender took it: it is followed like any send, and lands
+    assert got == (sig, True) and hits["sender"] == 1 and hits["rpc_send"] == 1
