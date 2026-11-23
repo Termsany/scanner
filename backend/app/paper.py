@@ -336,7 +336,8 @@ def _sane(p: PaperPosition, px: float) -> bool:
 async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings | None = None) -> int:
     s = s or get_settings()
     open_pos = (await session.execute(select(PaperPosition).where(
-        PaperPosition.status == "open", PaperPosition.strategy.notin_(SELF_PRICED)))).scalars().all()
+        PaperPosition.status == "open", PaperPosition.strategy.notin_(SELF_PRICED),
+        PaperPosition.strategy.notlike("cc%")))).scalars().all()        # cc<id>: the owner's curve strategies
     if not open_pos:            # (sniper / grad positions are priced by their own loops)
         return 0
     now = _now()
@@ -510,10 +511,26 @@ def _row(p: PaperPosition, s: Settings) -> dict[str, Any]:
         "pnl_usd": p.pnl_usd, "pnl_pct": p.pnl_pct,
         "remaining_pct": round((1.0 if p.remaining_frac is None else p.remaining_frac) * 100, 1),
     }
-    if p.status == "open" and p.last_price and not (p.strategy in SELF_PRICED and p.pnl_usd is not None):
+    self_priced = p.strategy in SELF_PRICED or p.strategy.startswith("cc")
+    if p.status == "open" and p.last_price and not (self_priced and p.pnl_usd is not None):
         d["pnl_usd"] = _value(p, p.last_price, s) - p.size_usd
         d["pnl_pct"] = d["pnl_usd"] / p.size_usd * 100
     return d
+
+
+async def custom_strategies(session: AsyncSession) -> list[Any]:
+    """The owner's own curve strategies (made on /paper), oldest first."""
+    from app.models import CurveCustom
+
+    return list((await session.execute(select(CurveCustom).order_by(CurveCustom.id))).scalars().all())
+
+
+def _custom_strategy(row: Any) -> Strategy:
+    from app.curve import _shown_tp, custom_rule
+
+    rule = custom_rule(row)
+    return Strategy(row.name, rule.title, tp_pct=_shown_tp(rule, 0.0), sl_pct=float(row.sl_pct or 0.0),
+                    max_hold_minutes=int(row.max_hold_min or 60))
 
 
 RESET_KEY = "paper_reset:"     # tracker_cursors key + strategy -> ISO time the owner reset its numbers
@@ -532,7 +549,7 @@ async def paper_resets(session: AsyncSession) -> dict[str, datetime]:
 
 async def reset_strategy(session: AsyncSession, strategy: str) -> datetime:
     """Start a strategy's numbers from zero: /paper counts only trades opened from now on. Nothing is deleted."""
-    if strategy not in STRATEGIES:
+    if strategy not in STRATEGIES and strategy not in {c.name for c in await custom_strategies(session)}:
         raise KeyError(strategy)
     now = _now()
     await _set_cursor_str(session, RESET_KEY + strategy, now.isoformat())
@@ -557,10 +574,12 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
         .order_by(PaperPosition.entry_time.desc())
     )).scalars().all()
     resets = await paper_resets(session)
+    customs = await custom_strategies(session)
+    custom_rows = {c.name: c for c in customs}
     rows = [r for r in rows if r.strategy not in resets or (utc(r.entry_time) or since) >= resets[r.strategy]]
 
     strategies = []
-    for strat in STRATEGIES.values():
+    for strat in [*STRATEGIES.values(), *(_custom_strategy(c) for c in customs)]:
         mine = [r for r in rows if r.strategy == strat.name]
         closed = [r for r in mine if r.status == "closed"]
         opened = [r for r in mine if r.status == "open"]
@@ -584,6 +603,8 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
             "worst_pct": round(min(r.pnl_pct or 0 for r in closed), 2) if closed else None,
             "exit_reasons": dict(reasons),
             "reset_at": resets[strat.name].isoformat() if strat.name in resets else None,
+            "custom": {"id": custom_rows[strat.name].id, "enabled": custom_rows[strat.name].enabled}
+                      if strat.name in custom_rows else None,
         })
     return {
         "hours": hours, "size_usd": s.paper_size_usd, "slippage_pct": s.paper_slippage_pct,

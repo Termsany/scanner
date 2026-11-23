@@ -434,6 +434,25 @@ class WalletTrade(Base):
     telegram_sent: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class CurveCustom(Base):
+    """A curve paper strategy the owner made on /paper: buy at `level` % sold, sell by its own exits."""
+
+    __tablename__ = "curve_custom"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(40), default="")          # cc<id>: the paper strategy name
+    level: Mapped[float] = mapped_column(Float)                        # buy the first time the curve is this % sold
+    exit_at: Mapped[float | None] = mapped_column(Float, nullable=True)   # sell all once it is this % sold
+    tp_pct: Mapped[float | None] = mapped_column(Float, nullable=True)    # sell all once the price is up this %
+    half_at: Mapped[float | None] = mapped_column(Float, nullable=True)   # sell half at +this %, then stop at entry
+    sl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)    # stop loss (negative %), None = none
+    skip_drop: Mapped[float | None] = mapped_column(Float, nullable=True)  # skip the buy if it fell this % first
+    size_usd: Mapped[float] = mapped_column(Float, default=10.0)
+    max_hold_min: Mapped[float] = mapped_column(Float, default=60.0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class TrackerCursor(Base):
     """Where each tracker stream stopped (Solana: last signature per wallet; EVM: last block per chain)."""
 

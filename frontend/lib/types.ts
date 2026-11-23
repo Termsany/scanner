@@ -346,6 +346,36 @@ export interface PaperStrategy {
   worst_pct: number | null;
   exit_reasons: Record<string, number>;
   reset_at?: string | null;       // the owner reset its numbers: only trades opened since count
+  custom?: { id: number; enabled: boolean } | null;   // one of the owner's own curve strategies
+}
+
+/** One of the owner's own curve paper strategies (built on /paper). */
+export interface CurveRuleOut {
+  id: number;
+  name: string;
+  title: string;
+  enabled: boolean;
+  level: number;
+  exit_at: number | null;
+  tp_pct: number | null;
+  half_at: number | null;
+  sl_pct: number | null;
+  skip_drop: number | null;
+  size_usd: number;
+  max_hold_min: number;
+  curve_gain_pct: number | null;
+  created_at: string | null;
+}
+
+export interface CurveRuleIn {
+  level: number;
+  exit_at: number | null;
+  tp_pct: number | null;
+  half_at: number | null;
+  sl_pct: number | null;
+  skip_drop: number | null;
+  size_usd: number;
+  max_hold_min: number;
 }
 
 export interface PaperPositionOut {

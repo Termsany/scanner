@@ -323,3 +323,24 @@ def test_reset_starts_a_strategy_from_zero_and_keeps_its_trades():
     assert after["signal_80"]["realized_usd"] == 0 and after["signal_80"]["reset_at"]
     assert after["signal_85"]["closed"] == 1 and after["signal_85"]["reset_at"] is None   # others untouched
     assert kept == 2                                                                       # nothing deleted
+
+
+def test_custom_curve_strategies_show_on_the_paper_page_and_can_be_reset():
+    from app.models import CurveCustom
+    from app.paper import reset_strategy
+
+    s = _settings()
+
+    async def body(sess):
+        row = CurveCustom(level=30.0, exit_at=70.0, sl_pct=-30.0, size_usd=10.0, max_hold_min=60.0)
+        sess.add(row)
+        await sess.flush()
+        row.name = f"cc{row.id}"
+        await sess.commit()
+        got = {x["name"]: x for x in (await paper_summary(sess, settings=s))["strategies"]}
+        await reset_strategy(sess, row.name)                       # custom names can be reset too
+        return got[row.name]
+
+    st = _db(body)
+    assert st["custom"]["enabled"] and "buy at 30% sold" in st["title"] and "sell all at 70% sold" in st["title"]
+    assert st["sl_pct"] == -30.0 and st["tp_pct"] > 150                                  # ~+160% from 30% to 70%

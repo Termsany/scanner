@@ -30,6 +30,8 @@ import type {
   Holdings,
   PriceOrderIn,
   PriceOrderOut,
+  CurveRuleIn,
+  CurveRuleOut,
 } from "./types";
 
 // Empty string = same origin (production behind nginx: /api and /ws are proxied to the backend).
@@ -146,6 +148,22 @@ export const api = {
     request<{ peaks: Record<string, { price: number; at: string }> }>("/api/live/peaks", {
       method: "POST", ...adm(password), body: JSON.stringify(items), signal,
     }),
+
+  curveRules: (password: string) =>
+    request<{ rules: CurveRuleOut[]; max_on: number }>("/api/live/curve-rules", { ...adm(password) }),
+
+  curveRuleCreate: (password: string, body: CurveRuleIn) =>
+    request<{ ok: boolean; rule: CurveRuleOut }>("/api/live/curve-rules", {
+      method: "POST", ...adm(password), body: JSON.stringify(body),
+    }),
+
+  curveRuleSwitch: (password: string, id: number, enabled: boolean) =>
+    request<{ ok: boolean; rule: CurveRuleOut }>(`/api/live/curve-rules/${id}`, {
+      method: "PATCH", ...adm(password), body: JSON.stringify({ enabled }),
+    }),
+
+  curveRuleDelete: (password: string, id: number) =>
+    request<{ ok: boolean }>(`/api/live/curve-rules/${id}`, { method: "DELETE", ...adm(password) }),
 
   paperReset: (password: string, strategy: string) =>
     request<{ ok: boolean; reset_at: string }>(`/api/live/paper/${encodeURIComponent(strategy)}/reset`, {

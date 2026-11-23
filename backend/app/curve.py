@@ -59,8 +59,14 @@ class CurveRule:
                         # entry, rest at graduation | trail: like half, the rest rides after graduation (trailing stop)
     half_at: float = 100.0          # half / trail: sell half once the price is up this % (100 = 2x)
     skip_drop: float | None = None  # don't buy if the price fell more than this % between our decision and the fill
-    exit_at: float | None = None    # range: sell everything once the curve is this % sold
-    sl: float | None = None         # range: stop loss, % from our entry (None = none)
+    exit_at: float | None = None    # range / custom: sell everything once the curve is this % sold
+    sl: float | None = None         # range / custom: stop loss, % from our entry (None = none)
+    tp: float | None = None         # custom: sell everything once the price is up this %
+    half: float | None = None       # custom: sell half at +this %, then a stop at the entry
+    size: float | None = None       # custom: USD per trade
+    max_hold_s: float | None = None  # custom: sell whatever is left after this long
+    enabled: bool = True            # custom: off = no new buys (open ones are still managed)
+    title: str = ""
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -80,6 +86,45 @@ CURVE_RULES: dict[str, CurveRule] = {
 }
 CURVE_STRATEGIES: dict[str, float] = {k: r.level for k, r in CURVE_RULES.items()}
 RANGE_LATE_PTS = 10.0   # range: buy only while the curve is at most this many points past the entry level
+CUSTOM_PREFIX = "cc"    # names of the owner's own curve strategies (/paper builder): cc<id>
+
+
+def is_custom(name: str) -> bool:
+    return name.startswith(CUSTOM_PREFIX) and name[len(CUSTOM_PREFIX):].isdigit()
+
+
+def custom_rule(row: Any) -> CurveRule:
+    """A curve_custom row -> the rule the engine runs."""
+    return CurveRule(float(row.level), "custom", half_at=float(row.half_at or 0) or 100.0,
+                     skip_drop=row.skip_drop, exit_at=row.exit_at, sl=row.sl_pct, tp=row.tp_pct,
+                     half=row.half_at, size=float(row.size_usd or 10.0), max_hold_s=float(row.max_hold_min or 60) * 60,
+                     enabled=bool(row.enabled), title=custom_title(row))
+
+
+def custom_title(row: Any) -> str:
+    parts = [f"${float(row.size_usd or 10):g}, buy at {float(row.level):g}% sold"]
+    if row.exit_at:
+        parts.append(f"sell all at {float(row.exit_at):g}% sold")
+    if row.tp_pct:
+        parts.append(f"sell all at +{float(row.tp_pct):g}%")
+    if row.half_at:
+        parts.append(f"half at +{float(row.half_at):g}% then stop at entry")
+    parts.append(f"stop {float(row.sl_pct):g}%" if row.sl_pct else "no stop")
+    if row.skip_drop:
+        parts.append(f"skip if it fell {float(row.skip_drop):g}% first")
+    parts.append(f"graduation sells, {float(row.max_hold_min or 60):g} min max")
+    return ", ".join(parts)
+
+
+def _shown_tp(rule: CurveRule, default_tp: float) -> float:
+    """The take-profit % /paper shows for a rule."""
+    if rule.mode == "grad":
+        return default_tp
+    if rule.mode == "custom":
+        return rule.tp or rule.half or (_range_gain(rule) if rule.exit_at else 0.0)
+    if rule.mode == "range":
+        return _range_gain(rule)
+    return rule.half_at
 
 
 def _range_gain(rule: CurveRule) -> float:
@@ -149,6 +194,18 @@ class PaperCurve:
         self.feed = self._pick_feed()
         self.pp_subbed: set[str] = set()
         self.pp_events = 0
+        self.rules: dict[str, CurveRule] = dict(CURVE_RULES)
+
+    def set_custom(self, rules: dict[str, CurveRule]) -> None:
+        """The owner's strategies from the database. One that was deleted keeps running for its open trades,
+        switched off (no new buys), until they close."""
+        held = {s for w in self.watch.values() for s in w.held}
+        merged = dict(CURVE_RULES)
+        merged.update(rules)
+        for name, rule in self.rules.items():
+            if is_custom(name) and name not in rules and name in held:
+                merged[name] = CurveRule(**{**rule.__dict__, "enabled": False})
+        self.rules = merged
 
     def _pick_feed(self) -> str | None:
         """helius / hybrid / pumpportal, or None when what CURVE_FEED needs is missing."""
@@ -201,11 +258,13 @@ class PaperCurve:
         if w.price and not w.price / 20 <= st["price"] <= w.price * 20:
             return                                    # a 20x jump in one update is a bad reading
         w.price, w.progress = st["price"], st["progress"]
-        for strat, level in CURVE_STRATEGIES.items():
+        for strat, rule in self.rules.items():
+            level = rule.level
             if strat not in w.decided and w.progress >= level:
                 w.decided.add(strat)
-                rule = CURVE_RULES[strat]
-                if rule.mode == "range" and w.progress > level + RANGE_LATE_PTS:
+                if not rule.enabled:
+                    continue
+                if rule.mode in ("range", "custom") and w.progress > level + RANGE_LATE_PTS:
                     continue                          # first seen far past its entry level: not this trade
                 w.pending[strat] = (now + self.s.curve_latency_s, w.price,
                                     f"curve {w.progress:.0f}% at {now - w.created:.0f}s")
@@ -243,7 +302,7 @@ class PaperCurve:
             stalled = ((age > self.s.curve_prune1_s and w.progress < self.s.curve_prune1_pct)
                        or (age > self.s.curve_prune2_s and w.progress < self.s.curve_prune2_pct)
                        or age > self.s.curve_max_watch_s)
-            done = w.graduated or len(w.decided) == len(CURVE_STRATEGIES)
+            done = w.graduated or all(k in w.decided for k, r in self.rules.items() if r.enabled)
             if stalled or done:
                 drop.append(mint)
                 del self.watch[mint]
@@ -263,8 +322,8 @@ class PaperCurve:
             del w.pending[strat]
             if strat in w.held or self._open_count(strat) >= self.s.curve_max_open:
                 continue
-            rule = CURVE_RULES[strat]
-            if rule.mode == "range" and rule.exit_at is not None and w.progress >= rule.exit_at:
+            rule = self.rules[strat]
+            if rule.mode in ("range", "custom") and rule.exit_at is not None and w.progress >= rule.exit_at:
                 continue                                  # already at the exit level: nothing left to make
             drop = rule.skip_drop
             if drop is not None and decision_px and w.price < decision_px * (1 - drop / 100):
@@ -278,7 +337,10 @@ class PaperCurve:
             self.opened.append(pos)
 
     def _size(self, strat: str) -> float:
-        return self.s.curve_half_size_usd if CURVE_RULES[strat].mode in ("half", "trail", "range") else self.s.curve_size_usd
+        rule = self.rules[strat]
+        if rule.size:
+            return rule.size
+        return self.s.curve_half_size_usd if rule.mode in ("half", "trail", "range") else self.s.curve_size_usd
 
     @staticmethod
     def worth(pos: dict[str, Any], price: float, cost: float) -> float:
@@ -299,7 +361,10 @@ class PaperCurve:
             pct = (w.price / pos["market"] - 1) * 100
             pos["peak"], pos["trough"] = max(pos["peak"], pct), min(pos["trough"], pct)
             cost = self._cost()
-            mode = CURVE_RULES[strat].mode
+            rule = self.rules.get(strat)
+            if rule is None:
+                continue
+            mode = rule.mode
             reason = None
             if mode == "grad":
                 if w.graduated:
@@ -313,8 +378,28 @@ class PaperCurve:
                 if reason:
                     self._close(w, strat, pos, reason, cost)
                 continue
+            if mode == "custom":
+                sale_cost = cost + (self.s.curve_grad_exit_extra_pct / 100 if w.graduated else 0)
+                if rule.half and not pos["half"] and pct >= rule.half:
+                    pos["proceeds"] += pos["size"] * 0.5 / pos["fill"] * w.price * (1 - sale_cost)
+                    pos["rem"], pos["half"] = 0.5, True
+                    pos["why"] = (pos.get("why") or "")[:120] + f" | half sold at +{rule.half:g}%"
+                if w.graduated:
+                    reason, cost = "graduated", sale_cost
+                elif rule.exit_at is not None and w.progress >= rule.exit_at:
+                    reason = "curve_target"
+                elif rule.tp is not None and pct >= rule.tp:
+                    reason = "take_profit"
+                elif pos["half"] and w.price <= pos["market"]:
+                    reason = "breakeven_stop"
+                elif not pos["half"] and rule.sl is not None and pct <= rule.sl:
+                    reason = "stop_loss"
+                elif now - pos["at"] >= (rule.max_hold_s or self.s.curve_max_hold_s):
+                    reason = "time"
+                if reason:
+                    self._close(w, strat, pos, reason, cost)
+                continue
             if mode == "range":
-                rule = CURVE_RULES[strat]
                 if w.graduated:
                     reason, cost = "graduated", cost + self.s.curve_grad_exit_extra_pct / 100
                 elif rule.exit_at is not None and w.progress >= rule.exit_at:
@@ -328,7 +413,7 @@ class PaperCurve:
                 continue
             # half / trail: no stop loss; at +half_at sell half, then a stop at the entry
             sale_cost = cost + (self.s.curve_grad_exit_extra_pct / 100 if w.graduated and pos["gpeak"] is None else 0)
-            half_at = CURVE_RULES[strat].half_at
+            half_at = rule.half_at
             if not pos["half"] and pct >= half_at:
                 pos["proceeds"] += pos["size"] * 0.5 / pos["fill"] * w.price * (1 - sale_cost)
                 pos["rem"], pos["half"] = 0.5, True
@@ -371,16 +456,15 @@ class PaperCurve:
         rows: list[tuple[dict[str, Any], PaperPosition]] = []
         opened, self.opened = self.opened, []          # buys that land while this awaits wait for the next flush
         for pos in opened:
-            grad = CURVE_RULES[pos["strategy"]].mode == "grad"
-            hold_s = self.s.curve_max_hold_s if CURVE_RULES[pos["strategy"]].mode != "trail" else self.s.curve_trail_max_hold_s
+            rule = self.rules[pos["strategy"]]
+            grad = rule.mode == "grad"
+            hold_s = (rule.max_hold_s or self.s.curve_max_hold_s) if rule.mode != "trail" else self.s.curve_trail_max_hold_s
             row = PaperPosition(strategy=pos["strategy"], chain=Chain.solana, token_address=pos["mint"],
                                 symbol=pos["symbol"], trigger=pos["why"][:160], status="open",
                                 size_usd=pos["size"], entry_time=pos["wall"],
                                 entry_price=self._usd(pos["market"]), fill_price=self._usd(pos["fill"]),
-                                tp_pct=(self.s.curve_tp_pct if grad else _range_gain(CURVE_RULES[pos["strategy"]])
-                                        if CURVE_RULES[pos["strategy"]].mode == "range"
-                                        else CURVE_RULES[pos["strategy"]].half_at),
-                                sl_pct=self.s.curve_sl_pct if grad else (CURVE_RULES[pos["strategy"]].sl or 0.0),
+                                tp_pct=_shown_tp(rule, self.s.curve_tp_pct),
+                                sl_pct=self.s.curve_sl_pct if grad else (rule.sl or 0.0),
                                 max_hold_minutes=max(int(hold_s // 60), 1),
                                 remaining_frac=1.0, proceeds_usd=0.0)
             session.add(row)
@@ -445,7 +529,8 @@ class PaperCurve:
 
         async with SessionLocal() as session:          # a restart left these with no feed: close them flat
             stale = (await session.execute(select(PaperPosition).where(
-                PaperPosition.strategy.in_(tuple(CURVE_STRATEGIES)), PaperPosition.status == "open"))).scalars().all()
+                PaperPosition.strategy.in_(tuple(CURVE_STRATEGIES)) | PaperPosition.strategy.like(CUSTOM_PREFIX + "%"),
+                PaperPosition.status == "open"))).scalars().all()
             for p in stale:
                 p.status, p.exit_reason, p.exit_time = "closed", "restart", _now()
                 p.exit_price = p.last_price or p.entry_price
@@ -546,10 +631,14 @@ class PaperCurve:
 
     async def _housekeep(self, pp, hl, SessionLocal) -> None:
         last_flush = last_px = last_cost = last_ride = time.monotonic()
+        last_rules = 0.0
         events_at = self.pp_events
         while True:
             await asyncio.sleep(1.0)
             now = time.monotonic()
+            if now - last_rules >= 30.0:
+                last_rules = now
+                await self._load_custom(SessionLocal)
             dropped = self.tick(now)
             for m in self.pp_sync():
                 await pp.send(m)
@@ -574,6 +663,16 @@ class PaperCurve:
                 # 0.01 SOL per 10,000 events; 144 ten-minute windows a day
                 log.info("curve (paper): %d PumpPortal events in 10 min, %d tokens streamed (~%.3f SOL/day)",
                          n, len(self.pp_subbed), n * 144 * 0.01 / 10_000)
+
+    async def _load_custom(self, SessionLocal) -> None:
+        from app.models import CurveCustom
+
+        try:
+            async with SessionLocal() as session:
+                rows = (await session.execute(select(CurveCustom))).scalars().all()
+            self.set_custom({r.name: custom_rule(r) for r in rows if r.name})
+        except Exception:
+            log.warning("curve (paper): could not load custom strategies", exc_info=True)
 
     async def _price_riding(self, now: float) -> None:
         """Graduated coins a trail position still holds: Jupiter's price (USD -> SOL per token)."""

@@ -347,3 +347,51 @@ def test_30_to_70_skips_a_token_first_seen_well_past_30():
     c.on_curve("M", acct(45), 10.0)                              # first reading already 45%
     c.on_curve("M", acct(46), 12.5)
     assert "curve_30_70" not in c.watch["M"].held and not c.watch["M"].pending.get("curve_30_70")
+
+
+def _custom(**kw):
+    from app.curve import CurveRule
+
+    base = dict(level=30.0, mode="custom", size=10.0, max_hold_s=3600.0)
+    base.update(kw)
+    return CurveRule(**base)
+
+
+def test_custom_rule_buys_at_its_level_and_sells_at_its_curve_exit():
+    c = PaperCurve(S())
+    c.set_custom({"cc1": _custom(exit_at=60.0)})
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(30), 10.0)
+    c.on_curve("M", acct(31), 12.5)
+    assert c.watch["M"].held["cc1"]["size"] == 10.0
+    c.on_curve("M", acct(61), 20.0)
+    out = {p["strategy"]: p for p in c.closed}
+    assert out["cc1"]["reason"] == "curve_target" and out["cc1"]["pnl"] > 0
+
+
+def test_custom_rule_take_profit_half_and_stop():
+    c = PaperCurve(S())
+    c.set_custom({"cc1": _custom(tp=20.0), "cc2": _custom(half=20.0), "cc3": _custom(sl=-30.0)})
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(30), 10.0)
+    c.on_curve("M", acct(30), 12.5)
+    c.on_curve("M", acct(_up_progress(30, 20)), 20.0)            # +20%: cc1 all out, cc2 half out
+    reasons = {p["strategy"]: p["reason"] for p in c.closed}
+    assert reasons.get("cc1") == "take_profit" and c.watch["M"].held["cc2"]["half"]
+    c.on_curve("M", acct(30), 30.0)                              # back to the entry: cc2's rest out
+    c.on_curve("M", acct(5), 40.0)                               # -35%: cc3 stops out
+    reasons = {p["strategy"]: p["reason"] for p in c.closed}
+    assert reasons.get("cc2") == "breakeven_stop" and reasons.get("cc3") == "stop_loss"
+
+
+def test_custom_rule_switched_off_buys_nothing_and_a_deleted_one_finishes_its_trades():
+    c = PaperCurve(S())
+    c.set_custom({"cc1": _custom(exit_at=60.0), "cc2": _custom(exit_at=60.0, enabled=False)})
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(30), 10.0)
+    c.on_curve("M", acct(31), 12.5)
+    assert "cc1" in c.watch["M"].held and "cc2" not in c.watch["M"].held
+    c.set_custom({})                                             # cc1 deleted while its trade is open
+    assert "cc1" in c.rules and not c.rules["cc1"].enabled
+    c.on_curve("M", acct(61), 20.0)
+    assert any(p["strategy"] == "cc1" and p["reason"] == "curve_target" for p in c.closed)

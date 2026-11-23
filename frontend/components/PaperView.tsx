@@ -1,14 +1,14 @@
 "use client";
 
-import { Activity, FlaskConical, History, Info, RefreshCw, RotateCcw } from "lucide-react";
+import { Activity, FlaskConical, History, Info, Plus, RefreshCw, RotateCcw, Trash2, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { adminCredential, adminWho } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
-import { Badge, button, Empty, PageHeader, pageMain, Panel, SectionTabs, Segmented } from "@/components/ui";
+import { Badge, button, Empty, PageHeader, pageMain, Panel, SectionTabs, Segmented, Toggle } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { ago, pct, pctClass, price } from "@/lib/format";
-import type { PaperPositionOut, PaperStrategy, PaperSummary } from "@/lib/types";
+import type { CurveRuleIn, CurveRuleOut, PaperPositionOut, PaperStrategy, PaperSummary } from "@/lib/types";
 
 import { ChainPill } from "./Badges";
 
@@ -154,6 +154,8 @@ export function PaperView() {
         </div>
       ) : (
         <>
+          {admin && <CurveBuilder onChange={() => load(hours)} />}
+
           {/* strategies: click one to see only its trades */}
           <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {data.strategies.map((s) => (
@@ -227,7 +229,10 @@ function StrategyCard({ s, on, onClick, onReset }: {
         on ? "border-mint/60 shadow-[0_0_0_1px_rgb(43_228_167/0.35)]" : "hover:border-line-strong"}`}>
       <span className={`absolute inset-x-0 top-0 h-[2px] ${total >= 0 ? "bg-gradient-to-r from-mint/0 via-mint/70 to-mint/0" : "bg-gradient-to-r from-bear/0 via-bear/70 to-bear/0"}`} />
       <div className="flex items-center justify-between gap-2">
-        <span className="num text-[11px] font-semibold tracking-[0.14em] text-muted uppercase">{s.name}</span>
+        <span className="flex items-center gap-1.5">
+          <span className="num text-[11px] font-semibold tracking-[0.14em] text-muted uppercase">{s.name}</span>
+          {s.custom && <Badge tone={s.custom.enabled ? "sky" : "muted"}>{s.custom.enabled ? "yours" : "yours · off"}</Badge>}
+        </span>
         <span className="flex items-center gap-1.5">
           {on && <Badge tone="mint">filter</Badge>}
           {onReset && (
@@ -367,5 +372,180 @@ function HistoryPanel({ rows, now }: { rows: PaperPositionOut[]; now: number }) 
         </div>
       )}
     </Panel>
+  );
+}
+
+/** Price gain (%) from one curve level to another on a classic pump.fun curve (price ~ 1 / virtual tokens^2). */
+function curveGain(from: number, to: number): number {
+  const v = (p: number) => 1_073_000_000 - 793_100_000 * p / 100;
+  return ((v(from) / v(to)) ** 2 - 1) * 100;
+}
+
+type Draft = {
+  level: string; exitOn: boolean; exitAt: string; tpOn: boolean; tp: string; halfOn: boolean; half: string;
+  slOn: boolean; sl: string; skipOn: boolean; skip: string; size: string; hold: string;
+};
+const START: Draft = {
+  level: "30", exitOn: true, exitAt: "70", tpOn: false, tp: "50", halfOn: false, half: "40",
+  slOn: true, sl: "30", skipOn: true, skip: "10", size: "10", hold: "60",
+};
+
+/** Admin: build your own curve paper strategies; the curve bot runs them within 30 s. */
+function CurveBuilder({ onChange }: { onChange: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [rules, setRules] = useState<CurveRuleOut[]>([]);
+  const [maxOn, setMaxOn] = useState(12);
+  const [d, setD] = useState<Draft>(START);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const reload = useCallback(async () => {
+    try {
+      const r = await api.curveRules(adminCredential());
+      setRules(r.rules);
+      setMaxOn(r.max_on);
+    } catch {
+      /* the list stays as it was */
+    }
+  }, []);
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  const n = (v: string) => Number(v.replace(",", "."));
+  const level = n(d.level), exitAt = n(d.exitAt);
+  const gain = d.exitOn && level > 0 && exitAt > level && exitAt < 100 ? curveGain(level, exitAt) : null;
+  const toGrad = level > 0 && level < 100 ? curveGain(level, 100) : null;
+  const set = (p: Partial<Draft>) => setD({ ...d, ...p });
+
+  async function create() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const body: CurveRuleIn = {
+        level, exit_at: d.exitOn ? exitAt : null, tp_pct: d.tpOn ? n(d.tp) : null, half_at: d.halfOn ? n(d.half) : null,
+        sl_pct: d.slOn ? -Math.abs(n(d.sl)) : null, skip_drop: d.skipOn ? n(d.skip) : null,
+        size_usd: n(d.size), max_hold_min: n(d.hold),
+      };
+      if (Object.values(body).some((v) => typeof v === "number" && !Number.isFinite(v))) {
+        setMsg({ ok: false, text: "Numbers only" });
+        return;
+      }
+      const r = await api.curveRuleCreate(adminCredential(), body);
+      setMsg({ ok: true, text: `${r.rule.name} is on: it starts buying within 30 s and shows below.` });
+      await reload();
+      onChange();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof ApiError ? e.message : "Could not save it" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function act(run: () => Promise<unknown>) {
+    try {
+      await run();
+      await reload();
+      onChange();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof ApiError ? e.message : "Could not change it" });
+    }
+  }
+
+  const num = "num w-20 shrink-0 rounded-lg border border-line bg-carbon px-2 py-1 text-center text-sm text-ink outline-none transition focus:border-mint/60 disabled:opacity-40";
+  const row = "flex flex-wrap items-center gap-2";
+  const on = rules.filter((r) => r.enabled).length;
+
+  return (
+    <section className="card mb-6 overflow-hidden">
+      <button type="button" onClick={() => setOpen(!open)}
+        className="flex w-full items-center gap-2 px-5 py-4 text-left hover:bg-white/[0.02]">
+        <Wand2 className="size-4 text-mint" />
+        <span className="text-[15px] font-semibold">Your curve strategies</span>
+        <span className="text-xs text-muted">{rules.length ? `${on} on · ${rules.length} made` : "build your own pump.fun curve test"}</span>
+        <span className="ms-auto text-xs text-muted">{open ? "Hide" : "Open"}</span>
+      </button>
+      {open && (
+        <div className="grid gap-6 border-t border-line p-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <div className="flex flex-col gap-3 text-sm">
+            <div className={row}>
+              Buy when the curve is <input className={num} inputMode="decimal" value={d.level} onChange={(e) => set({ level: e.target.value })} /> % sold
+            </div>
+            <div className="text-[11px] tracking-[0.1em] text-muted uppercase">Sell when (the first one that happens)</div>
+            <label className={row}>
+              <Toggle on={d.exitOn} label="Sell at a curve level" onClick={() => set({ exitOn: !d.exitOn })} />
+              the curve is <input className={num} inputMode="decimal" value={d.exitAt} disabled={!d.exitOn}
+                onChange={(e) => set({ exitAt: e.target.value })} /> % sold
+              {gain != null && <span className="text-xs text-mint">≈ +{gain.toFixed(0)}% price if it gets there</span>}
+            </label>
+            <label className={row}>
+              <Toggle on={d.tpOn} label="Take profit" onClick={() => set({ tpOn: !d.tpOn })} />
+              the price is up +<input className={num} inputMode="decimal" value={d.tp} disabled={!d.tpOn}
+                onChange={(e) => set({ tp: e.target.value })} /> %
+            </label>
+            <label className={row}>
+              <Toggle on={d.halfOn} label="Sell half early" onClick={() => set({ halfOn: !d.halfOn })} />
+              sell half at +<input className={num} inputMode="decimal" value={d.half} disabled={!d.halfOn}
+                onChange={(e) => set({ half: e.target.value })} /> %, then a stop at the entry
+            </label>
+            <div className="text-xs text-faint">
+              Graduation always sells what is left{toGrad != null ? ` (≈ +${toGrad.toFixed(0)}% from your buy level)` : ""}.
+            </div>
+            <div className="text-[11px] tracking-[0.1em] text-muted uppercase">Protection</div>
+            <label className={row}>
+              <Toggle on={d.slOn} label="Stop loss" onClick={() => set({ slOn: !d.slOn })} />
+              stop loss at −<input className={num} inputMode="decimal" value={d.sl} disabled={!d.slOn}
+                onChange={(e) => set({ sl: e.target.value })} /> %
+              {!d.slOn && <span className="text-xs text-gold">no stop: it rides until a sell rule, graduation or the time limit</span>}
+            </label>
+            <label className={row}>
+              <Toggle on={d.skipOn} label="Skip falling buys" onClick={() => set({ skipOn: !d.skipOn })} />
+              skip the buy if the price fell <input className={num} inputMode="decimal" value={d.skip} disabled={!d.skipOn}
+                onChange={(e) => set({ skip: e.target.value })} /> % before it landed
+            </label>
+            <div className={row}>
+              $<input className={num} inputMode="decimal" value={d.size} onChange={(e) => set({ size: e.target.value })} /> per trade ·
+              sell after <input className={num} inputMode="decimal" value={d.hold} onChange={(e) => set({ hold: e.target.value })} /> min at most
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" disabled={busy} onClick={create} className={button("primary")}>
+                <Plus className="size-4" /> Add strategy
+              </button>
+              {msg && <span className={`text-xs ${msg.ok ? "text-mint" : "text-bear"}`}>{msg.text}</span>}
+            </div>
+          </div>
+          <div className="flex flex-col gap-3">
+            <div className="rounded-xl border border-line bg-carbon/40 p-4 text-xs leading-relaxed text-muted">
+              <div className="mb-1 font-semibold text-ink">Tips from the first curve tests</div>
+              <ul className="list-disc space-y-1 ps-4">
+                <li>Buys whose price fell 10%+ in the 2 s before the fill lost 8 of 8: keep the skip filter on.</li>
+                <li>A −25% stop filled at about −41% on average (prices gap down): a stop protects less than it looks.</li>
+                <li>Most trades were up 20–40% before they turned: selling half early often beats waiting for graduation.</li>
+                <li>Compare one change at a time (same buy level, stop on vs off) and wait for 20–30 trades.</li>
+              </ul>
+            </div>
+            <div className="text-[11px] tracking-[0.1em] text-muted uppercase">Yours ({on}/{maxOn} on)</div>
+            {rules.length === 0 ? <p className="text-xs text-faint">None yet.</p> : (
+              <ul className="flex flex-col divide-y divide-line rounded-xl border border-line">
+                {rules.map((r) => (
+                  <li key={r.id} className="flex items-start gap-3 px-3 py-2.5 text-xs">
+                    <Toggle on={r.enabled} label={`${r.name} on`} onClick={() => act(() => api.curveRuleSwitch(adminCredential(), r.id, !r.enabled))} />
+                    <div className="min-w-0 flex-1">
+                      <div className="num font-semibold text-ink">{r.name}</div>
+                      <div className="text-muted">{r.title}</div>
+                    </div>
+                    <button type="button" aria-label={`Delete ${r.name}`} className="text-muted hover:text-bear"
+                      onClick={() => confirm(`Delete ${r.name}? Its paper trades stay saved but it leaves this page.`)
+                        && act(() => api.curveRuleDelete(adminCredential(), r.id))}>
+                      <Trash2 className="size-4" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

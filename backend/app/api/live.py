@@ -466,6 +466,110 @@ async def paper_reset(strategy: str, session: Session, _: Auth) -> dict[str, Any
     return {"ok": True, "strategy": strategy, "reset_at": at.isoformat()}
 
 
+MAX_CUSTOM_CURVE = 12        # the owner's curve strategies switched on at once
+
+
+class CurveRuleIn(BaseModel):
+    level: float                       # buy the first time the curve is this % sold
+    exit_at: float | None = None       # sell all once the curve is this % sold
+    tp_pct: float | None = None        # sell all once the price is up this %
+    half_at: float | None = None       # sell half at +this %, then a stop at the entry
+    sl_pct: float | None = None        # stop loss (read as down: 30 or -30 = -30%)
+    skip_drop: float | None = None     # skip the buy if the price fell this % before it landed
+    size_usd: float = 10.0
+    max_hold_min: float = 60.0
+
+
+def _curve_rule_out(r: Any) -> dict[str, Any]:
+    from app.curve import _range_gain, custom_rule
+
+    rule = custom_rule(r)
+    return {"id": r.id, "name": r.name, "title": rule.title, "enabled": r.enabled, "level": r.level,
+            "exit_at": r.exit_at, "tp_pct": r.tp_pct, "half_at": r.half_at, "sl_pct": r.sl_pct,
+            "skip_drop": r.skip_drop, "size_usd": r.size_usd, "max_hold_min": r.max_hold_min,
+            "curve_gain_pct": _range_gain(rule) if r.exit_at else None,
+            "created_at": utc(r.created_at).isoformat() if r.created_at else None}
+
+
+@router.get("/curve-rules")
+async def curve_rules(session: Session, _: Auth) -> dict[str, Any]:
+    from app.paper import custom_strategies
+
+    return {"rules": [_curve_rule_out(r) for r in await custom_strategies(session)], "max_on": MAX_CUSTOM_CURVE}
+
+
+@router.post("/curve-rules")
+async def curve_rule_create(body: CurveRuleIn, session: Session, _: Auth) -> dict[str, Any]:
+    """Admin: a new curve paper strategy. The curve bot picks it up within 30 s; it shows on /paper as cc<id>."""
+    from sqlalchemy import func, select
+
+    from app.models import CurveCustom
+
+    if not 1 <= body.level <= 95:
+        raise HTTPException(400, "Buy level must be between 1% and 95% sold")
+    if body.exit_at is not None and not body.level < body.exit_at <= 100:
+        raise HTTPException(400, "Sell level must be above the buy level and at most 100%")
+    for v, what in ((body.tp_pct, "Take profit"), (body.half_at, "Half at")):
+        if v is not None and not 1 <= v <= 10_000:
+            raise HTTPException(400, f"{what} must be between +1% and +10000%")
+    sl = -abs(body.sl_pct) if body.sl_pct else None
+    if sl is not None and not -95 <= sl <= -1:
+        raise HTTPException(400, "Stop loss must be between -1% and -95%")
+    if body.skip_drop is not None and not 1 <= body.skip_drop <= 90:
+        raise HTTPException(400, "The skip filter must be between 1% and 90%")
+    if not 1 <= body.size_usd <= 1000:
+        raise HTTPException(400, "Size must be between $1 and $1000")
+    if not 1 <= body.max_hold_min <= 24 * 60:
+        raise HTTPException(400, "Max hold must be between 1 minute and 24 hours")
+    on = (await session.execute(select(func.count()).select_from(CurveCustom).where(CurveCustom.enabled))).scalar() or 0
+    if on >= MAX_CUSTOM_CURVE:
+        raise HTTPException(400, f"At most {MAX_CUSTOM_CURVE} of your strategies can be on: switch one off first")
+    row = CurveCustom(level=body.level, exit_at=body.exit_at if body.exit_at and body.exit_at < 100 else None,
+                      tp_pct=body.tp_pct, half_at=body.half_at, sl_pct=sl, skip_drop=body.skip_drop,
+                      size_usd=body.size_usd, max_hold_min=body.max_hold_min, enabled=True)
+    session.add(row)
+    await session.flush()
+    row.name = f"cc{row.id}"
+    await session.commit()
+    return {"ok": True, "rule": _curve_rule_out(row)}
+
+
+class CurveRuleOnIn(BaseModel):
+    enabled: bool
+
+
+@router.patch("/curve-rules/{rule_id}")
+async def curve_rule_switch(rule_id: int, body: CurveRuleOnIn, session: Session, _: Auth) -> dict[str, Any]:
+    """Admin: switch one of your curve strategies on or off (off: no new buys; open ones still finish)."""
+    from sqlalchemy import func, select
+
+    from app.models import CurveCustom
+
+    row = await session.get(CurveCustom, rule_id)
+    if row is None:
+        raise HTTPException(404, "No such strategy")
+    if body.enabled and not row.enabled:
+        on = (await session.execute(select(func.count()).select_from(CurveCustom).where(CurveCustom.enabled))).scalar() or 0
+        if on >= MAX_CUSTOM_CURVE:
+            raise HTTPException(400, f"At most {MAX_CUSTOM_CURVE} of your strategies can be on: switch one off first")
+    row.enabled = body.enabled
+    await session.commit()
+    return {"ok": True, "rule": _curve_rule_out(row)}
+
+
+@router.delete("/curve-rules/{rule_id}")
+async def curve_rule_delete(rule_id: int, session: Session, _: Auth) -> dict[str, Any]:
+    """Admin: remove one of your curve strategies (its paper trades stay in the database)."""
+    from app.models import CurveCustom
+
+    row = await session.get(CurveCustom, rule_id)
+    if row is None:
+        raise HTTPException(404, "No such strategy")
+    await session.delete(row)
+    await session.commit()
+    return {"ok": True}
+
+
 class PauseIn(BaseModel):
     paused: bool
 
