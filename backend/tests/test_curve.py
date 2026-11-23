@@ -619,3 +619,22 @@ def test_paused_paper_strategy_opens_nothing_but_still_signals_live():
         assert sent == {"curve_fast34_mom", "curve_fast34"}
     finally:
         paper_switches.PAUSED = set()
+
+
+def test_curve_70_organic_slow_only_buys_coins_that_took_15_min():
+    def run(mint, t0):
+        c = PaperCurve(S())
+        c.on_create({**create(mint), "symbol": mint, "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+        t, p = t0, 45.0
+        c.on_curve(mint, acct(p), t)
+        for i in range(28):
+            t += 2
+            p += 0.9 if i % 3 != 2 else -0.4
+            c.on_curve(mint, acct(p), t)
+        c.on_curve(mint, acct(70), t + 1)
+        c.on_curve(mint, acct(72), t + 3.5)
+        return c.watch[mint].held
+
+    fast, slow = run("F1", 100.0), run("S1", 1000.0)
+    assert "curve_70_organic" in fast and "curve_70_organic_slow" not in fast
+    assert "curve_70_organic_slow" in slow and "curve_70_organic" not in slow

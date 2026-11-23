@@ -70,6 +70,9 @@ class CurveRule:
     enabled: bool = True            # custom: off = no new buys (open ones are still managed)
     title: str = ""
     max_secs: float | None = None   # skip a token that took longer than this (from its launch) to reach the level
+    # skip a token that got there faster than this (2026-11-24: of 664 graduations, the 438 that graduated within
+    # 15 min of launch were 99 % dead 6 h later, the ones that took longer 87 %)
+    min_secs: float | None = None
     skip_backslide: bool = False    # skip if the curve slid back below the decision level before our buy
     grad_trail: float | None = None  # custom: at graduation keep riding, sell this % below the high since then
     # momentum filters (2026-11-23, from 149 curve_fast34 trades: coins still being bought in the seconds after the
@@ -131,6 +134,12 @@ CURVE_RULES: dict[str, CurveRule] = {
                                          "launch tools"),
     # coins at 70 % with organic two-way trading that got there within 5 min: they reach graduation; held through
     # it and sold 30 % under the high on PumpSwap (curve_70 on those coins: +$135 on 41 trades)
+    # the graduation study (2026-11-24): the same, but only coins that took 15+ min to reach 70 % (no time cap)
+    "curve_70_organic_slow": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, min_secs=900.0,
+                                       min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True,
+                                       grad_trail=30.0,
+                                       title="curve_70_organic for slower coins: 70% reached 15+ min after launch, "
+                                             "organic trading; rides graduation, sells 30% under the high"),
     "curve_70_organic": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
                                   min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True, grad_trail=30.0,
                                   title="curve 70% with organic trading (10+ buys, 5+ sells in a minute, dev under "
@@ -415,6 +424,8 @@ class PaperCurve:
                     continue                          # first seen far past its entry level: not this trade
                 if rule.max_secs is not None and now - w.created > rule.max_secs:
                     continue                          # a slow climb: the buying is weak
+                if rule.min_secs is not None and now - w.created < rule.min_secs:
+                    continue                          # too fast: usually a coin its own bundle pushes up
                 w.pre[strat] = self.snapshot(w, now)
                 w.pending[strat] = (now + self.s.curve_latency_s, w.price,
                                     f"curve {w.progress:.0f}% at {now - w.created:.0f}s")
