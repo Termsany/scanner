@@ -187,6 +187,12 @@ class Settings(BaseSettings):
     live_fast_fetch_seconds: float = 3.0          # wait at most this long for a notified transaction to confirm
     pumpportal_api_key: str | None = None         # PumpPortal data API key (account-trade stream); never logged
     live_fast_pumpportal: bool = True             # use PumpPortal's stream next to Helius when a key is set
+    # Prices of pump.fun / PumpSwap positions from PumpPortal's trade stream (app/pump_prices.py), before
+    # Jupiter / DexScreener. Billed per event (0.01 SOL / 10,000), so only coins being checked are streamed.
+    live_pump_prices: bool = False
+    live_pump_prices_max_coins: int = 15          # at most this many coins subscribed at once
+    live_pump_prices_keep_seconds: float = 60.0   # unsubscribe a coin nobody asked a price for this long
+    live_pump_prices_max_age_seconds: float = 90.0  # older last trade: use Jupiter / DexScreener instead
     loop_freeze_log_seconds: float = 1.0          # worker event loop blocked this long: logged (app/loop_watch.py)
     loop_debug: bool = True                       # asyncio debug: names the step that blocked (small overhead)
     # Compare open positions with the wallet's real token balance this often; tokens sold by hand (Phantom)

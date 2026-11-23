@@ -386,12 +386,40 @@ class JupiterExecutor:
             total += int(info["tokenAmount"]["amount"])
         return total
 
+    async def _pump_prices(self, mints: list[str]) -> dict[str, dict[str, float]]:
+        """Fresh PumpPortal prices for pump.fun / PumpSwap coins (app/pump_prices.py); {} when that feed is off.
+        Asking also keeps those coins subscribed for the next checks."""
+        from app import pump_prices
+
+        pp = pump_prices.PUMP
+        if pp is None or not mints:
+            return {}
+        pp.request(mints)
+        found = {m: s for m in mints if (s := pp.price_sol(m))}
+        if not found:
+            return {}
+        try:
+            sol_usd = await self.sol_price()
+        except Exception:
+            return {}
+        out: dict[str, dict[str, float]] = {}
+        for m, s in found.items():
+            try:
+                out[m] = {"usd": s * sol_usd, "decimals": await self.decimals(m)}
+            except Exception:
+                continue
+        return out
+
     async def token_prices_fast(self, mints: list[str]) -> dict[str, dict[str, float]]:
-        """{mint: {"usd", "decimals"}} straight from Jupiter's price API (fresher than DexScreener on new
-        pump.fun tokens). Goes through the shared Jupiter gate, so use it only for positions near a target."""
+        """{mint: {"usd", "decimals"}}: PumpPortal's trade stream first (pump coins), then Jupiter's price API
+        (fresher than DexScreener on new pump.fun tokens). Jupiter goes through the shared gate, so use this only
+        for positions near a target."""
+        out = await self._pump_prices(mints)
+        mints = [m for m in mints if m not in out]
+        if not mints:
+            return out
         r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/price/v3", background=True,
                                   params={"ids": ",".join(mints[:50])}, timeout=8)
-        out: dict[str, dict[str, float]] = {}
         if r is not None and r.status_code == 200:
             for mint, d in (r.json() or {}).items():
                 if d and d.get("usdPrice") and d.get("decimals") is not None:
@@ -465,10 +493,15 @@ class JupiterExecutor:
         raise SwapError(f"transfer {sig} sent but not confirmed yet: check Solscan before trying again")
 
     async def token_prices(self, mints: list[str]) -> dict[str, dict[str, float]]:
-        """{mint: {"usd", "decimals"}} from DexScreener (Jupiter only once per mint, for decimals)."""
+        """{mint: {"usd", "decimals"}}: PumpPortal's trade stream first (pump coins), then DexScreener (Jupiter
+        only once per mint, for decimals)."""
         from app.api.live import jupiter_prices
 
-        return await jupiter_prices(self.http, mints)
+        out = await self._pump_prices(mints)
+        rest = [m for m in mints if m not in out]
+        if rest:
+            out.update(await jupiter_prices(self.http, rest))
+        return out
 
     async def wallet_sales(self, mints: set[str], since: datetime) -> dict[str, list[dict[str, Any]]]:
         """Every confirmed transaction of this wallet since `since` that lowered its balance of one of `mints`.
@@ -2026,6 +2059,12 @@ class LiveTrader:
             from app.screen import TokenScreener
 
             self._screener = TokenScreener(self.s)
+        if self.s.live_pump_prices and self.s.pumpportal_api_key:
+            from app import pump_prices
+
+            pump_prices.PUMP = pump_prices.PumpPrices(self.s)
+            self._pump_task = asyncio.create_task(pump_prices.PUMP.run_forever())
+            log.info("PumpPortal prices on (max %d coins at once)", self.s.live_pump_prices_max_coins)
         running: dict[str, tuple[asyncio.Task, str | None, CopyEngine]] = {}
         said: set[str] = set()                 # idle notices already sent
         fast: tuple[asyncio.Task, frozenset[str]] | None = None
