@@ -339,6 +339,7 @@ class LivePosition(Base):
     # The owner manages this position: no bot rule sells it (leader sells, 2x, quick exit, max hold, time stop),
     # only the owner's target / stop or a sell from the page.
     hands_off: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    sell_by: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)   # sell all at this time
 
 
 class PriceOrder(Base):
@@ -586,6 +587,8 @@ class TradingAccount(Base):
     max_daily_loss_usd: Mapped[float] = mapped_column(Float)
     take_capital_at_pct: Mapped[float | None] = mapped_column(Float, nullable=True)   # None = off
     max_hold_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)        # None = LIVE_MAX_HOLD_HOURS
+    # trade this curve rule (app/curve.py, e.g. curve_fast34) for real at size_usd; None = not (app/curve_live.py)
+    curve_strategy: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # [{"wallet", "label", "unconditional", "new_tokens_only", "size_usd"}]
     leaders: Mapped[list[Any]] = mapped_column(JSON, default=list)
     # Owner (a registered user); NULL = the operator's own account. Users never see `leaders`.

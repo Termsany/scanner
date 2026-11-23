@@ -193,6 +193,7 @@ class Account:
     max_hold_hours: int | None = None          # None = LIVE_MAX_HOLD_HOURS
     user_chat_id: str | None = None            # owner's own Telegram chat (registered users), never told the leader
     user_lang: str = "ar"                      # language of those notes
+    curve_strategy: str | None = None          # curve rule traded for real (app/curve_live.py); None = none
 
 
 # What a user is told about an exit: never which wallet, only what happened
@@ -1236,6 +1237,9 @@ class CopyEngine:
         self._target_at = 0.0                   # last check of owner-set targets
         self._target_seen: dict[int, int] = {}  # position id -> readings in a row past its target / stop
         self._orders_at = 0.0                   # last check of the owner's price orders (app/orders.py)
+        from app import curve_live
+
+        self._curve_last = curve_live.last_id()  # curve signals (app/curve_live.py): only ones after we started
         self._order_seen: dict[int, int] = {}   # order id -> readings in a row past its trigger
 
     def update(self, account: Account) -> None:
@@ -2085,6 +2089,99 @@ class CopyEngine:
                     p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
             await session.commit()
 
+    async def _curve_skip(self, session: AsyncSession, mint: str) -> str | None:
+        if await is_paused(session):
+            return "paused (/live on to resume)"
+        if self.a.paused:
+            return f"account {self.a.name} paused"
+        if mint in self.s.blocked_mints():
+            return "token blocked"
+        if (await session.execute(select(LivePosition.id).where(
+                LivePosition.token_address == mint, LivePosition.status == "open", *self._mine()))).first():
+            return "already holding"
+        open_cost = (await session.execute(select(func.sum(LivePosition.cost_usd)).where(
+            LivePosition.status == "open", *self._mine()))).scalar() or 0.0
+        if open_cost + self.a.size_usd > self.a.max_open_usd + 1e-6:
+            return f"limit: ${open_cost:,.0f} already open (max ${self.a.max_open_usd:,.0f})"
+        loss = await realized_24h(session, self.x.mode, self.a.name)
+        if loss <= -self.a.max_daily_loss_usd:
+            return f"daily loss limit hit (${loss:,.2f} in 24h)"
+        if self.x.mode == "live":
+            bal, px = await self.x.sol_balance(), await self.x.sol_price()
+            if px and bal - self.s.live_sol_reserve < self.a.size_usd / px:
+                return f"not enough SOL ({bal:.3f})"
+        return None
+
+    async def _curve(self, session: AsyncSession) -> None:
+        """Real buys of the account's curve rule (app/curve_live.py): the paper engine decided, we buy now at the
+        account's entry size, capped at LIVE_CURVE_MAX_CHASE_PCT above the decision price. The position is
+        hands-off: sold at the rule's exit level, at its stop (from our fill) or when its max hold runs out."""
+        strat = self.a.curve_strategy
+        if not strat:
+            return
+        from app import curve_live
+
+        sigs, self._curve_last = curve_live.take(self._curve_last, strat, self.s.live_curve_max_signal_age_s)
+        for sig in sigs:
+            sym = sig.symbol or sig.mint[:6]
+            try:
+                why = await self._curve_skip(session, sig.mint)
+                sol_usd = await self.x.sol_price()
+            except Exception as exc:
+                why = f"checks failed: {exc}"
+            if why:
+                log.info("live[%s]: curve %s skip %s (%s)", self.a.name, strat, sym, why)
+                if why.startswith(("not enough SOL", "daily loss", "limit:")):
+                    key = "curve " + why.split(" ")[0]
+                    if time.monotonic() - self._said.get(key, -1e9) >= 6 * 3600:
+                        self._said[key] = time.monotonic()
+                        await self.notify(f"{self._tag()} ⏸ curve {strat}: skipped ${sym} ({why})")
+                continue
+            decision_usd = sig.px_sol * sol_usd
+            max_price = decision_usd * (1 + self.s.live_curve_max_chase_pct / 100)
+            try:
+                f = await self.x.buy(sig.mint, self.a.size_usd, max_price=max_price)
+            except ChaseError as exc:
+                log.info("live[%s]: curve %s skip %s (%s)", self.a.name, strat, sym, exc)
+                continue
+            except Exception as exc:
+                log.warning("live[%s]: curve %s buy %s failed: %s", self.a.name, strat, sym, exc)
+                await self.notify(f"{self._tag()} ❌ curve {strat}: buy ${sym} failed: {str(exc)[:160]}")
+                continue
+            now = _now()
+            target = decision_usd * sig.target_ratio
+            pos = LivePosition(
+                mode=self.x.mode, account=self.a.name, token_address=sig.mint, symbol=sym[:60],
+                leader_wallet=f"curve:{strat}"[:64], leader_trade_id=0, status="open", cost_usd=f.usd,
+                sol_spent=f.sol, tokens_raw=str(f.tokens_raw), tokens_bought_raw=str(f.tokens_raw),
+                buy_signature=f.signature, hands_off=True, target_price=target, target_share=1.0,
+                stop_pct=sig.sl_pct, sell_by=now + timedelta(seconds=sig.max_hold_s),
+                fills=[{"side": "buy", "sig": f.signature, "sol": f.sol, "tokens_raw": str(f.tokens_raw),
+                        "usd": round(f.usd, 2), "at": now.isoformat(), "curve": strat, "why": sig.why,
+                        "late_s": round(time.monotonic() - sig.at, 1),
+                        "timing": getattr(f, "timing", None) or {}}])
+            session.add(pos)
+            await session.commit()
+            log.info("live[%s]: curve %s BUY %s for %.4f SOL ($%.2f) %s", self.a.name, strat, sym, f.sol, f.usd,
+                     f.signature)
+            await self.notify(f"{self._tag()} 📈 curve {strat}: bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
+                              f"{sig.why} · sell at ${target:.6g} or {sig.sl_pct:+.0f}% or after "
+                              f"{sig.max_hold_s / 60:.0f} min\n{self._tx(f.signature)}")
+
+    async def _sell_by(self, session: AsyncSession) -> None:
+        """Positions with a time limit (curve trades): sell everything once it has passed."""
+        now = _now()
+        rows = (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine(), LivePosition.sell_by.is_not(None),
+            LivePosition.sell_by <= now))).scalars().all()
+        for p in rows:
+            if int(p.tokens_raw or 0) <= 0 or p.manual_sell_frac \
+                    or any(x.get("side") == "sell_failed" for x in (p.fills or [])):
+                continue
+            if await self._sell(session, p, 1.0, "quick_time"):
+                p.target_pct = p.target_price = p.target_share = p.stop_pct = p.stop_price = None
+            await session.commit()
+
     async def _orders(self, session: AsyncSession) -> None:
         """The owner's price orders: buy once the price reaches the trigger (app/orders.py)."""
         from app.orders import check_orders
@@ -2094,8 +2191,8 @@ class CopyEngine:
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
-        for part in (self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits, self._targets,
-                     self._orders):
+        for part in (self._curve, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits,
+                     self._targets, self._sell_by, self._orders):
             if self.wake is not None and self.wake.is_set():
                 return
             await part(session)

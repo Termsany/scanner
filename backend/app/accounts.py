@@ -131,7 +131,7 @@ def to_account(row: TradingAccount, s: Settings, private_key: str | None) -> Acc
                for d in row.leaders or []}
     return Account(row.name, row.size_usd, row.max_open_usd, row.max_daily_loss_usd, list(leaders), private_key,
                    leaders=leaders, paused=bool(row.paused or row.billing_hold), take_capital_at_pct=row.take_capital_at_pct,
-                   max_hold_hours=row.max_hold_hours)
+                   max_hold_hours=row.max_hold_hours, curve_strategy=getattr(row, "curve_strategy", None))
 
 
 async def seed(session: AsyncSession, s: Settings) -> None:
@@ -189,6 +189,18 @@ async def ensure_tracked(session: AsyncSession, wallets: list[str]) -> None:
             sw.track_buys = True
 
 
+def curve_choice(value: str | None) -> str | None:
+    """A curve rule an account may trade for real (app/curve_live.py), or None. "" / "none" clears it."""
+    from app.curve_live import live_rules
+
+    v = (value or "").strip()
+    if v in ("", "none"):
+        return None
+    if v not in live_rules():
+        raise AccountError(f"curve strategy must be one of: {', '.join(sorted(live_rules()))}")
+    return v
+
+
 def public(row: TradingAccount, open_positions: int = 0) -> dict[str, Any]:
     return {
         "name": row.name, "enabled": row.enabled, "paused": row.paused, "key_source": row.key_source,
@@ -197,6 +209,6 @@ def public(row: TradingAccount, open_positions: int = 0) -> dict[str, Any]:
         "max_hold_hours": row.max_hold_hours, "leaders": row.leaders or [], "open_positions": open_positions,
         "user_id": row.user_id, "cap_size_usd": row.cap_size_usd, "cap_open_usd": row.cap_open_usd,
         "cap_loss_usd": row.cap_loss_usd, "key_revealed": bool(row.key_revealed),
-        "billing_hold": bool(row.billing_hold),
+        "billing_hold": bool(row.billing_hold), "curve_strategy": getattr(row, "curve_strategy", None),
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }

@@ -21,7 +21,7 @@ import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAut
 import { AppNav } from "@/components/AppNav";
 import { Badge, button, PageHeader, pageMain, SectionTabs } from "@/components/ui";
 import { api, ApiError, SESSION } from "@/lib/api";
-import type { AccountsList, AuditEntry, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
+import type { AccountsList, AuditEntry, CurveChoice, LeaderCfg, SiteUser, TradingAccountCfg } from "@/lib/types";
 
 const KEY = "alpha-live-password"; // same password as the Live page
 
@@ -63,6 +63,7 @@ interface Draft {
   take_capital_at_pct: string;
   max_hold_hours: string;
   leaders: LeaderCfg[];
+  curve_strategy: string;      // "" = none
   cap_size_usd?: string;
   cap_open_usd?: string;
   cap_loss_usd?: string;
@@ -78,6 +79,7 @@ function toDraft(a: TradingAccountCfg): Draft {
     take_capital_at_pct: String(a.take_capital_at_pct ?? 100),
     max_hold_hours: a.max_hold_hours != null ? String(a.max_hold_hours) : "",
     leaders: a.leaders.map((l) => ({ ...l })),
+    curve_strategy: a.curve_strategy ?? "",
     ...(a.user_id != null
       ? {
           cap_size_usd: a.cap_size_usd != null ? String(a.cap_size_usd) : "",
@@ -124,6 +126,7 @@ const EMPTY: Draft = {
   take_capital_at_pct: "100",
   max_hold_hours: "",
   leaders: [],
+  curve_strategy: "",
 };
 
 function num(v: string): number {
@@ -135,6 +138,7 @@ function payload(d: Draft) {
     size_usd: num(d.size_usd),
     max_open_usd: num(d.max_open_usd),
     max_daily_loss_usd: num(d.max_daily_loss_usd),
+    curve_strategy: d.curve_strategy || "none",
     leaders: d.leaders.map((l) => ({
       ...l,
       wallet: l.wallet.trim(),
@@ -166,13 +170,17 @@ function Settings({
   set,
   now,
   defaultHold,
+  curves,
 }: {
   d: Draft;
   set: (d: Draft) => void;        // typing: saved a moment after you stop
   now: (d: Draft) => void;        // switches: saved at once
   defaultHold: number;
+  curves: CurveChoice[];
 }) {
+  const curve = curves.find((c) => c.name === d.curve_strategy);
   return (
+    <>
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
       <Field label="Entry per trade" hint="USD per copied buy">
         <input className={`${input} num`} inputMode="decimal" value={d.size_usd}
@@ -200,6 +208,24 @@ function Settings({
           value={d.max_hold_hours} onChange={(e) => set({ ...d, max_hold_hours: e.target.value })} />
       </Field>
     </div>
+    {curves.length > 0 && (
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <Field label="Curve strategy (real money)"
+          hint={curve ? `${curve.title} · entry = "Entry per trade" above` : "none: this account only copies wallets"}>
+          <select className={input} value={d.curve_strategy}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v && !confirm(`Trade ${v} with REAL money from this account's wallet, $${d.size_usd} per buy? `
+                + "It buys every time the paper bot enters this rule, within the budget and daily loss limit.")) return;
+              now({ ...d, curve_strategy: v });
+            }}>
+            <option value="">None</option>
+            {curves.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+          </select>
+        </Field>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -436,12 +462,14 @@ function AccountCard({
   a,
   password,
   defaultHold,
+  curves,
   onSaved,
   owner,
 }: {
   a: TradingAccountCfg;
   password: string;
   defaultHold: number;
+  curves: CurveChoice[];
   onSaved: (a: TradingAccountCfg) => void;
   owner?: string;
 }) {
@@ -556,7 +584,7 @@ function AccountCard({
         </div>
       </header>
       <div className="p-5">
-      <Settings d={d} set={type} now={now} defaultHold={defaultHold} />
+      <Settings d={d} set={type} now={now} defaultHold={defaultHold} curves={curves} />
       <Leaders d={d} set={type} now={now} openBy={a.open_by_leader}
         onToggle={async (wallet, enabled, close) => {
           if (local.current) {
@@ -605,12 +633,14 @@ function NewAccount({
   password,
   canStore,
   defaultHold,
+  curves,
   onCreated,
   startOpen,
 }: {
   password: string;
   canStore: boolean;
   defaultHold: number;
+  curves: CurveChoice[];
   onCreated: (a: TradingAccountCfg, secret: string | null) => void;
   startOpen?: boolean;
 }) {
@@ -645,7 +675,7 @@ function NewAccount({
             onChange={(e) => setD({ ...d, name: e.target.value.toLowerCase() })} />
         </Field>
       </div>
-      <Settings d={d} set={setD} now={setD} defaultHold={defaultHold} />
+      <Settings d={d} set={setD} now={setD} defaultHold={defaultHold} curves={curves} />
       <Leaders d={d} set={setD} now={setD} />
       <div className="mt-4 flex flex-col gap-2">
         <span className="text-[11px] font-medium tracking-[0.12em] text-muted uppercase">Trading wallet</span>
@@ -1070,13 +1100,15 @@ export function AccountsView() {
               ]} />
             <div key={current} className="flex animate-fade-in flex-col gap-6">
               {acct && (
-                <AccountCard a={acct} password={password} defaultHold={hold} onSaved={replace}
+                <AccountCard a={acct} password={password} defaultHold={hold} curves={data.curve_strategies ?? []}
+                  onSaved={replace}
                   owner={acct.user_id != null ? (owners[acct.user_id] ?? `#${acct.user_id}`) : undefined} />
               )}
               {current === "users" && <UsersPanel password={password} onChange={() => load(password)} />}
               {current === "activity" && <ActivityPanel password={password} />}
               {current === "new" && (
-                <NewAccount password={password} canStore={data.can_store_keys} defaultHold={hold} startOpen
+                <NewAccount password={password} canStore={data.can_store_keys} defaultHold={hold}
+                  curves={data.curve_strategies ?? []} startOpen
                   onCreated={(a, s) => {
                     setData((d) => d && { ...d, accounts: [...d.accounts, a] });
                     if (s) setSecret({ name: a.name, pubkey: a.pubkey, secret: s });

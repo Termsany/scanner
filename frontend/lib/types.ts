@@ -663,12 +663,19 @@ export interface TradingAccountCfg {
   cap_open_usd: number | null;
   cap_loss_usd: number | null;
   key_revealed: boolean;
+  curve_strategy?: string | null;   // curve rule this account trades for real (null = none)
+}
+
+export interface CurveChoice {
+  name: string;
+  title: string;
 }
 
 export interface AccountsList {
   accounts: TradingAccountCfg[];
   can_store_keys: boolean;
   defaults: { max_hold_hours: number; reload_seconds: number };
+  curve_strategies?: CurveChoice[];
 }
 
 export interface MyPosition {

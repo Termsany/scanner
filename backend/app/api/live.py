@@ -758,6 +758,7 @@ class AccountIn(BaseModel):
     take_capital_at_pct: float | None = 100.0
     max_hold_hours: int | None = None
     leaders: list[LeaderIn] = []
+    curve_strategy: str | None = None   # trade this curve rule for real (app/curve_live.py)
     key_mode: str = "generate"          # generate | import
     private_key: str | None = None      # key_mode=import
 
@@ -773,6 +774,7 @@ class AccountPatch(BaseModel):
     max_hold_hours: int | None = None
     max_hold_default: bool = False      # back to LIVE_MAX_HOLD_HOURS
     leaders: list[LeaderIn] | None = None
+    curve_strategy: str | None = None   # a curve rule to trade for real; "none" stops it (null: unchanged)
     # admin caps on what the owner may set; a negative number clears a cap
     cap_size_usd: float | None = None
     cap_open_usd: float | None = None
@@ -818,14 +820,23 @@ async def list_accounts(session: Session, _: Auth) -> dict[str, Any]:
                      for r in await rows(session, s)],
         "can_store_keys": bool(s.live_key_encryption_key),
         "defaults": {"max_hold_hours": s.live_max_hold_hours, "reload_seconds": s.live_accounts_reload_seconds},
+        "curve_strategies": _curve_choices(),
     }
+
+
+def _curve_choices() -> list[dict[str, str]]:
+    from app.curve_live import live_rules
+    from app.paper import STRATEGIES
+
+    return [{"name": k, "title": STRATEGIES[k].title if k in STRATEGIES else k} for k in live_rules()]
 
 
 @router.post("/accounts")
 async def create_account(body: AccountIn, session: Session, _: Auth) -> dict[str, Any]:
     from sqlalchemy import select
 
-    from app.accounts import (NAME_RE, AccountError, check_limits, clean_leaders, encrypt_key, ensure_tracked,
+    from app.accounts import (NAME_RE, AccountError, check_limits, clean_leaders, curve_choice, encrypt_key,
+                              ensure_tracked,
                               new_wallet, public, rows)
     from app.live import PUBKEY, _get, _key, load_keypair
     from app.models import TradingAccount
@@ -840,6 +851,7 @@ async def create_account(body: AccountIn, session: Session, _: Auth) -> dict[str
             raise AccountError("an account with this name already exists")
         check_limits(body.size_usd, body.max_open_usd, body.max_daily_loss_usd, body.take_capital_at_pct,
                      body.max_hold_hours)
+        curve = curve_choice(body.curve_strategy)
         leaders = clean_leaders([ld.model_dump() for ld in body.leaders])
         secret = None
         if body.key_mode == "generate":
@@ -864,7 +876,7 @@ async def create_account(body: AccountIn, session: Session, _: Auth) -> dict[str
     row = TradingAccount(name=name, key_source="db", key_enc=enc, pubkey=pubkey, size_usd=body.size_usd,
                          max_open_usd=body.max_open_usd, max_daily_loss_usd=body.max_daily_loss_usd,
                          take_capital_at_pct=body.take_capital_at_pct, max_hold_hours=body.max_hold_hours,
-                         leaders=leaders)
+                         leaders=leaders, curve_strategy=curve)
     session.add(row)
     await ensure_tracked(session, [ld["wallet"] for ld in leaders])
     await session.commit()
@@ -878,7 +890,7 @@ async def create_account(body: AccountIn, session: Session, _: Auth) -> dict[str
 @router.patch("/accounts/{name}")
 async def edit_account(name: str, body: AccountPatch, request: Request, session: Session,
                        _: Auth) -> dict[str, Any]:
-    from app.accounts import AccountError, check_limits, clean_leaders, ensure_tracked, public
+    from app.accounts import AccountError, check_limits, clean_leaders, curve_choice, ensure_tracked, public
 
     row = await _row(session, name)
     counts = await _open_counts(session)
@@ -892,6 +904,7 @@ async def edit_account(name: str, body: AccountPatch, request: Request, session:
     try:
         check_limits(size, max_open, max_loss, take, hold)
         leaders = clean_leaders([ld.model_dump() for ld in body.leaders]) if body.leaders is not None else None
+        curve = curve_choice(body.curve_strategy) if body.curve_strategy is not None else row.curve_strategy
         if body.enabled is False and counts.get(row.name, 0):
             raise AccountError(f"{counts[row.name]} positions are still open: pause the account instead "
                                "(sells keep working), and disable it once they are closed")
@@ -899,6 +912,7 @@ async def edit_account(name: str, body: AccountPatch, request: Request, session:
         raise HTTPException(400, str(exc)) from None
     row.size_usd, row.max_open_usd, row.max_daily_loss_usd = size, max_open, max_loss
     row.take_capital_at_pct, row.max_hold_hours = take, hold
+    row.curve_strategy = curve
     if body.paused is not None:
         row.paused = body.paused
     if body.enabled is not None:

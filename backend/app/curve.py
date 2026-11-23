@@ -220,6 +220,7 @@ class PaperCurve:
         self.s = settings or get_settings()
         self.sol_usd = sol_usd
         self.watch: dict[str, Watch] = {}
+        self.live_signals: set[str] = set()   # rules some live account trades (app/curve_live.py): publish them
         self.opened: list[dict[str, Any]] = []
         self.closed: list[dict[str, Any]] = []
         self.feed = self._pick_feed()
@@ -326,6 +327,12 @@ class PaperCurve:
                 w.pre[strat] = self.snapshot(w, now)
                 w.pending[strat] = (now + self.s.curve_latency_s, w.price,
                                     f"curve {w.progress:.0f}% at {now - w.created:.0f}s")
+                if self.live_signals and strat in self.live_signals:     # accounts trade this rule for real
+                    from app import curve_live
+
+                    curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
+                                       f"curve {w.progress:.0f}% at {now - w.created:.0f}s",
+                                       rule.max_hold_s or self.s.curve_max_hold_s)
         self._fills(w, now)
         self._exits(w, now)
 
@@ -831,6 +838,15 @@ class PaperCurve:
             self.set_custom({r.name: custom_rule(r) for r in rows if r.name})
         except Exception:
             log.warning("curve (paper): could not load custom strategies", exc_info=True)
+        try:                                       # which rules live accounts trade for real (app/curve_live.py)
+            from app.models import TradingAccount
+
+            async with SessionLocal() as session:
+                live = (await session.execute(select(TradingAccount.curve_strategy).where(
+                    TradingAccount.enabled.is_(True), TradingAccount.curve_strategy.is_not(None)))).scalars().all()
+            self.live_signals = {x for x in live if x}
+        except Exception:
+            log.warning("curve (paper): could not load the live curve accounts", exc_info=True)
 
     async def _price_riding(self, now: float) -> None:
         """Graduated coins a trail position still holds: Jupiter's price (USD -> SOL per token)."""
