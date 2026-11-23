@@ -55,8 +55,10 @@ V_TOKENS_START = 1_073_000_000.0          # virtual tokens at launch: virtual - 
 @dataclass(frozen=True)
 class CurveRule:
     level: float        # buy the first time the curve is this % sold
-    mode: str           # grad: all out at graduation (stop / time) | half: $10, no stop, 50% at 2x, stop at entry,
-                        # rest at graduation | trail: like half, the rest rides after graduation on a trailing stop
+    mode: str           # grad: all out at graduation (stop / time) | half: $10, no stop, 50% at +half_at, stop at
+                        # entry, rest at graduation | trail: like half, the rest rides after graduation (trailing stop)
+    half_at: float = 100.0          # half / trail: sell half once the price is up this % (100 = 2x)
+    skip_drop: float | None = None  # don't buy if the price fell more than this % between our decision and the fill
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -65,6 +67,10 @@ CURVE_RULES: dict[str, CurveRule] = {
     # user's rule (2026-11-23): $10, no stop loss, at 2x sell half and put a stop at the entry; exit variants
     "curve_70_half": CurveRule(70.0, "half"),
     "curve_70_trail": CurveRule(70.0, "trail"),
+    # from the first 25 curve_70 / 6 curve_85 trades (2026-11-23): every buy whose price fell 10%+ in the 2 s
+    # before the fill lost (8 of 8, avg -41%); most trades were up 20-40% before they turned. Half out early.
+    "curve_70_filter": CurveRule(70.0, "half", half_at=20.0, skip_drop=10.0),
+    "curve_85_half40": CurveRule(85.0, "half", half_at=40.0),
 }
 CURVE_STRATEGIES: dict[str, float] = {k: r.level for k, r in CURVE_RULES.items()}
 
@@ -241,6 +247,9 @@ class PaperCurve:
             del w.pending[strat]
             if strat in w.held or self._open_count() >= self.s.curve_max_open:
                 continue
+            drop = CURVE_RULES[strat].skip_drop
+            if drop is not None and decision_px and w.price < decision_px * (1 - drop / 100):
+                continue                                  # being sold into: the price fell before our buy landed
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,
                    "fill": w.price * (1 + self._cost()), "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
                    "size": self._size(strat), "rem": 1.0, "proceeds": 0.0, "half": False, "gpeak": None,
@@ -285,12 +294,13 @@ class PaperCurve:
                 if reason:
                     self._close(w, strat, pos, reason, cost)
                 continue
-            # half / trail: no stop loss; at 2x sell half (the capital comes back), then a stop at the entry
+            # half / trail: no stop loss; at +half_at sell half, then a stop at the entry
             sale_cost = cost + (self.s.curve_grad_exit_extra_pct / 100 if w.graduated and pos["gpeak"] is None else 0)
-            if not pos["half"] and pct >= 100:
+            half_at = CURVE_RULES[strat].half_at
+            if not pos["half"] and pct >= half_at:
                 pos["proceeds"] += pos["size"] * 0.5 / pos["fill"] * w.price * (1 - sale_cost)
                 pos["rem"], pos["half"] = 0.5, True
-                pos["why"] = (pos.get("why") or "")[:120] + " | half sold at 2x"
+                pos["why"] = (pos.get("why") or "")[:120] + f" | half sold at +{half_at:g}%"
             if pos["half"] and w.price <= pos["market"]:
                 reason = "breakeven_stop"                    # gave back the move: the rest out at the entry
             elif w.graduated and mode == "half":
@@ -335,7 +345,7 @@ class PaperCurve:
                                 symbol=pos["symbol"], trigger=pos["why"][:160], status="open",
                                 size_usd=pos["size"], entry_time=pos["wall"],
                                 entry_price=self._usd(pos["market"]), fill_price=self._usd(pos["fill"]),
-                                tp_pct=self.s.curve_tp_pct if grad else 100.0,
+                                tp_pct=self.s.curve_tp_pct if grad else CURVE_RULES[pos["strategy"]].half_at,
                                 sl_pct=self.s.curve_sl_pct if grad else 0.0,
                                 max_hold_minutes=max(int(hold_s // 60), 1),
                                 remaining_frac=1.0, proceeds_usd=0.0)

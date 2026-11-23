@@ -62,7 +62,8 @@ def test_buy_at_70_and_85_then_sell_at_graduation():
     assert abs(c.watch["M"].held["curve_70"]["market"] - price_at(74)) / price_at(74) < 1e-6
     c.on_curve("M", acct(86), 30.0)
     c.tick(32.5)                                                           # no trade: fill on the tick
-    assert set(c.watch["M"].held) == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail"}
+    assert set(c.watch["M"].held) == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail",
+                                      "curve_70_filter", "curve_85_half40"}
     c.on_curve("M", acct(100, complete=True), 40.0)
     reasons = {p["strategy"]: p for p in c.closed}
     assert {p["reason"] for p in c.closed} == {"graduated"}
@@ -129,7 +130,8 @@ def test_rows_written_for_paper_page():
             return rows
 
     rows = asyncio.run(run())
-    assert {r.strategy for r in rows} == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail"}
+    assert {r.strategy for r in rows} == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail",
+                                          "curve_70_filter", "curve_85_half40"}
     done = [r for r in rows if r.strategy != "curve_70_trail"]
     assert all(r.status == "closed" and r.exit_reason == "graduated" and r.pnl_usd > 0 for r in done)
     trail = next(r for r in rows if r.strategy == "curve_70_trail")
@@ -159,7 +161,8 @@ def test_pumpportal_only_trades_and_migration():
     c.on_pp(pp_trade(86), 10.0)
     assert abs(c.watch["M"].progress - 86) < 0.01
     c.on_pp(pp_trade(88), 12.5)
-    assert set(c.watch["M"].held) == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail"}
+    assert set(c.watch["M"].held) == {"curve_70", "curve_85", "curve_70_half", "curve_70_trail",
+                                      "curve_70_filter", "curve_85_half40"}
     c.on_pp({"txType": "migrate", "mint": "M"}, 20.0)
     assert {p["reason"] for p in c.closed} == {"graduated"} and c.pp_events == 2
     c.tick(21.0)
@@ -270,3 +273,34 @@ def test_flush_survives_tokens_added_and_closed_while_it_waits_on_the_database()
     rows = asyncio.run(run())
     grads = [r for r in rows if r.strategy in ("curve_70", "curve_85", "curve_70_half")]
     assert grads and all(r.status == "closed" and r.exit_reason == "graduated" for r in grads)
+
+
+def _up_progress(entry: float, pct: float) -> float:
+    p = entry
+    while price_at(p) < price_at(entry) * (1 + pct / 100):
+        p += 0.1
+    return p + 0.2
+
+
+def test_filter_skips_a_buy_whose_price_fell_10_percent_before_the_fill():
+    c = PaperCurve(S())
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(70), 10.0)                              # decision at 70%
+    c.on_curve("M", acct(64), 12.5)                              # sold into: price well under the decision
+    held = set(c.watch["M"].held)
+    assert "curve_70_filter" not in held and "curve_70_half" in held
+
+
+def test_filter_sells_half_at_plus_20_and_half40_at_plus_40():
+    c = PaperCurve(S())
+    c.on_create(create(), 0.0)
+    c.on_curve("M", acct(70), 10.0)
+    c.on_curve("M", acct(70), 12.5)                              # curve_70_filter in at 70%
+    c.on_curve("M", acct(_up_progress(70, 20)), 20.0)
+    f = c.watch["M"].held["curve_70_filter"]
+    assert f["half"] and f["rem"] == 0.5 and f["size"] == 10.0
+    assert not c.watch["M"].held["curve_70_half"]["half"]        # the 2x rule has not sold yet
+    c.on_curve("M", acct(85), 30.0)
+    c.on_curve("M", acct(85), 32.5)                              # curve_85_half40 in at 85%
+    c.on_curve("M", acct(_up_progress(85, 40)), 40.0)
+    assert c.watch["M"].held["curve_85_half40"]["half"]
