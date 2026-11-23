@@ -488,3 +488,48 @@ def test_research_rules_fast_early_curves_and_late_fast_curve():
     slow.on_curve("S", acct(35), 70.0)                           # 10 SOL after 70 s: no fast34
     slow.on_curve("S", acct(36), 75.0)
     assert not {"curve_fast19", "curve_fast34"} & set(slow.watch["S"].held)
+
+
+# ---- curve_fast34_mom: momentum after the signal and a dev bag under 25 % (user's choice, 2026-11-23) ------------
+def _mom(dev_buy_tokens: float, fill_progress: float, live: bool = False):
+    from app import curve_live
+
+    c = PaperCurve(S())
+    if live:
+        c.live_signals = {"curve_fast34_mom"}
+    c.on_create({**create(), "initialBuy": dev_buy_tokens}, 0.0)
+    c.on_curve("M", acct(34), 5.0)                    # signal at 34 % sold, 5 s after launch
+    start = curve_live.last_id()
+    c.on_curve("M", acct(fill_progress), 7.5)         # our buy lands 2 s later
+    return c, curve_live.take(start - 1, "curve_fast34_mom", 1e9)[0]
+
+
+def test_mom_buys_only_when_the_curve_kept_rising_and_the_dev_bag_is_small():
+    dev_10 = 0.10 * REAL_TOKENS_START
+    c, _ = _mom(dev_10, 45.0)
+    assert "curve_fast34_mom" in c.watch["M"].held and "curve_fast34" in c.watch["M"].held
+    c, _ = _mom(dev_10, 36.0)                         # stalled at the level
+    assert "curve_fast34_mom" not in c.watch["M"].held and "curve_fast34" in c.watch["M"].held
+    c, _ = _mom(0.30 * REAL_TOKENS_START, 45.0)       # dev holds 30 %
+    assert "curve_fast34_mom" not in c.watch["M"].held
+
+
+def test_mom_sends_its_live_signal_only_once_its_filters_pass():
+    from app import curve_live
+
+    start = curve_live.last_id()
+    c = PaperCurve(S())
+    c.live_signals = {"curve_fast34_mom"}
+    c.on_create({**create("Q"), "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+    c.on_curve("Q", acct(34), 5.0)
+    assert curve_live.take(start, "curve_fast34_mom", 1e9)[0] == []          # not at the decision
+    c.on_curve("Q", acct(45), 7.5)
+    got = curve_live.take(start, "curve_fast34_mom", 1e9)[0]
+    assert [g.mint for g in got] == ["Q"] and abs(got[0].progress - 45) < 0.1    # at the fill, its price
+    start = curve_live.last_id()
+    c2 = PaperCurve(S())
+    c2.live_signals = {"curve_fast34_mom"}
+    c2.on_create({**create("R"), "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+    c2.on_curve("R", acct(34), 5.0)
+    c2.on_curve("R", acct(35), 7.5)                                          # stalled: no live signal at all
+    assert curve_live.take(start, "curve_fast34_mom", 1e9)[0] == []

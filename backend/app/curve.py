@@ -72,6 +72,14 @@ class CurveRule:
     max_secs: float | None = None   # skip a token that took longer than this (from its launch) to reach the level
     skip_backslide: bool = False    # skip if the curve slid back below the decision level before our buy
     grad_trail: float | None = None  # custom: at graduation keep riding, sell this % below the high since then
+    # momentum filters (2026-11-23, from 149 curve_fast34 trades: coins still being bought in the seconds after the
+    # signal won, the ones that stalled at the level or had a big dev bag lost). Checked at the fill; a rule with
+    # either one sends its live signal only once they pass, never at the decision.
+    min_fill: float | None = None   # buy only if the curve is at least this % sold when our buy would land
+    max_dev: float | None = None    # skip if the dev holds this % of the supply or more
+
+    def waits(self) -> bool:
+        return self.min_fill is not None or self.max_dev is not None
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -95,6 +103,12 @@ CURVE_RULES: dict[str, CurveRule] = {
     "curve_fast19": CurveRule(19.3, "custom", exit_at=96.6, sl=-30.0, size=10.0, max_hold_s=900.0, max_secs=30.0),
     "curve_fast34": CurveRule(33.8, "custom", exit_at=96.6, sl=-25.0, size=10.0, max_hold_s=900.0, max_secs=60.0),
     "curve_93_fast": CurveRule(92.6, "custom", exit_at=99.0, sl=-20.0, size=10.0, max_hold_s=600.0, max_secs=240.0),
+    # user's choice (2026-11-23): curve_fast34, buying only coins still being bought after the signal (40 %+ sold at
+    # the fill) whose dev holds under 25 %. On the day's trades: 48 of 149 passed, +$18.5, against -$198 for the rest.
+    "curve_fast34_mom": CurveRule(33.8, "custom", exit_at=96.6, sl=-25.0, size=10.0, max_hold_s=900.0, max_secs=60.0,
+                                  min_fill=40.0, max_dev=25.0,
+                                  title="curve_fast34 with momentum: still bought after the signal (40%+ at the "
+                                        "fill), dev under 25%"),
     # user's choice (2026-11-23): curve_70 with real money at $10. curve_70 sells at graduation, which a real
     # account can't (it needs an exit level and a stop), so this is curve_70 with the exit just before
     # graduation (99 % sold, ~+225 % on a classic curve), the same -25 % stop and 60 min max hold.
@@ -337,7 +351,7 @@ class PaperCurve:
                 w.pre[strat] = self.snapshot(w, now)
                 w.pending[strat] = (now + self.s.curve_latency_s, w.price,
                                     f"curve {w.progress:.0f}% at {now - w.created:.0f}s")
-                if self.live_signals and strat in self.live_signals:     # accounts trade this rule for real
+                if self.live_signals and strat in self.live_signals and not rule.waits():   # traded for real
                     curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
                                        f"curve {w.progress:.0f}% at {now - w.created:.0f}s",
                                        rule.max_hold_s or self.s.curve_max_hold_s)
@@ -421,6 +435,10 @@ class PaperCurve:
             pre = w.pre.get(strat) or {}
             if rule.skip_backslide and pre.get("level_at") is not None and w.progress < pre["level_at"]:
                 continue                                  # the curve went back down before our buy landed
+            if rule.min_fill is not None and w.progress < rule.min_fill:
+                continue                                  # stalled at the level: nobody kept buying
+            if rule.max_dev is not None and (pre.get("dev_pct") or 0) >= rule.max_dev:
+                continue                                  # the dev holds too much of it
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,
                    "fill": w.price * (1 + self._cost()), "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
                    "size": self._size(strat), "rem": 1.0, "proceeds": 0.0, "half": False, "gpeak": None,
@@ -430,6 +448,10 @@ class PaperCurve:
                           f"paid {(w.price / decision_px - 1) * 100 if decision_px else 0:+.0f}% vs decision"}
             w.held[strat] = pos
             self.opened.append(pos)
+            if rule.waits() and self.live_signals and strat in self.live_signals:
+                # its filters passed: the live accounts buy now, at this price
+                curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
+                                   f"{why}, {w.progress:.0f}% at the fill", rule.max_hold_s or self.s.curve_max_hold_s)
 
     def _size(self, strat: str) -> float:
         rule = self.rules[strat]
