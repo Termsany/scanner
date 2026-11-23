@@ -638,3 +638,25 @@ def test_curve_70_organic_slow_only_buys_coins_that_took_15_min():
     fast, slow = run("F1", 100.0), run("S1", 1000.0)
     assert "curve_70_organic" in fast and "curve_70_organic_slow" not in fast
     assert "curve_70_organic_slow" in slow and "curve_70_organic" not in slow
+
+
+def test_curve_70_organic_grad_sells_at_the_graduation():
+    c = PaperCurve(S())
+    c.on_create({**create("G1"), "symbol": "G1", "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+    t, p = 100.0, 45.0
+    c.on_curve("G1", acct(p), t)
+    for i in range(28):
+        t += 2
+        p += 0.9 if i % 3 != 2 else -0.4
+        c.on_curve("G1", acct(p), t)
+    c.on_curve("G1", acct(70), t + 1)
+    c.on_curve("G1", acct(72), t + 3.5)
+    held = c.watch["G1"].held
+    assert "curve_70_organic_grad" in held and "curve_70_organic" in held
+    c.on_curve("G1", acct(100, complete=True), t + 60)
+    held = c.watch["G1"].held
+    assert "curve_70_organic_grad" not in held and "curve_70_organic" in held        # sold vs still riding
+    sold = [p for p in c.closed if p["strategy"] == "curve_70_organic_grad"][0]
+    assert sold["reason"] == "graduated" and sold["pnl"] > 15     # jumped past 99 %: sold at the graduation, ~3x
+    from app import curve_live
+    assert "curve_70_organic_grad" in curve_live.live_rules()      # tradeable for real (exit level 99 %)

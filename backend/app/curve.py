@@ -140,6 +140,14 @@ CURVE_RULES: dict[str, CurveRule] = {
                                        grad_trail=30.0,
                                        title="curve_70_organic for slower coins: 70% reached 15+ min after launch, "
                                              "organic trading; rides graduation, sells 30% under the high"),
+    # user's choice (2026-11-24, paper and real money): curve_70_organic sold just before the graduation, no ride after
+    # it. A real account can't sell at the graduation itself, so both sell at 99 % sold (~3.2x from 70 %); a coin
+    # that jumps straight past 99 % is sold at the graduation price.
+    "curve_70_organic_grad": CurveRule(70.0, "custom", exit_at=99.0, sl=-25.0, size=10.0, max_hold_s=3600.0,
+                                       max_secs=300.0, min_buys_60s=10, min_sells_60s=5, max_dev=25.0,
+                                       skip_copycat=True,
+                                       title="curve_70_organic sold at 99% sold (just before graduation, no trailing "
+                                             "after it), stop -25%, 60 min max"),
     "curve_70_organic": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
                                   min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True, grad_trail=30.0,
                                   title="curve 70% with organic trading (10+ buys, 5+ sells in a minute, dev under "
