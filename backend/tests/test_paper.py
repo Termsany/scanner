@@ -295,6 +295,63 @@ def test_a_wild_price_jump_is_ignored_until_it_repeats():
     assert set(_db(body)) == {"take_profit"}
 
 
+def _sources(table):
+    async def fetch(chain, addrs):
+        return {a: table[a] for a in addrs if a in table}
+    return fetch
+
+
+def test_a_repeated_jump_needs_the_other_sources_to_agree():
+    """2026-11-23: one source priced ZEC (~$800) at $8.2M three reads in a row: +$1.88M of paper profit."""
+    import app.paper as paper
+
+    s = _settings()
+
+    def run(sources):
+        paper._suspect.clear()
+
+        async def body(sess):
+            tok = Token(chain=Chain.solana, address=MINT, symbol="TOK")
+            sess.add(tok)
+            await sess.flush()
+            await process_entries(sess, s)
+            await sess.commit()
+            sess.add(Signal(token_id=tok.id, score=86, badge=Badge.strong_alpha, price_usd=1.0, payload={}))
+            await sess.commit()
+            await process_entries(sess, s)
+            await sess.commit()
+            for _ in range(4):                                   # 9,700x, repeated
+                await process_exits(sess, _prices({MINT: 9700.0}), s, _sources({MINT: sources}))
+                await sess.commit()
+            return [(r.status, r.last_price) for r in (await sess.execute(select(PaperPosition))).scalars().all()]
+
+        return _db(body)
+
+    assert set(run([9650.0, 1.02])) == {("open", 1.0)}              # the other source says ~$1: ignored
+    assert set(run([9700.0])) == {("open", 1.0)}                    # only one source: can't confirm it
+    assert {st for st, _ in run([9650.0, 9800.0])} == {"closed"}    # both agree: a real move
+
+
+def test_leader_sold_at_an_absurd_recorded_price_closes_at_the_last_good_one():
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)
+        await sess.commit()
+        sess.add(_trade(1, OTHER, price=1.0))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        sess.add(_trade(2, OTHER, side="sell", price=8_000_000.0, pct_sold=100.0, remaining=0))
+        await sess.commit()
+        await process_exits(sess, _prices({}), s)                # no live price, the trade's own price is absurd
+        await sess.commit()
+        return (await sess.execute(select(PaperPosition).where(PaperPosition.strategy == "wallet_follow"))).scalars().one()
+
+    p = _db(body)
+    assert p.status == "closed" and p.exit_reason == "leader_sold" and p.exit_price == 1.0 and p.pnl_pct < 0
+
+
 def test_reset_starts_a_strategy_from_zero_and_keeps_its_trades():
     from app.paper import reset_strategy
 

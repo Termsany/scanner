@@ -352,30 +352,50 @@ def _close(pos: PaperPosition, price: float, reason: str, at: datetime, s: Setti
 
 
 # A price more than JUMP times (or under 1/JUMP of) the last one is a bad read until it repeats: a wrong pair once
-# priced hSOL (~$81) at $396,965 and booked +$470k of paper profit (2026-11-23).
+# priced hSOL (~$81) at $396,965 and booked +$470k of paper profit (2026-11-23). Repeating is not enough on its
+# own: one source priced ZEC (~$800, $2M liquidity) at $8.2M three reads in a row and booked +$1.88M across
+# wallet_follow and wallet_cluster (2026-11-23). So a repeated jump must also be confirmed by every other price
+# source (Jupiter and DexScreener) when there are two.
 JUMP = 20.0
 JUMP_CONFIRM = 3
+AGREE = 2.0          # sources agree when within this factor of each other
 _suspect: dict[int, tuple[float, int]] = {}
 
+# (chain, [addresses]) -> {address: [price from each source that has one]}
+PriceSources = Callable[[Chain, list[str]], Awaitable[dict[str, list[float]]]]
 
-def _sane(p: PaperPosition, px: float) -> bool:
-    """False while a huge jump against the last price has not repeated JUMP_CONFIRM readings in a row."""
+
+def _jump(ref: float | None, px: float) -> bool:
+    return bool(ref) and not 1 / JUMP <= px / ref <= JUMP
+
+
+def _sane(p: PaperPosition, px: float) -> bool | None:
+    """True: a normal price, or a jump that has repeated JUMP_CONFIRM readings in a row (still to be checked
+    against the other sources: None means "repeated, confirm it"). False: a jump not yet repeated."""
     ref = p.last_price or p.entry_price
-    if not ref or 1 / JUMP <= px / ref <= JUMP:
+    if not _jump(ref, px):
         _suspect.pop(p.id, None)
         return True
     prev = _suspect.get(p.id)
     n = prev[1] + 1 if prev and 0.8 <= px / prev[0] <= 1.25 else 1
     if n >= JUMP_CONFIRM:
         _suspect.pop(p.id, None)
-        return True
+        return None
     _suspect[p.id] = (px, n)
     log.warning("paper: %s price %.6g is %.0fx its last %.6g: ignored until it repeats (%d/%d)",
                 p.symbol or p.token_address[:8], px, px / ref, ref, n, JUMP_CONFIRM)
     return False
 
 
-async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings | None = None) -> int:
+def _agreed(px: float, others: list[float]) -> bool:
+    """A repeated jump is real when at least two sources have a price and all of them are within AGREE of it."""
+    return len(others) >= 2 and all(1 / AGREE <= o / px <= AGREE for o in others)
+
+
+async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings | None = None,
+                        verify: PriceSources | None = None) -> int:
+    """`verify`: every price source for a token, asked only when a huge jump has repeated; without it (tests, or
+    no second source) a repeated jump is accepted as before."""
     s = s or get_settings()
     open_pos = (await session.execute(select(PaperPosition).where(
         PaperPosition.status == "open", PaperPosition.strategy.notin_(SELF_PRICED),
@@ -400,11 +420,37 @@ async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings
                 if px and px > 0:
                     live[(chain, a)] = px
 
+    sane: dict[int, bool | None] = {}
+    for p in open_pos:
+        px = live.get((p.chain, p.token_address))
+        if px is not None:
+            sane[p.id] = _sane(p, px)
+    confirm = [p for p in open_pos if sane.get(p.id) is None and p.id in sane]
+    if confirm and verify is not None:
+        checked: dict[tuple[Chain, str], list[float]] = {}
+        for chain in {p.chain for p in confirm}:
+            addrs = sorted({p.token_address for p in confirm if p.chain == chain})
+            try:
+                got = await verify(chain, addrs)
+            except Exception:
+                log.warning("paper: price check failed for %s", chain.value, exc_info=True)
+                got = {}
+            for a in addrs:
+                checked[(chain, a)] = [x for x in got.get(a, []) if x and x > 0]
+        for p in confirm:
+            px = live[(p.chain, p.token_address)]
+            others = checked.get((p.chain, p.token_address), [])
+            ok = _agreed(px, others)
+            sane[p.id] = ok
+            if not ok:
+                log.warning("paper: %s jump to %.6g not confirmed by the other sources %s: ignored",
+                            p.symbol or p.token_address[:8], px, [round(o, 10) for o in others])
+
     closed = 0
     for p in open_pos:
         entry_time = utc(p.entry_time)
         px = live.get((p.chain, p.token_address))
-        if px is not None and not _sane(p, px):
+        if px is not None and sane.get(p.id) is False:
             px = None
         if px is not None:
             p.last_price, p.last_priced_at = px, now
@@ -463,7 +509,9 @@ async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings
                 if utc(sold[1]) and utc(sold[1]) <= entry_time:
                     at_px = p.entry_price       # it sold before we were even in: in and straight out (fees only)
                 else:
-                    at_px = px or sold[0] or p.last_price or p.entry_price
+                    ref = p.last_price or p.entry_price
+                    trade_px = sold[0] if sold[0] and not _jump(ref, sold[0]) else None   # its recorded price, if sane
+                    at_px = px or trade_px or ref
                 _close(p, at_px, "leader_sold", now, s)
                 closed += 1
                 continue
@@ -693,13 +741,12 @@ def dexscreener_prices(dex) -> PriceFetcher:
     return fetch
 
 
-def jupiter_first_prices(dex) -> PriceFetcher:
-    """Solana: Jupiter's price (fresh; through the live bot's shared Jupiter gate), DexScreener for the rest."""
+def jupiter_prices() -> PriceFetcher:
+    """Solana only: Jupiter's price (fresh; through the live bot's shared Jupiter gate)."""
     import httpx
 
     from app.live import JUPITER
 
-    slow = dexscreener_prices(dex)
     http = httpx.AsyncClient(timeout=10)
 
     async def fetch(chain: Chain, addrs: list[str]) -> dict[str, float]:
@@ -715,6 +762,17 @@ def jupiter_first_prices(dex) -> PriceFetcher:
                             out[a] = float(d["usdPrice"])
             except Exception:
                 log.debug("paper: jupiter prices failed", exc_info=True)
+        return out
+
+    return fetch
+
+
+def jupiter_first_prices(dex) -> PriceFetcher:
+    """Solana: Jupiter's price, DexScreener for the rest."""
+    fast, slow = jupiter_prices(), dexscreener_prices(dex)
+
+    async def fetch(chain: Chain, addrs: list[str]) -> dict[str, float]:
+        out = await fast(chain, addrs)
         missing = [a for a in addrs if a not in out]
         if missing:
             out.update(await slow(chain, missing))
@@ -723,17 +781,36 @@ def jupiter_first_prices(dex) -> PriceFetcher:
     return fetch
 
 
+def all_sources(dex) -> PriceSources:
+    """Every source's price for each token (Jupiter on Solana, DexScreener everywhere): to confirm a huge jump."""
+    sources = (jupiter_prices(), dexscreener_prices(dex))
+
+    async def fetch(chain: Chain, addrs: list[str]) -> dict[str, list[float]]:
+        out: dict[str, list[float]] = defaultdict(list)
+        for src in sources:
+            try:
+                got = await src(chain, addrs)
+            except Exception:
+                got = {}
+            for a, px in got.items():
+                out[a].append(px)
+        return dict(out)
+
+    return fetch
+
+
 class PaperEngine:
     def __init__(self, dex, settings: Settings | None = None) -> None:
         self.s = settings or get_settings()
         self.prices = jupiter_first_prices(dex) if self.s.paper_live_prices else dexscreener_prices(dex)
+        self.verify = all_sources(dex)
         self._exits_at = self._full_at = -1e9
 
     async def run_once(self) -> tuple[int, int]:
         from app.db import SessionLocal
 
         async with SessionLocal() as session:
-            closed = await process_exits(session, self.prices, self.s)
+            closed = await process_exits(session, self.prices, self.s, self.verify)
             opened = await process_entries(session, self.s, self.prices if self.s.paper_live_prices else None)
             await session.commit()
         return opened, closed
@@ -746,7 +823,7 @@ class PaperEngine:
         async with SessionLocal() as session:
             if now - self._exits_at >= self.s.paper_exit_seconds:
                 self._exits_at = now
-                await process_exits(session, self.prices, self.s)
+                await process_exits(session, self.prices, self.s, self.verify)
             await process_entries(session, self.s, self.prices)
             await session.commit()
 
