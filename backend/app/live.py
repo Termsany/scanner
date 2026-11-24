@@ -301,6 +301,7 @@ class Account:
     # curve rules ON -> {"size_usd", "exit_at", "tp_pct"} (None: the account's entry / the rule's exit / none);
     # a plain number is the entry alone
     curve_bots: dict[str, Any] = field(default_factory=dict)
+    dry: bool = False                          # always simulated (real quotes, nothing signed), even in live mode
 
     def __post_init__(self) -> None:
         if self.curve_strategy and not self.curve_bots:
@@ -2751,12 +2752,13 @@ async def live_status(session: AsyncSession, settings: Settings | None = None) -
     accounts = []
     for r in await account_rows(session, s):
         a = to_account(r, s, None)
-        rows = (await session.execute(select(LivePosition).where(LivePosition.mode == mode, _acct(a.name))
+        amode = "dry" if a.dry and mode != "off" else mode
+        rows = (await session.execute(select(LivePosition).where(LivePosition.mode == amode, _acct(a.name))
                                       .order_by(LivePosition.opened_at.desc()).limit(200))).scalars().all()
         closed = [r for r in rows if r.status == "closed"]
         opened = [r for r in rows if r.status == "open"]
         accounts.append({
-            "name": a.name, "active": r.enabled and (mode == "dry" or bool(r.key_enc) or (r.key_source == "env" and any(
+            "name": a.name, "active": r.enabled and (amode == "dry" or bool(r.key_enc) or (r.key_source == "env" and any(
                 e.name == a.name and e.private_key for e in accounts_from_settings(s)))),
             "paused": a.paused, "enabled": r.enabled,
             "pubkey": await _get(session, _key(PUBKEY, a.name)) or r.pubkey, "wallets": a.wallets,
@@ -2764,7 +2766,7 @@ async def live_status(session: AsyncSession, settings: Settings | None = None) -
             "open": opened, "closed": closed, "failed": [r for r in rows if r.status == "failed"],
             "open_cost_usd": sum(r.cost_usd for r in opened),
             "realized_usd": sum(r.pnl_usd or 0 for r in closed),
-            "realized_24h": await realized_24h(session, mode, a.name),
+            "realized_24h": await realized_24h(session, amode, a.name), "dry_run": a.dry,
         })
     return {"mode": mode, "paused": await is_paused(session), "accounts": accounts}
 
@@ -2852,10 +2854,13 @@ class LiveTrader:
 
     async def _sync(self, accounts: list[Account], mode: str, running: dict, said: set, fast):
         want = {a.name: a for a in accounts}
+        for a in accounts:
+            if a.dry:
+                a.private_key = None               # never a key on a dry-run account, whatever loaded it
         for name in list(running):
             task, key, eng = running[name]
             a = want.get(name)
-            if a is None or a.private_key != key or task.done():
+            if a is None or a.private_key != key or task.done() or eng.x.mode != ("dry" if a.dry else mode):
                 task.cancel()
                 running.pop(name)
                 if a is None:
@@ -2866,6 +2871,7 @@ class LiveTrader:
         for name, a in want.items():
             if name in running:
                 continue
+            amode = "dry" if a.dry else mode           # a dry-run account simulates even in live mode
             env = "LIVE_PRIVATE_KEY" if name == "main" else f"LIVE_PRIVATE_KEY_{name.upper()}"
             if not a.wallets and f"nowallets:{name}" not in said:
                 # no copied wallets: still run its engine, which books hand sales, runs the owner's targets / stops
@@ -2873,7 +2879,7 @@ class LiveTrader:
                 # account was never booked because its engine never started)
                 log.info("live[%s]: no wallets to copy; managing its own positions only", name)
                 said.add(f"nowallets:{name}")
-            if mode == "live" and not a.private_key:
+            if amode == "live" and not a.private_key:
                 if name not in said:
                     log.warning("live[%s]: no private key, account idle", name)
                     await self._telegram(f"⏸ Copy account [{name}] is idle: no private key ({env} on the server, "
@@ -2881,7 +2887,7 @@ class LiveTrader:
                     said.add(name)
                 continue
             try:
-                x = JupiterExecutor(self.s, live=(mode == "live"), private_key=a.private_key)
+                x = JupiterExecutor(self.s, live=(amode == "live"), private_key=a.private_key)
             except Exception as exc:
                 if name not in said:
                     log.error("live[%s]: bad private key (%s)", name, type(exc).__name__)
@@ -2891,7 +2897,7 @@ class LiveTrader:
             said.discard(name)
             eng = CopyEngine(x, self.s, notify=self._telegram, account=a, screener=self._screener,
                              send_to=self._send_to)
-            running[name] = (asyncio.create_task(self._run_account(a, x, mode, eng)), a.private_key, eng)
+            running[name] = (asyncio.create_task(self._run_account(a, x, amode, eng)), a.private_key, eng)
         wallets = frozenset(w for name in running for w in want[name].wallets)
         if self.s.live_fast_detection and self.s.live_rpc_url and (fast is None or fast[1] != wallets
                                                                    or fast[0].done()):

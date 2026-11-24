@@ -611,6 +611,9 @@ class TradingAccount(Base):
     billing_anchor: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     billing_hwm_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     billing_hold: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)  # unpaid: no new buys
+    # simulated with real quotes, never signed or sent, even when LIVE_MODE=live: what copying would really have
+    # made, at our real speed and price impact (paper copies booked +48% where the same buys lost 12% for real)
+    dry_run: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

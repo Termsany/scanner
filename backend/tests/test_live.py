@@ -2344,6 +2344,44 @@ def test_account_with_no_copied_wallets_still_gets_an_engine():
     assert names == ["main", "wallet"] and names2 == ["main", "wallet"] and sorted(started) == ["main", "wallet"]
 
 
+def test_a_dry_run_account_simulates_in_live_mode_and_never_gets_a_key():
+    from solders.keypair import Keypair
+
+    from app.live import Account, LiveTrader
+
+    async def go():
+        t = LiveTrader(Settings(live_fast_detection=False, live_screen_enabled=False))
+        t._screener = None
+        modes = {}
+
+        async def fake_run(a, x, mode, eng):
+            modes[a.name] = (mode, x.mode, x.kp is None, a.private_key)
+            await asyncio.sleep(3600)
+
+        async def no_telegram(text):
+            return None
+
+        t._run_account, t._telegram = fake_run, no_telegram
+        running, said = {}, set()
+        dry = Account("dulx_dry", 50, 400, 400, ["L1"], str(Keypair()), dry=True)   # a key slipped in: dropped
+        real = Account("brothers", 50, 400, 400, ["L1"], str(Keypair()))
+        await t._sync([dry, real], "live", running, said, None)
+        await asyncio.sleep(0)
+        first = dict(modes)
+        # switched to live later (dry flag off): its engine is restarted in live mode, with its key
+        key = str(Keypair())
+        await t._sync([Account("dulx_dry", 50, 400, 400, ["L1"], key), real], "live", running, said, None)
+        await asyncio.sleep(0)
+        for task, _, _ in running.values():
+            task.cancel()
+        return first, modes
+
+    first, after = asyncio.run(go())
+    assert first["dulx_dry"] == ("dry", "dry", True, None)
+    assert first["brothers"][:3] == ("live", "live", False)
+    assert after["dulx_dry"][:2] == ("live", "live")
+
+
 def test_decimals_of_a_brand_new_coin_not_finalized_yet():
     """getTokenSupply at "confirmed" (a coin made seconds ago isn't finalized); a pump coin falls back to 6."""
     import asyncio
