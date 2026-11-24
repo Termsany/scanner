@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     holdings_max_accounts: int = 4_000          # per chain per cycle
     holdings_timeout_seconds: float = 20.0
     holdings_min_interval_seconds: float = 0.25  # between RPC requests
+    # Solana RPC for the holdings check; defaults to LIVE_RPC_URL (Helius), then SOLANA_RPC_URL. The public
+    # mainnet-beta endpoint answered 429 every few cycles (2026-11-24), so wallets went unchecked.
+    holdings_solana_rpc_url: str | None = None
     solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
     evm_rpc_urls: dict[str, str] = Field(default_factory=lambda: {
         "ethereum": "https://ethereum-rpc.publicnode.com",

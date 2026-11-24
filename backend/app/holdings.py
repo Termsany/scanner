@@ -43,6 +43,7 @@ class HoldingsChecker:
         self.http = http or httpx.AsyncClient(timeout=httpx.Timeout(12.0),
                                               headers={"User-Agent": "alpha-scanner/0.1"})
         self._own = http is None
+        self.solana_url = settings.holdings_solana_rpc_url or settings.live_rpc_url or settings.solana_rpc_url
         self._last = 0.0
         self._lock = asyncio.Lock()
 
@@ -85,7 +86,7 @@ class HoldingsChecker:
         calls = 0
         for i in range(0, len(lookups), SOLANA_BATCH):
             chunk = lookups[i:i + SOLANA_BATCH]
-            body = await self._post(self.s.solana_rpc_url, {
+            body = await self._post(self.solana_url, {
                 "jsonrpc": "2.0", "id": 1, "method": "getMultipleAccounts",
                 "params": [[a for a, _, _ in chunk], {"encoding": "jsonParsed", "commitment": "confirmed"}],
             })

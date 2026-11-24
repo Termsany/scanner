@@ -61,6 +61,29 @@ def test_solana_holdings_respect_min_usd():
     assert (Chain.solana, MINT_B) not in out                    # 10 x $0.5 = $5 dust
 
 
+def test_solana_holdings_use_the_trading_rpc_not_the_public_one():
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"value": []}})
+
+    async def go(s):
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            await HoldingsChecker(s, http=http).check([m(Chain.solana, MINT_A, 1.0)], {Chain.solana: {OWNER: "x"}})
+        finally:
+            await http.aclose()
+
+    pub = "https://public.test/"
+    asyncio.run(go(Settings(holdings_min_interval_seconds=0.0, solana_rpc_url=pub,
+                            live_rpc_url="https://helius.test/?api-key=k")))
+    asyncio.run(go(Settings(holdings_min_interval_seconds=0.0, solana_rpc_url=pub, live_rpc_url="https://helius.test/",
+                            holdings_solana_rpc_url="https://own.test/")))
+    asyncio.run(go(Settings(holdings_min_interval_seconds=0.0, solana_rpc_url=pub, live_rpc_url=None)))
+    assert seen == ["https://helius.test/?api-key=k", "https://own.test/", pub]
+
+
 def test_evm_balance_of_batch():
     def handler(req):
         resp = []
