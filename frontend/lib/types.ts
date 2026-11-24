@@ -336,6 +336,7 @@ export interface PaperStrategy {
   open: number;
   closed: number;
   wins: number;
+  interrupted?: number;           // closed by a bot restart / long feed outage: not in the numbers
   win_rate: number | null;
   realized_usd: number;
   unrealized_usd: number;

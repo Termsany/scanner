@@ -293,6 +293,11 @@ function StrategyCard({ s, on, onClick, onReset, onPause, onHide }: {
       <div className={`num mt-3 text-2xl font-semibold ${pctClass(s.realized_usd || null)}`}>{money(s.realized_usd)}</div>
       <div className="num mt-1 text-xs text-muted">
         {s.closed} closed · win {s.win_rate == null ? "—" : `${(s.win_rate * 100).toFixed(0)}%`} · return {pct(s.return_pct)}
+        {!!s.interrupted && (
+          <span className="text-faint" title="Closed by a bot restart or a long feed outage, not by the strategy: left out of these numbers">
+            {" "}· {s.interrupted} interrupted
+          </span>
+        )}
       </div>
       <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-raised" title={`${s.wins} wins of ${s.closed}`}>
         <span className="h-full bg-mint transition-all duration-700" style={{ width: `${s.closed ? (s.wins / s.closed) * 100 : 0}%` }} />

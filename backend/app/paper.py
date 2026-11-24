@@ -571,6 +571,10 @@ def _custom_strategy(row: Any) -> Strategy:
 
 
 RESET_KEY = "paper_reset:"     # tracker_cursors key + strategy -> ISO time the owner reset its numbers
+# exits that are not the strategy's: the bot restarted (open trades are closed flat at their last price) or the
+# feed was down too long. Kept and shown, but left out of the strategy's numbers (2026-11-24: 161 of curve_30_70's
+# 233 trades were "restart", which made its results mostly about our deploys, not the rule)
+INTERRUPTED = ("restart", "feed_lost")
 
 
 async def paper_resets(session: AsyncSession) -> dict[str, datetime]:
@@ -621,19 +625,21 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
     strategies = []
     for strat in [*STRATEGIES.values(), *(_custom_strategy(c) for c in customs)]:
         mine = [r for r in rows if r.strategy == strat.name]
-        closed = [r for r in mine if r.status == "closed"]
+        interrupted = [r for r in mine if r.status == "closed" and r.exit_reason in INTERRUPTED]
+        closed = [r for r in mine if r.status == "closed" and r.exit_reason not in INTERRUPTED]
         opened = [r for r in mine if r.status == "open"]
         wins = [r for r in closed if (r.pnl_usd or 0) > 0]
         unreal = sum(_row(r, s)["pnl_usd"] or 0.0 for r in opened)
         reasons: dict[str, int] = defaultdict(int)
-        for r in closed:
+        for r in closed + interrupted:
             reasons[r.exit_reason or "?"] += 1
         realized = sum(r.pnl_usd or 0.0 for r in closed)
         strategies.append({
             "name": strat.name, "title": strat.title, "tp_pct": strat.tp_pct, "sl_pct": strat.sl_pct,
             "mirror": strat.mirror or strat.live_rule,
             "max_hold_minutes": s.paper_mirror_max_hold_hours * 60 if strat.mirror or strat.live_rule else strat.max_hold_minutes,
-            "trades": len(mine), "open": len(opened), "closed": len(closed), "wins": len(wins),
+            "trades": len(mine) - len(interrupted), "open": len(opened), "closed": len(closed), "wins": len(wins),
+            "interrupted": len(interrupted),
             "win_rate": round(len(wins) / len(closed), 3) if closed else None,
             "realized_usd": round(realized, 2), "unrealized_usd": round(unreal, 2),
             "invested_usd": round(sum(r.size_usd for r in closed), 2),

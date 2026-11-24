@@ -325,6 +325,30 @@ def test_reset_starts_a_strategy_from_zero_and_keeps_its_trades():
     assert kept == 2                                                                       # nothing deleted
 
 
+def test_restart_and_feed_lost_closes_are_left_out_of_the_numbers():
+    s = _settings()
+    now = datetime.now(timezone.utc)
+
+    def pos(i, reason, pnl_usd):
+        return PaperPosition(strategy="curve_70", chain=Chain.solana, token_address=f"M{i}", symbol="T",
+                             trigger="t", status="closed", size_usd=10.0, entry_time=now, entry_price=1.0,
+                             fill_price=1.0, tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60,
+                             exit_time=now, exit_reason=reason, pnl_usd=pnl_usd,
+                             pnl_pct=pnl_usd * 10, remaining_frac=0.0, proceeds_usd=10.0 + pnl_usd)
+
+    async def body(sess):
+        sess.add_all([pos(1, "graduated", 5.0), pos(2, "stop_loss", -2.5),
+                      pos(3, "restart", -8.0), pos(4, "feed_lost", 9.0)])
+        await sess.commit()
+        return next(x for x in (await paper_summary(sess, settings=s))["strategies"] if x["name"] == "curve_70")
+
+    st = _db(body)
+    assert st["closed"] == 2 and st["interrupted"] == 2 and st["trades"] == 2
+    assert st["wins"] == 1 and st["win_rate"] == 0.5 and st["realized_usd"] == 2.5
+    assert st["invested_usd"] == 20.0 and st["return_pct"] == 12.5 and st["worst_pct"] == -25.0
+    assert st["exit_reasons"] == {"graduated": 1, "stop_loss": 1, "restart": 1, "feed_lost": 1}   # still shown
+
+
 def test_custom_curve_strategies_show_on_the_paper_page_and_can_be_reset():
     from app.models import CurveCustom
     from app.paper import reset_strategy
