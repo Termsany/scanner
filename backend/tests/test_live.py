@@ -353,35 +353,44 @@ class BalExec(FakeExec):
         return f
 
 
-def test_leader_sells_also_sell_manual_tokens():
-    x = BalExec(manual={"MAN": 3_000_000, "ONLY": 2_000_000})
-    notes = []
+def test_leader_sells_also_sell_hand_buys_but_never_coins_moved_in_or_on_hold():
+    """Hand buys the bot adopted (manual positions) follow the leader out; coins with no position (moved in from
+    another wallet, airdrops) and coins on hold are the owner's own. 2026-11-24: MOMO moved from main (on hold) to
+    brothers was sold in full when a brothers leader sold it."""
+    from app.live import MANUAL
 
-    async def note(t):
-        notes.append(t)
+    x = BalExec(manual={"MAN": 2_000_000, "MOVED": 2_000_000, "HELD": 1_000_000})
+
+    def manual(mint, raw, hands_off=None):
+        return LivePosition(mode="live", account="main", token_address=mint, symbol=mint, leader_wallet=MANUAL,
+                            leader_trade_id=0, status="open", cost_usd=20.0, tokens_raw=str(raw),
+                            tokens_bought_raw=str(raw), hands_off=hands_off)
 
     async def body(sess):
-        eng = CopyEngine(x, _s(), notify=note)
+        eng = CopyEngine(x, _s())
         await eng.step(sess)
-        sess.add(_trade(mint="MAN"))                                   # bot buys 1,000,000
+        sess.add(_trade(mint="MAN"))                                   # bot buys 1,000,000 of MAN
         await sess.commit()
         await eng.step(sess)
+        sess.add_all([manual("MAN", 1_000_000), manual("HELD", 1_000_000, hands_off=True)])   # then hand buys
+        await sess.commit()
         sess.add(_trade(mint="MAN", side="sell", pct_sold=50, remaining=1))
         await sess.commit()
         await eng.step(sess)
-        assert x.bal["MAN"] == 2_000_000                               # 500k bot + 1.5M manual left
-        sess.add(_trade(mint="MAN", side="sell", pct_sold=100, remaining=0))
-        sess.add(_trade(mint="ONLY", side="sell", pct_sold=100, remaining=0))   # manual-only token
+        assert x.bal["MAN"] == 2_000_000                               # 500k bot + 500k hand buy sold; 1M left
+        sess.add_all([_trade(mint="MAN", side="sell", pct_sold=100, remaining=0),
+                      _trade(mint="MOVED", side="sell", pct_sold=100, remaining=0),
+                      _trade(mint="HELD", side="sell", pct_sold=100, remaining=0)])
         await sess.commit()
         await eng.step(sess)
-        return (await sess.execute(select(LivePosition))).scalars().one()
+        return (await sess.execute(select(LivePosition).order_by(LivePosition.id))).scalars().all()
 
-    pos = _db(body)
-    sells = [c[2] for c in x.calls if c[0] == "sell"]
-    assert sells == [500_000, 1_500_000, 500_000, 1_500_000, 2_000_000]
-    assert x.bal == {"MAN": 0, "ONLY": 0}
-    assert pos.status == "closed" and pos.tokens_raw == "0"
-    assert sum("your own" in n for n in notes) == 3
+    rows = _db(body)
+    assert x.bal == {"MAN": 1_000_000, "MOVED": 2_000_000, "HELD": 1_000_000}   # the extra 1M MAN had no position
+    by = {(r.token_address, r.leader_wallet): r for r in rows}
+    assert by[("MAN", LEADER)].status == "closed" and by[("MAN", "manual")].status == "closed"
+    assert by[("MAN", "manual")].exit_reason == "leader_sold"
+    assert by[("HELD", "manual")].status == "open" and by[("HELD", "manual")].tokens_raw == "1000000"
 
 
 def test_new_tokens_only_leader_skips_add_on_buys():
