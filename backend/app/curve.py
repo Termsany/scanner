@@ -91,11 +91,19 @@ class CurveRule:
     min_buys_60s: int | None = None   # at least this many buys in the 60 s before the decision
     min_sells_60s: int | None = None  # and this many sells (two-way trading, not one bot buying)
     skip_hosts: tuple[str, ...] = ()  # metadata hosts of bundler launch tools (most of their coins were dumped)
+    # (2026-11-24, from 110 organic trades) don't chase: skip if the price at our fill is this % or more above the
+    # decision (64 trades under 3 %: +$297; 46 at 3 %+: -$98); and too many buys a minute is bots (17 trades, no win)
+    max_paid_pct: float | None = None
+    max_buys_60s: int | None = None
+    # a later stop: for the first sl_after_s seconds of the trade only early_sl applies (wider), then sl.
+    # Stopped coins that graduated anyway dipped in their first ~30 s (2026-11-24). Paper only for now.
+    sl_after_s: float | None = None
+    early_sl: float | None = None
 
     def waits(self) -> bool:
         return (self.min_fill is not None or self.max_dev is not None or self.min_rise is not None
                 or self.skip_copycat or self.min_buys_60s is not None or self.min_sells_60s is not None
-                or bool(self.skip_hosts))
+                or bool(self.skip_hosts) or self.max_paid_pct is not None or self.max_buys_60s is not None)
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -148,6 +156,19 @@ CURVE_RULES: dict[str, CurveRule] = {
                                        skip_copycat=True,
                                        title="curve_70_organic sold at 99% sold (just before graduation, no trailing "
                                              "after it), stop -25%, 60 min max"),
+    # (2026-11-24) curve_70_organic without chasing (price at the fill under +3 % of the decision) and without
+    # bot-heavy coins (80+ buys a minute); and the same with a later stop (-40 % in the first 60 s, then -25 %)
+    "curve_70_organic_v2": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
+                                     min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True,
+                                     grad_trail=30.0, max_paid_pct=3.0, max_buys_60s=80,
+                                     title="curve_70_organic, no chasing (fill under +3% of the decision), under 80 "
+                                           "buys a minute; rides graduation, 30% trailing"),
+    "curve_70_organic_v2_late_sl": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
+                                             min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True,
+                                             grad_trail=30.0, max_paid_pct=3.0, max_buys_60s=80,
+                                             sl_after_s=60.0, early_sl=-40.0,
+                                             title="curve_70_organic_v2 with a later stop: -40% in the first minute, "
+                                                   "then -25%"),
     "curve_70_organic": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
                                   min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True, grad_trail=30.0,
                                   title="curve 70% with organic trading (10+ buys, 5+ sells in a minute, dev under "
@@ -531,6 +552,10 @@ class PaperCurve:
                 continue                                  # a copy of a coin launched just before it
             if rule.min_buys_60s is not None and (pre.get("buys_60s") or 0) < rule.min_buys_60s:
                 continue                                  # nobody but the launch bought
+            if rule.max_buys_60s is not None and (pre.get("buys_60s") or 0) >= rule.max_buys_60s:
+                continue                                  # bot-heavy
+            if rule.max_paid_pct is not None and decision_px and (w.price / decision_px - 1) * 100 >= rule.max_paid_pct:
+                continue                                  # the price ran before our buy: don't chase
             if rule.min_sells_60s is not None and (pre.get("sells_60s") or 0) < rule.min_sells_60s:
                 continue                                  # one-way buying: a bot, not a market
             if rule.skip_hosts and _host(w.uri) in rule.skip_hosts:
@@ -616,7 +641,9 @@ class PaperCurve:
                     reason = "take_profit"
                 elif pos["half"] and w.price <= pos["market"]:
                     reason = "breakeven_stop"
-                elif not pos["half"] and rule.sl is not None and pct <= rule.sl:
+                elif not pos["half"] and rule.sl is not None and pct <= (
+                        rule.early_sl if rule.sl_after_s is not None and rule.early_sl is not None
+                        and now - pos["at"] < rule.sl_after_s else rule.sl):
                     reason = "stop_loss"
                 elif now - pos["at"] >= (rule.max_hold_s or self.s.curve_max_hold_s):
                     reason = "time"

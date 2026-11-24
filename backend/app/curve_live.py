@@ -55,7 +55,8 @@ def live_rules() -> dict[str, Any]:
 
     return {k: r for k, r in CURVE_RULES.items()
             if r.mode in ("custom", "range") and r.sl is not None
-            and (r.exit_at is not None or getattr(r, "grad_trail", None) is not None)}
+            and (r.exit_at is not None or getattr(r, "grad_trail", None) is not None)
+            and getattr(r, "sl_after_s", None) is None}          # a later stop isn't done for real yet
 
 
 def publish(strategy: str, rule: Any, mint: str, symbol: str, px_sol: float, progress: float, why: str,

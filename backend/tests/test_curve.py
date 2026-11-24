@@ -660,3 +660,41 @@ def test_curve_70_organic_grad_sells_at_the_graduation():
     assert sold["reason"] == "graduated" and sold["pnl"] > 15     # jumped past 99 %: sold at the graduation, ~3x
     from app import curve_live
     assert "curve_70_organic_grad" in curve_live.live_rules()      # tradeable for real (exit level 99 %)
+
+
+def _organic_coin(c, mint, fill_at, t0=100.0):
+    c.on_create({**create(mint), "symbol": mint, "initialBuy": 0.10 * REAL_TOKENS_START}, 0.0)
+    t, p = t0, 45.0
+    c.on_curve(mint, acct(p), t)
+    for i in range(28):
+        t += 2
+        p += 0.9 if i % 3 != 2 else -0.4
+        c.on_curve(mint, acct(p), t)
+    c.on_curve(mint, acct(70), t + 1)
+    c.on_curve(mint, acct(fill_at), t + 3.5)
+    return t + 3.5
+
+
+def test_organic_v2_does_not_chase_a_price_that_ran_before_the_fill():
+    c = PaperCurve(S())
+    _organic_coin(c, "C1", 72.0)                      # +6 % between decision and fill: v2 skips it
+    assert "curve_70_organic" in c.watch["C1"].held and "curve_70_organic_v2" not in c.watch["C1"].held
+    _organic_coin(c, "C2", 70.5)                      # +1.6 %: bought
+    assert "curve_70_organic_v2" in c.watch["C2"].held and "curve_70_organic_v2_late_sl" in c.watch["C2"].held
+
+
+def test_late_stop_waits_a_minute_unless_the_drop_is_deep():
+    from app.curve_live import live_rules
+
+    assert "curve_70_organic_v2_late_sl" not in live_rules() and "curve_70_organic_v2" in live_rules()
+    c = PaperCurve(S())
+    t = _organic_coin(c, "D1", 70.5)
+    c.on_curve("D1", acct(59.5), t + 10)              # about -27 % at 10 s: v2 stops, the late stop waits
+    held = c.watch["D1"].held
+    assert "curve_70_organic_v2" not in held and "curve_70_organic_v2_late_sl" in held
+    c.on_curve("D1", acct(59.4), t + 70)              # still under -25 % after a minute: now it stops
+    assert "curve_70_organic_v2_late_sl" not in c.watch["D1"].held
+    c2 = PaperCurve(S())
+    t = _organic_coin(c2, "D2", 70.5)
+    c2.on_curve("D2", acct(50), t + 5)                # about -44 % at 5 s: past -40 %, out at once
+    assert "curve_70_organic_v2_late_sl" not in c2.watch["D2"].held

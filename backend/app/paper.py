@@ -60,7 +60,8 @@ SELF_PRICED = ("snipe_all", "snipe_momentum", "grad_all", "grad_confirm", "curve
                "curve_70_half", "curve_70_trail", "curve_70_filter", "curve_85_half40", "curve_30_70",
                "curve_30_70_sl", "snipe_fast_tp", "curve_fast19", "curve_fast34", "curve_93_fast",
                "curve_70_live", "curve_fast34_mom", "curve_fast34_mom2", "curve_70_organic",
-               "curve_70_organic_slow", "curve_70_organic_grad")
+               "curve_70_organic_slow", "curve_70_organic_grad", "curve_70_organic_v2",
+               "curve_70_organic_v2_late_sl")
 
 STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("wallet_follow", "Follow a tracked wallet (exit when it sells)"),
@@ -119,6 +120,11 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("curve_70_organic", "Bonding curve: 70% with organic trading (10+ buys, 5+ sells a minute, dev under 25%) "
              "within 5 min; rides graduation, sells 30% under the high", tp_pct=0.0, sl_pct=-25.0,
              max_hold_minutes=60),
+    Strategy("curve_70_organic_v2", "Bonding curve: curve_70_organic without chasing (fill under +3% of the "
+             "decision) and under 80 buys a minute; rides graduation, 30% trailing", tp_pct=0.0, sl_pct=-25.0,
+             max_hold_minutes=60),
+    Strategy("curve_70_organic_v2_late_sl", "Bonding curve: curve_70_organic_v2 with a later stop (-40% in the first "
+             "minute, then -25%)", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),
     Strategy("curve_70_organic_grad", "Bonding curve: curve_70_organic sold at 99% sold, just before graduation "
              "(no trailing after it), stop -25%", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),
     Strategy("curve_70_organic_slow", "Bonding curve: curve_70_organic for coins that took 15+ min to reach 70% "
