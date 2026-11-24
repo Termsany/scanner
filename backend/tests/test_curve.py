@@ -683,6 +683,37 @@ def test_organic_v2_does_not_chase_a_price_that_ran_before_the_fill():
     assert "curve_70_organic_v2" in c.watch["C2"].held and "curve_70_organic_v2_late_sl" in c.watch["C2"].held
 
 
+def test_curve_70_quiet_buys_a_slow_climb_and_skips_a_rush_of_buying():
+    def run(mint, start):
+        c = PaperCurve(S())
+        c.on_create({**create(mint), "symbol": mint, "initialBuy": 0.05 * REAL_TOKENS_START}, 0.0)
+        t, p = 100.0, start
+        c.on_curve(mint, acct(p), t)
+        for _ in range(30):                             # the minute before 70 %
+            t += 2
+            p += (69.9 - start) / 30
+            c.on_curve(mint, acct(p), t)
+        c.on_curve(mint, acct(70), t + 1)
+        c.on_curve(mint, acct(70.3), t + 3.5)
+        return c, t + 3.5
+
+    c, t = run("Q1", 68.8)                              # ~1 SOL net in the minute: quiet
+    held = c.watch["Q1"].held
+    assert "curve_70_quiet" in held and "curve_70_quiet_wide_sl" in held and "curve_70" in held
+    c.on_curve("Q1", acct(58.5), t + 10)                # about -29 %: the -25 % stop sells, the -45 % one holds
+    held = c.watch["Q1"].held
+    assert "curve_70_quiet" not in held and "curve_70_quiet_wide_sl" in held
+    c.on_curve("Q1", acct(99.2), t + 60)                # sold at 99 % sold
+    assert "curve_70_quiet_wide_sl" not in c.watch["Q1"].held
+    assert [p["reason"] for p in c.closed if p["strategy"] == "curve_70_quiet_wide_sl"] == ["curve_target"]
+
+    c2, _ = run("Q2", 61.0)                             # ~9 SOL net in the minute: a rush, skipped
+    assert "curve_70" in c2.watch["Q2"].held and "curve_70_quiet" not in c2.watch["Q2"].held
+
+    from app.curve_live import live_rules
+    assert "curve_70_quiet" not in live_rules() and "curve_70_quiet_wide_sl" not in live_rules()   # paper only
+
+
 def test_late_stop_waits_a_minute_unless_the_drop_is_deep():
     from app.curve_live import live_rules
 

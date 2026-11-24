@@ -99,11 +99,18 @@ class CurveRule:
     # Stopped coins that graduated anyway dipped in their first ~30 s (2026-11-24). Paper only for now.
     sl_after_s: float | None = None
     early_sl: float | None = None
+    # (2026-11-24, 48 h of curve trades checked on-chain) coins that reach 70 % quietly graduate more: under 2 SOL
+    # net into the curve in the minute before the decision, 35.9 % of 170 graduated against 23.6 % of all 466
+    # (break-even selling at 99 % is ~31 %); a coin with fewer than 3 known buyers in that minute graduated 0 of 23
+    max_net_sol_60s: float | None = None   # skip if more than this SOL went into the curve (buys - sells) in 60 s
+    min_buyers_60s: int | None = None      # skip if fewer distinct buyers were seen (unknown, not streamed: allowed)
+    paper_only: bool = False               # not offered for real money until it proves itself on paper
 
     def waits(self) -> bool:
         return (self.min_fill is not None or self.max_dev is not None or self.min_rise is not None
                 or self.skip_copycat or self.min_buys_60s is not None or self.min_sells_60s is not None
-                or bool(self.skip_hosts) or self.max_paid_pct is not None or self.max_buys_60s is not None)
+                or bool(self.skip_hosts) or self.max_paid_pct is not None or self.max_buys_60s is not None
+                or self.max_net_sol_60s is not None or self.min_buyers_60s is not None)
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -173,6 +180,16 @@ CURVE_RULES: dict[str, CurveRule] = {
                                   min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True, grad_trail=30.0,
                                   title="curve 70% with organic trading (10+ buys, 5+ sells in a minute, dev under "
                                         "25%) within 5 min; rides graduation, sells 30% under the high, stop -25%"),
+    # (2026-11-24) the quiet-climb filter above, sold at 99 % sold; the -25 % stop also threw out 29 % of the coins
+    # that graduated (and filled at -40 % on average), so a wider stop runs beside it. Paper only for now.
+    "curve_70_quiet": CurveRule(70.0, "custom", exit_at=99.0, sl=-25.0, size=10.0, max_hold_s=3600.0,
+                                max_net_sol_60s=2.0, min_buyers_60s=3, paper_only=True,
+                                title="curve 70% reached quietly (under 2 SOL net in the minute before, 3+ buyers "
+                                      "if known); sell at 99% sold, stop -25%, 60 min max"),
+    "curve_70_quiet_wide_sl": CurveRule(70.0, "custom", exit_at=99.0, sl=-45.0, size=10.0, max_hold_s=3600.0,
+                                        max_net_sol_60s=2.0, min_buyers_60s=3, paper_only=True,
+                                        title="curve_70_quiet with a wider stop (-45%): keeps more of the coins "
+                                              "that dip before they graduate"),
     # user's choice (2026-11-23): curve_70 with real money at $10. curve_70 sells at graduation, which a real
     # account can't (it needs an exit level and a stop), so this is curve_70 with the exit just before
     # graduation (99 % sold, ~+225 % on a classic curve), the same -25 % stop and 60 min max hold.
@@ -560,6 +577,12 @@ class PaperCurve:
                 continue                                  # one-way buying: a bot, not a market
             if rule.skip_hosts and _host(w.uri) in rule.skip_hosts:
                 continue                                  # launched with a bundler tool
+            if rule.max_net_sol_60s is not None and (
+                    (pre.get("sol_in_60s") or 0) - (pre.get("sol_out_60s") or 0)) >= rule.max_net_sol_60s:
+                continue                                  # a rush of buying into the level: these graduate less
+            if rule.min_buyers_60s is not None and pre.get("buyers_60s") is not None \
+                    and pre["buyers_60s"] < rule.min_buyers_60s:
+                continue                                  # one or two wallets pushing it
             if paper_switches.paused(strat):              # paused on /paper: no paper trade, live signal still goes
                 if rule.waits() and self.live_signals and strat in self.live_signals:
                     curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
