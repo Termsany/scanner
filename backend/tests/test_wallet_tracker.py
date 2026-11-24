@@ -97,6 +97,15 @@ def tracker_with(handler):
                          http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
+def test_solana_tracking_uses_the_trading_rpc_not_the_public_one():
+    pub = "https://public.test"
+    assert WalletTracker(Settings(solana_rpc_url=pub, live_rpc_url="https://helius.test/?api-key=k")).sol_url \
+        == "https://helius.test/?api-key=k"
+    assert WalletTracker(Settings(solana_rpc_url=pub, live_rpc_url="https://helius.test/",
+                                  tracker_solana_rpc_url="https://own.test")).sol_url == "https://own.test"
+    assert WalletTracker(Settings(solana_rpc_url=pub, live_rpc_url=None)).sol_url == pub
+
+
 def test_solana_poll_starts_from_now_then_reports_new_buys():
     state = {"sigs": [{"signature": "OLD", "err": None}]}
 

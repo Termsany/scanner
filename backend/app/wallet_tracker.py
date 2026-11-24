@@ -185,6 +185,7 @@ class WalletTracker:
         self.s = settings or get_settings()
         self.http = http or httpx.AsyncClient(timeout=httpx.Timeout(20.0), headers={"User-Agent": "alpha-scanner/0.1"})
         self._own = http is None
+        self.sol_url = self.s.tracker_solana_rpc_url or self.s.live_rpc_url or self.s.solana_rpc_url
         self._last = 0.0
         self._lock = asyncio.Lock()
         self._backoff: dict[Chain, tuple[float, int]] = {}  # chain -> (paused until, last delay s)
@@ -196,7 +197,7 @@ class WalletTracker:
     # ---- transport --------------------------------------------------------
     async def _rpc(self, url: str, payload: Any) -> Any:
         async with self._lock:
-            gap = self.s.tracker_solana_min_interval if url == self.s.solana_rpc_url else 0.2
+            gap = self.s.tracker_solana_min_interval if url == self.sol_url else 0.2
             wait = gap - (time.monotonic() - self._last)
             if wait > 0:
                 await asyncio.sleep(wait)
@@ -211,8 +212,8 @@ class WalletTracker:
         return body
 
     async def _sol(self, method: str, params: list[Any]) -> Any:
-        return (await self._rpc(self.s.solana_rpc_url, {"jsonrpc": "2.0", "id": 1, "method": method,
-                                                        "params": params})).get("result")
+        return (await self._rpc(self.sol_url, {"jsonrpc": "2.0", "id": 1, "method": method,
+                                               "params": params})).get("result")
 
     async def _batch(self, url: str, calls: list[dict[str, Any]]) -> dict[int, Any]:
         results: dict[int, Any] = {}

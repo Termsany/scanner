@@ -373,6 +373,8 @@ class Settings(BaseSettings):
     tracker_backoff_max_seconds: int = 600       # after a 429, pause that chain (60s, doubling, up to this)
     tracker_max_tx_per_poll: int = 25          # per Solana wallet
     tracker_solana_min_interval: float = 0.5   # seconds between Solana RPC calls (public RPC 429s faster)
+    # Solana RPC for the wallet tracker; defaults to LIVE_RPC_URL (Helius), then SOLANA_RPC_URL (public, 429s)
+    tracker_solana_rpc_url: str | None = None
 
     # Birdeye trader discovery (free "Standard" key: 30k CU/month, 30 CU per call, 1 req/s)
     birdeye_api_key: str | None = None
