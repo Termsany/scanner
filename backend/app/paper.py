@@ -571,10 +571,12 @@ def _custom_strategy(row: Any) -> Strategy:
 
 
 RESET_KEY = "paper_reset:"     # tracker_cursors key + strategy -> ISO time the owner reset its numbers
-# exits that are not the strategy's: the bot restarted (open trades are closed flat at their last price) or the
-# feed was down too long. Kept and shown, but left out of the strategy's numbers (2026-11-24: 161 of curve_30_70's
-# 233 trades were "restart", which made its results mostly about our deploys, not the rule)
+# exits that are not the strategy's: the bot restarted (open trades are closed at their last price) or the feed was
+# down too long. They stay in the numbers at that price: leaving them out biased long holds upward, since winners
+# close fast at their target and the slow losers are the ones still open at a restart (2026-11-24: curve_30_70 went
+# from -18% to +53% without its 178 interrupted trades). Instead a strategy with many of them is flagged.
 INTERRUPTED = ("restart", "feed_lost")
+UNRELIABLE_INTERRUPTED = 0.10    # more than this share of closed trades interrupted: its numbers are not the rule's
 
 
 async def paper_resets(session: AsyncSession) -> dict[str, datetime]:
@@ -625,21 +627,23 @@ async def paper_summary(session: AsyncSession, hours: int = 24 * 7, recent_limit
     strategies = []
     for strat in [*STRATEGIES.values(), *(_custom_strategy(c) for c in customs)]:
         mine = [r for r in rows if r.strategy == strat.name]
-        interrupted = [r for r in mine if r.status == "closed" and r.exit_reason in INTERRUPTED]
-        closed = [r for r in mine if r.status == "closed" and r.exit_reason not in INTERRUPTED]
+        closed = [r for r in mine if r.status == "closed"]
+        interrupted = [r for r in closed if r.exit_reason in INTERRUPTED]
         opened = [r for r in mine if r.status == "open"]
         wins = [r for r in closed if (r.pnl_usd or 0) > 0]
         unreal = sum(_row(r, s)["pnl_usd"] or 0.0 for r in opened)
         reasons: dict[str, int] = defaultdict(int)
-        for r in closed + interrupted:
+        for r in closed:
             reasons[r.exit_reason or "?"] += 1
+        share = len(interrupted) / len(closed) if closed else 0.0
         realized = sum(r.pnl_usd or 0.0 for r in closed)
         strategies.append({
             "name": strat.name, "title": strat.title, "tp_pct": strat.tp_pct, "sl_pct": strat.sl_pct,
             "mirror": strat.mirror or strat.live_rule,
             "max_hold_minutes": s.paper_mirror_max_hold_hours * 60 if strat.mirror or strat.live_rule else strat.max_hold_minutes,
-            "trades": len(mine) - len(interrupted), "open": len(opened), "closed": len(closed), "wins": len(wins),
-            "interrupted": len(interrupted),
+            "trades": len(mine), "open": len(opened), "closed": len(closed), "wins": len(wins),
+            "interrupted": len(interrupted), "interrupted_pct": round(share * 100, 1),
+            "unreliable": share > UNRELIABLE_INTERRUPTED,
             "win_rate": round(len(wins) / len(closed), 3) if closed else None,
             "realized_usd": round(realized, 2), "unrealized_usd": round(unreal, 2),
             "invested_usd": round(sum(r.size_usd for r in closed), 2),

@@ -336,7 +336,9 @@ export interface PaperStrategy {
   open: number;
   closed: number;
   wins: number;
-  interrupted?: number;           // closed by a bot restart / long feed outage: not in the numbers
+  interrupted?: number;           // closed by a bot restart / long feed outage (counted at their last price)
+  interrupted_pct?: number;       // their share of the closed trades
+  unreliable?: boolean;           // more than 10% interrupted: the numbers are more about restarts than the rule
   win_rate: number | null;
   realized_usd: number;
   unrealized_usd: number;

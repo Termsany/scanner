@@ -294,11 +294,17 @@ function StrategyCard({ s, on, onClick, onReset, onPause, onHide }: {
       <div className="num mt-1 text-xs text-muted">
         {s.closed} closed · win {s.win_rate == null ? "—" : `${(s.win_rate * 100).toFixed(0)}%`} · return {pct(s.return_pct)}
         {!!s.interrupted && (
-          <span className="text-faint" title="Closed by a bot restart or a long feed outage, not by the strategy: left out of these numbers">
-            {" "}· {s.interrupted} interrupted
+          <span className={s.unreliable ? "text-warn" : "text-faint"}
+                title="Closed by a bot restart or a long feed outage, not by the strategy (counted at their last price)">
+            {" "}· {s.interrupted} interrupted ({s.interrupted_pct ?? 0}%)
           </span>
         )}
       </div>
+      {s.unreliable && (
+        <div className="mt-1 rounded-md border border-warn/40 bg-warn-soft px-1.5 py-0.5 text-[10px] text-warn">
+          Unreliable: over 10% of its trades were cut by restarts, so these numbers say more about our deploys than the rule
+        </div>
+      )}
       <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-raised" title={`${s.wins} wins of ${s.closed}`}>
         <span className="h-full bg-mint transition-all duration-700" style={{ width: `${s.closed ? (s.wins / s.closed) * 100 : 0}%` }} />
         <span className="h-full bg-bear/70 transition-all duration-700" style={{ width: `${s.closed ? ((s.closed - s.wins) / s.closed) * 100 : 0}%` }} />

@@ -325,7 +325,7 @@ def test_reset_starts_a_strategy_from_zero_and_keeps_its_trades():
     assert kept == 2                                                                       # nothing deleted
 
 
-def test_restart_and_feed_lost_closes_are_left_out_of_the_numbers():
+def test_restart_and_feed_lost_closes_count_and_flag_the_strategy():
     s = _settings()
     now = datetime.now(timezone.utc)
 
@@ -343,10 +343,11 @@ def test_restart_and_feed_lost_closes_are_left_out_of_the_numbers():
         return next(x for x in (await paper_summary(sess, settings=s))["strategies"] if x["name"] == "curve_70")
 
     st = _db(body)
-    assert st["closed"] == 2 and st["interrupted"] == 2 and st["trades"] == 2
-    assert st["wins"] == 1 and st["win_rate"] == 0.5 and st["realized_usd"] == 2.5
-    assert st["invested_usd"] == 20.0 and st["return_pct"] == 12.5 and st["worst_pct"] == -25.0
-    assert st["exit_reasons"] == {"graduated": 1, "stop_loss": 1, "restart": 1, "feed_lost": 1}   # still shown
+    # counted at their last price (leaving them out biases long holds upward), and the strategy is flagged
+    assert st["closed"] == 4 and st["interrupted"] == 2 and st["interrupted_pct"] == 50.0 and st["unreliable"]
+    assert st["wins"] == 2 and st["win_rate"] == 0.5 and st["realized_usd"] == 3.5
+    assert st["invested_usd"] == 40.0 and st["return_pct"] == 8.75 and st["worst_pct"] == -80.0
+    assert st["exit_reasons"] == {"graduated": 1, "stop_loss": 1, "restart": 1, "feed_lost": 1}
 
 
 def test_custom_curve_strategies_show_on_the_paper_page_and_can_be_reset():
