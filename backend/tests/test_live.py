@@ -1751,6 +1751,58 @@ def test_buy_slippage_never_carries_the_fill_past_the_chase_limit():
     assert seen == [2_500, 1_000]      # re-quoted with the slippage capped at the 10% left before the limit
 
 
+def test_a_dry_run_buys_and_sells_curve_coins_on_the_curve_and_graduated_ones_on_jupiter():
+    import base64
+    import struct
+
+    from app import pump_tx
+    from app.live import JupiterExecutor
+
+    mint = "E2MJUFBMaTH7j21P2HncB96erJ4dM3FPL2W6i8Dpump"
+    v_tok, v_sol = 900_000_000 * 10**6, 40 * 10**9
+
+    def curve_bytes(complete):
+        return (bytes(8) + struct.pack("<5Q", v_tok, v_sol, 600_000_000 * 10**6, 10 * 10**9, 10**15)
+                + bytes([complete]) + bytes(32) + bytes(34))
+
+    async def run(complete):
+        x = JupiterExecutor(Settings(jupiter_api_url="https://jup.test", live_rpc_url="https://rpc.test/",
+                                     live_direct_pump_buys=True, live_best_route=False), live=False)
+        quotes = []
+
+        async def rpc(method, params):
+            if method == "getLatestBlockhash":
+                return {"value": {"blockhash": "11111111111111111111111111111111"}}
+            return {"value": [{"owner": pump_tx.PUMP_PROGRAM, "data": [base64.b64encode(curve_bytes(complete)).decode()]},
+                              {"owner": pump_tx.TOKEN_PROGRAM, "data": [""]}]}
+
+        async def sol_price():
+            return 100.0
+
+        async def decimals(m):
+            return 6
+
+        async def quote(a, b, amount, bps=None):
+            quotes.append((a, b))
+            return {"outAmount": "5", "inAmount": str(amount)}
+
+        x._rpc, x.sol_price, x.decimals, x.quote = rpc, sol_price, decimals, quote
+        try:
+            return await x.buy(mint, 100.0), await x.sell(mint, 10**12), quotes, x.s
+        finally:
+            await x.close()
+
+    buy, sell, quotes, s = asyncio.run(run(0))
+    curve = pump_tx.parse_curve(curve_bytes(0))
+    assert buy.signature.startswith("dry-direct-") and sell.signature.startswith("dry-direct-") and quotes == []
+    assert buy.tokens_raw == pump_tx.tokens_for_sol(curve, 10**9)            # $100 at $100/SOL = 1 SOL
+    assert abs(buy.sol - (1 + s.live_direct_priority_fee_sol + 0.00203928)) < 1e-9
+    assert abs(sell.sol - (pump_tx.sol_for_tokens(curve, 10**12) / 10**9 - s.live_direct_priority_fee_sol)) < 1e-9
+
+    buy, sell, quotes, _ = asyncio.run(run(1))                                 # graduated: Jupiter, as before
+    assert buy.signature.startswith("dry-") and not buy.signature.startswith("dry-direct") and len(quotes) == 2
+
+
 def test_buy_keeps_its_timing():
     x = FakeExec()
 

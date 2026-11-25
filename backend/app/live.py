@@ -1022,6 +1022,8 @@ class JupiterExecutor:
         preflight). Anything that fails before sending raises DirectUnavailable (the caller uses Jupiter)."""
         from solders.transaction import VersionedTransaction
 
+        if self.mode == "dry" and not getattr(self, "kp", None):
+            return await self._dry_curve_buy(mint, usd, max_price)
         if not getattr(self, "kp", None) or not self.pubkey:
             raise DirectUnavailable("no wallet key (dry run)")
         if time.monotonic() - _NO_DIRECT.get(mint, -1e9) < NO_DIRECT_SECONDS:
@@ -1144,6 +1146,44 @@ class JupiterExecutor:
         if got <= 0:
             raise SwapError(f"buy {sig} {'not confirmed' if not ok else 'returned no tokens'}")
         return Fill(sig, max(sol0 - sol1, 0.0), got, px)
+
+    async def _dry_curve(self, mint: str) -> Any:
+        """The coin's pump.fun bonding curve while it trades there (SOL-paired), else None."""
+        from app import pump_tx
+
+        if not mint.endswith("pump"):
+            return None
+        try:
+            curve, _, _ = await pump_tx.read(self._rpc, mint)
+            pump_tx.check(curve)
+        except Exception as exc:
+            log.debug("dry curve %s: %s", mint[:8], exc)
+            return None
+        return curve
+
+    async def _dry_curve_buy(self, mint: str, usd: float, max_price: float | None) -> Fill:
+        """A dry-run account (no key) buying a coin still on the bonding curve: priced from the curve itself, as
+        the live accounts' own transaction is. Jupiter often has no route for a coin seconds old, so dry runs
+        missed the very curve buys the live accounts made (WIKI, 2026-11-25). Graduated: DirectUnavailable."""
+        from app import pump_tx
+
+        curve = await self._dry_curve(mint)
+        if curve is None:
+            raise DirectUnavailable("dry run: not on the bonding curve")
+        px = await self.sol_price()
+        lamports = int(usd / px * LAMPORTS)
+        got = pump_tx.tokens_for_sol(curve, lamports)
+        if got <= 0:
+            raise DirectUnavailable("dry run: the curve gives no tokens")
+        # what a live buy pays on top: the priority fee and, on a first buy, the token account's rent
+        spent = lamports / LAMPORTS + self.s.live_direct_priority_fee_sol + ATA_RENT_SOL
+        if max_price:
+            pay = spent * px / (got / 10 ** await self.decimals(mint))
+            if pay > max_price:
+                raise ChaseError(pay, max_price)
+        _took("local", 1)
+        self._dry_n += 1
+        return Fill(f"dry-direct-{self._dry_n}", spent, got, px)
 
     async def _buy_once(self, mint: str, usd: float, max_price: float | None = None,
                         bps: int | None = None, q0: dict[str, Any] | None = None) -> Fill:
@@ -1268,6 +1308,13 @@ class JupiterExecutor:
     async def _sell_once(self, mint: str, tokens_raw: int, bps: int | None = None) -> Fill:
         px = await self.sol_price()
         if self.mode == "dry":
+            curve = await self._dry_curve(mint) if not getattr(self, "kp", None) else None
+            if curve is not None:      # still on the curve: sold there, as a live account's own transaction does
+                from app import pump_tx
+
+                self._dry_n += 1
+                sol = pump_tx.sol_for_tokens(curve, tokens_raw) / LAMPORTS - self.s.live_direct_priority_fee_sol
+                return Fill(f"dry-direct-{self._dry_n}", max(sol, 0.0), tokens_raw, px)
             q = await self.quote(mint, SOL_MINT, tokens_raw)
             self._dry_n += 1
             return Fill(f"dry-{self._dry_n}", int(q["outAmount"]) / LAMPORTS, tokens_raw, px)
