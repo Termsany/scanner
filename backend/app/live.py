@@ -1692,6 +1692,15 @@ class CopyEngine:
         ld = self.a.leaders.get(pos.leader_wallet or "")
         return bool(ld and ld.quick_exit) and not self._hold(pos.token_address) and not pos.hands_off
 
+    def _who(self, wallet: str | None, label: str | None = None) -> str:
+        """The copied wallet as the alerts name it (user's request 2026-11-26): its label on this account's page,
+        else the tracker's label, with the start of its address."""
+        if not wallet or wallet == MANUAL or wallet.startswith("curve:"):
+            return ""
+        ld = self.a.leaders.get(wallet)
+        name = (ld.label if ld and ld.label else "") or label or ""
+        return f"{name} ({wallet[:6]})" if name and name != wallet[:6] else wallet[:6]
+
     def _mirror(self, pos: LivePosition) -> bool:
         """This position's wallet is mirrored: only its sells (same share) take it out."""
         ld = self.a.leaders.get(pos.leader_wallet or "")
@@ -1822,7 +1831,7 @@ class CopyEngine:
             return
         free = self._free(t.wallet)
         if self.screener is not None and not free:
-            res = await self.screener.check(t.token_address, t.wallet_label or t.wallet[:6])
+            res = await self.screener.check(t.token_address, self._who(t.wallet, t.wallet_label))
             if not res.ok:
                 log.info("live: skip buy %s (scanner: %s)", sym, res.reason)
                 await self.notify(f"{self._tag()} 🛡 Skipped ${sym}: scanner says {res.reason}{_ca(t.token_address)}")
@@ -1838,7 +1847,7 @@ class CopyEngine:
             over = (exc.pay / t.price_usd - 1) * 100
             log.info("live: skip buy %s (price +%.0f%% over the leader's, limit +%.0f%%)", sym, over, chase)
             await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: price already +{over:.0f}% above where "
-                              f"{t.wallet_label or t.wallet[:6]} bought (limit +{chase:.0f}%){_ca(t.token_address)}")
+                              f"{self._who(t.wallet, t.wallet_label)} bought (limit +{chase:.0f}%){_ca(t.token_address)}")
             return
         except Exception as exc:
             log.warning("live: buy %s failed: %s", sym, exc)
@@ -1863,7 +1872,7 @@ class CopyEngine:
                  " ".join(f"{k}={v}" for k, v in timing.items() if v is not None))
         log.info("live: BUY %s for %.4f SOL ($%.2f) %s", sym, f.sol, f.usd, f.signature)
         await self.notify(f"{self._tag()} ✅ Bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
-                          f"Copying {t.wallet_label or t.wallet[:6]}{_ca(t.token_address)}\n{self._tx(f.signature)}")
+                          f"Copying {self._who(t.wallet, t.wallet_label)}{_ca(t.token_address)}\n{self._tx(f.signature)}")
         await self.tell_user(user_note(self.a.user_lang, "bought", sym=sym, usd=f.usd, tx=self._tx(f.signature)))
 
     # ---- sells -------------------------------------------------------------
@@ -1880,7 +1889,7 @@ class CopyEngine:
                 pos.leader_trade_id = t.id
                 await session.commit()
                 log.info("live: %s is hold-only: leader sold %.0f%%, keeping it", sym, share * 100)
-                await self.notify(f"{self._tag()} 🔒 {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
+                await self.notify(f"{self._tag()} 🔒 {self._who(t.wallet, t.wallet_label)} sold {share * 100:.0f}% of "
                                   f"${sym}, but ${sym} is hold-only: keeping it (sell by hand if you want){_ca(t.token_address)}")
             return
         if pos is not None and pos.hands_off:
@@ -1896,7 +1905,7 @@ class CopyEngine:
             pos.leader_trade_id = t.id
             await session.commit()
             log.info("live: %s ignoring %s's sell (%.0f%%): its sells are not followed",
-                     t.symbol or t.token_address[:6], t.wallet_label or t.wallet[:6], share * 100)
+                     t.symbol or t.token_address[:6], self._who(t.wallet, t.wallet_label), share * 100)
             return
         if pos is not None and self._mirror(pos):
             # mirror: sell the same share it sold, every time
@@ -1916,7 +1925,7 @@ class CopyEngine:
                     # 50% already sold at 2x: the rest leaves only on the leader's full exit
                     await session.commit()
                     log.info("live: %s 50%% already out at 2x: ignoring leader trim %.0f%%", sym, share * 100)
-                    await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
+                    await self.notify(f"{self._tag()} ⏸ {self._who(t.wallet, t.wallet_label)} sold {share * 100:.0f}% of "
                                       f"${sym}; half was already sold at 2x, the rest waits for its full exit{_ca(pos.token_address)}")
                 else:
                     # the leader trims before 2x: copy it, and from now on follow every sell of this token
@@ -1928,14 +1937,14 @@ class CopyEngine:
                 await session.commit()
                 sym = pos.symbol or pos.token_address[:6]
                 log.info("live: %s capital already out: ignoring leader trim %.0f%%", sym, share * 100)
-                await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of ${sym}; "
+                await self.notify(f"{self._tag()} ⏸ {self._who(t.wallet, t.wallet_label)} sold {share * 100:.0f}% of ${sym}; "
                                   f"your capital is already out, so the rest waits for its full exit{_ca(pos.token_address)}")
             elif share < 0.99 and not self.s.live_copy_trims:
                 # the user's rule: partial sells are not copied; the rest leaves on the leader's full exit
                 await session.commit()
                 sym = pos.symbol or pos.token_address[:6]
                 log.info("live: %s ignoring leader trim %.0f%%", sym, share * 100)
-                await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of ${sym}; "
+                await self.notify(f"{self._tag()} ⏸ {self._who(t.wallet, t.wallet_label)} sold {share * 100:.0f}% of ${sym}; "
                                   f"partial sells are not copied, the rest waits for its full exit{_ca(pos.token_address)}")
             elif share < 0.99 and self.s.live_trim_cap_pct is not None:
                 await self._capped_trim(session, pos, t, share)
@@ -1963,7 +1972,7 @@ class CopyEngine:
     async def _exit_alert(self, t: WalletTrade, pos: LivePosition | None) -> None:
         """The user's alert: a copied wallet sold ALL of a token this account still holds (bot or hand-bought)."""
         sym = t.symbol or t.token_address[:6]
-        who = t.wallet_label or t.wallet[:6]
+        who = self._who(t.wallet, t.wallet_label)
         held_by_hand = 0
         if pos is None:
             if self.x.mode != "live" or not await self._may_hold(t.token_address):
@@ -2014,7 +2023,7 @@ class CopyEngine:
         room = held - int(bought * (1 - cap))          # tokens we may still sell before the cap
         want = int(held * share)
         sym = pos.symbol or pos.token_address[:6]
-        who = t.wallet_label or t.wallet[:6]
+        who = self._who(t.wallet, t.wallet_label)
         if room <= bought // 100 or held <= 0:          # under 1% left before the cap: treat it as reached
             await session.commit()
             log.info("live: %s trim cap reached: ignoring leader trim %.0f%%", sym, share * 100)
@@ -2042,7 +2051,7 @@ class CopyEngine:
             if self._hold(t.token_address):
                 break
             log.info("live: manual %s follows %s out (%.0f%%)", pos.symbol or t.token_address[:6],
-                     t.wallet_label or t.wallet[:6], share * 100)
+                     self._who(t.wallet, t.wallet_label), share * 100)
             await self._sell(session, pos, share, "leader_sold" if share >= 0.99 else "leader_trim")
             await session.commit()
 
@@ -2086,6 +2095,9 @@ class CopyEngine:
         log.info("live: SELL %s %.0f%% for %.4f SOL ($%.2f) %s", sym, share * 100, f.sol, f.usd, f.signature)
         tail = (f"\nClosed: P&L {'+' if pos.pnl_usd >= 0 else '−'}${abs(pos.pnl_usd):,.2f}" if done
                 else f"\nStill holding {100 - share * 100:.0f}% of the position")
+        who = self._who(pos.leader_wallet)
+        if who:
+            tail += f"\nCopied from {who}"
         await self.notify(f"{self._tag()} 💰 Sold {share * 100:.0f}% of ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})"
                           f" · {reason.replace('_', ' ')}{tail}{_ca(pos.token_address)}\n{self._tx(f.signature)}")
         await self.tell_user(user_note(self.a.user_lang, "sold", sym=sym, usd=f.usd, share=share, done=done,

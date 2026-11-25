@@ -2705,3 +2705,31 @@ def test_mirror_follows_every_sell_and_skips_take_capital_and_the_copy_stop():
     assert quiet == []
     assert trim == [("sell", "M1", 400_000)]
     assert p.status == "closed" and int(p.tokens_raw) == 0
+
+
+def test_buy_and_sell_alerts_name_the_copied_wallet_by_its_label():
+    from app.live import Account, Leader
+
+    x = FakeExec()
+    acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, label="Mirror 5Y9", unconditional=True)})
+    notes = []
+
+    async def note(text):
+        notes.append(text)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), notify=note, account=acct)
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)
+        sess.add(_trade(side="sell", pct_sold=100, remaining=0))
+        await sess.commit()
+        await eng.step(sess)
+
+    _db(body)
+    who = f"Mirror 5Y9 ({LEADER[:6]})"
+    buy = [n for n in notes if "Bought" in n]
+    sold = [n for n in notes if "💰 Sold" in n]
+    assert buy and f"Copying {who}" in buy[0]
+    assert sold and f"Copied from {who}" in sold[0]
