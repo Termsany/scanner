@@ -36,6 +36,7 @@ CLUSTER_MINUTES = 10
 DULX = "DULX3e6vt1ZpHq3AdCUBZLPZ1CrhApdNKcewMPxZQRXf"
 W67Q = "67Q1NscZdLxBMNgbjJ4jprm9J5GSUX1c9aVFigBzxFWg"   # auto 18/34: fast trader (4 min median hold)
 W5Y9 = "5Y9pyDnwdaJ32kWjeChBNvVRubhe6k4Z8bnioUfM3bNd"   # auto 13/25: +$5.9k in 4 days, 8.5 min median hold
+W8ZK = "8zkgFGVZrDLieViwqiXFCydSX6WL5hsxmUu55yBdsNsZ"   # scout trial: +$2.9k on 161 exits in a day, 110 min hold
 CLUSTER_MIN_WALLETS = 2
 CURSOR_TRADES = "paper:wallet_trades"
 CURSOR_SIGNALS = "paper:signals"
@@ -97,6 +98,12 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              leader=W5Y9, mirror=True),
     Strategy("w5y9_live", "Copy 5Y9pyD like live (50% at 2x, rest on its full exit)", tp_pct=0.0, sl_pct=0.0,
              leader=W5Y9, live_rule=True),
+    # 8zkgFG test (user's request 2026-11-26): +$2.9k on 161 full exits in its first day tracked, 50% won, holds
+    # ~110 min (slow enough to follow). wallet_follow and scout_trial are paused, so its own two copies
+    Strategy("w8zk_mirror", "Copy 8zkgFG: buy with it, sell the same share when it sells", tp_pct=0.0, sl_pct=0.0,
+             leader=W8ZK, mirror=True),
+    Strategy("w8zk_live", "Copy 8zkgFG like live (50% at 2x, rest on its full exit)", tp_pct=0.0, sl_pct=0.0,
+             leader=W8ZK, live_rule=True),
     # wallet scout trials (app/wallet_scout.py): each candidate's first buys, copied like live
     Strategy("scout_trial", "Wallet scout: paper trial of a candidate wallet (live exit rule)", tp_pct=0.0,
              sl_pct=0.0, live_rule=True),

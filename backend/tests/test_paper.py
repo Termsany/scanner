@@ -572,3 +572,26 @@ def test_signal_eth_charges_gas_and_tax_and_skips_honeypots():
         return True
 
     assert _db(body)
+
+
+def test_w8zk_copies_only_that_wallets_first_buys():
+    from app.paper import W8ZK
+
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)
+        await sess.commit()
+        first = _trade(1, W8ZK, mint=MINT)
+        first.first_buy = True
+        other = _trade(2, OTHER, mint="Mint3")
+        other.first_buy = True
+        sess.add_all([first, other])
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy.like("w8zk%")))).scalars().all()
+        assert {(r.token_address, r.strategy) for r in rows} == {(MINT, "w8zk_mirror"), (MINT, "w8zk_live")}
+        return True
+
+    assert _db(body)
