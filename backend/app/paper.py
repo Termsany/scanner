@@ -58,6 +58,9 @@ class Strategy:
                                 # otherwise 50% at 2x, the rest only on the leader's full exit
     after_wallet: str | None = None   # signal strategies: only when this wallet bought the token in the
                                       # AFTER_WALLET_MINUTES before the signal
+    chains: tuple[str, ...] | None = None   # signal strategies: only tokens on these chains
+    first_signal: bool = False              # signal strategies: only the token's first signal
+    sources_any: tuple[str, ...] | None = None   # signal strategies: only tokens found by one of these feeds
 
 
 # priced and closed by their own loops (app/sniper.py, app/grad.py), second by second
@@ -98,6 +101,11 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("signal_85", "Scanner signal, score >= 85", min_score=85),
     # (2026-11-25, 704 coins' first signals): when DULX3e bought in the hour before, 50% reached +100% (28% for
     # all signals), but 96% also fell 30%; two exits to see which comes first
+    # (2026-11-25, 1,682 signal_80 trades 11-19..11-23: -5.2% a trade, every day; score didn't help): the two simple
+    # filters that held in both halves of the data. Same exits as signal_80 to compare
+    Strategy("signal_eth", "Scanner signal, score >= 80, Ethereum only", min_score=80, chains=("ethereum",)),
+    Strategy("signal_gecko_first", "Scanner signal, score >= 80: the token's first signal, found by GeckoTerminal "
+             "(new or trending pools)", min_score=80, first_signal=True, sources_any=("gecko_new", "gecko_trending")),
     Strategy("signal_dulx", "Scanner signal after DULX3e bought it (within 1 h): TP +100%, stop -40%, 6 h",
              tp_pct=100.0, sl_pct=-40.0, min_score=0, after_wallet=DULX),
     Strategy("signal_dulx_tight", "Scanner signal after DULX3e bought it (within 1 h): TP +50%, stop -25%, 6 h",
@@ -352,6 +360,17 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
                 if strat.min_score is None or sig.score < strat.min_score:
                     continue
                 trigger = f"score {sig.score}"
+                chain = tok.chain.value if isinstance(tok.chain, Chain) else str(tok.chain)
+                if strat.chains and chain not in strat.chains:
+                    continue
+                if strat.sources_any and not set(strat.sources_any) & set(tok.discovery_sources or []):
+                    continue
+                if strat.first_signal:
+                    earlier = (await session.execute(select(Signal.id).where(
+                        Signal.token_id == sig.token_id, Signal.id < sig.id).limit(1))).first()
+                    if earlier is not None:
+                        continue
+                    trigger += " first signal"
                 if strat.after_wallet:
                     w = strat.after_wallet
                     if w not in bought_by:

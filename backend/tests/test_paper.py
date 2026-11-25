@@ -502,3 +502,38 @@ def test_w5y9_copies_only_that_wallets_first_buys():
         return True
 
     assert _db(body)
+
+
+def test_signal_eth_and_gecko_first_filters():
+    s = _settings()
+
+    async def body(sess):
+        eth = Token(chain=Chain.ethereum, address="0xeth", symbol="ETHT")
+        gk = Token(chain=Chain.solana, address="Gecko1", symbol="GK", discovery_sources=["gecko_new"])
+        dx = Token(chain=Chain.solana, address="Dex1", symbol="DX", discovery_sources=["dex_profile_latest"])
+        sess.add_all([eth, gk, dx])
+        await sess.flush()
+        await process_entries(sess, s)                 # cursors
+        await sess.commit()
+        for t in (eth, gk, dx):
+            sess.add(Signal(token_id=t.id, score=82, badge=Badge.strong_alpha, price_usd=1.0, payload={}))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(
+            PaperPosition.strategy.in_(["signal_eth", "signal_gecko_first"])))).scalars().all()
+        assert {(r.token_address, r.strategy) for r in rows} == {("0xeth", "signal_eth"), ("Gecko1", "signal_gecko_first")}
+        # a second signal on the GeckoTerminal coin, after the first closed: not its first signal, not traded
+        for r in rows:
+            r.status = "closed"
+        await sess.commit()
+        sess.add(Signal(token_id=gk.id, score=85, badge=Badge.strong_alpha, price_usd=1.0, payload={}))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        again = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy == "signal_gecko_first",
+                                                                PaperPosition.status == "open"))).scalars().all()
+        assert again == []
+        return True
+
+    assert _db(body)
