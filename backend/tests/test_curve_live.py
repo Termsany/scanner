@@ -379,3 +379,25 @@ def test_curve_70_organic_trades_for_real_and_trails_after_graduation():
     finally:
         curve_live.unwatch("curve", set())
     assert p.status == "closed" and p.exit_reason == "trailing_stop"     # 1.5 holds (over 1.4), 1.3 sells
+
+
+def test_the_curve_buy_alert_carries_the_coin_address():
+    s = S()
+    curve = Account("curve", 10, 30, 20, [], curve_strategy="curve_fast34")
+    x = FakeExec()
+    sent = []
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=curve)
+
+        async def notify(text):
+            sent.append(text)
+        eng.notify = notify
+        await eng.step(sess)
+        curve_live.publish("curve_fast34", CURVE_RULES["curve_fast34"], "ADDR1pump", "ADR", 2e-7, 34.0,
+                           "curve 34% at 40s", 900)
+        await eng.step(sess)
+
+    _db(body)
+    buy = [m for m in sent if "bought $ADR" in m]
+    assert buy and "ADDR1pump" in buy[0] and "https://pump.fun/coin/ADDR1pump" in buy[0]

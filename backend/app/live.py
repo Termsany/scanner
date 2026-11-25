@@ -2584,7 +2584,9 @@ class CopyEngine:
                                  f"ride graduation, then {sig.trail_pct:g}% under the high" if sig.trail_pct else "")
                               + f"{f' or +{tp_pct:g}%' if tp_pct else ''} "
                               f"or {sig.sl_pct:+.0f}% or after "
-                              f"{sig.max_hold_s / 60:.0f} min\n{self._tx(f.signature)}")
+                              f"{sig.max_hold_s / 60:.0f} min\n"
+                              # the coin's address (user's request 2026-11-25: to open it from the alert)
+                              f"{sig.mint}\nhttps://pump.fun/coin/{sig.mint}\n{self._tx(f.signature)}")
 
     async def _curve_exits(self, session: AsyncSession) -> None:
         """Real curve positions: stop and exit level checked on every step against the paper engine's own
