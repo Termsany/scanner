@@ -314,6 +314,10 @@ function Leaders({ d, set, now, openBy, onToggle }: {
                 title="On: when this wallet sells, the bot does not sell with it (for fast wallets). Use it with Quick exit, so positions still leave at +50% / -25% / 6 hours">
                 Ignore its sells
               </th>
+              <th className="text-center"
+                title="On: every time this wallet sells, the bot sells the same share. No 50% at 2x and no stop loss: only its sells (or the max hold) take the position out">
+                Mirror
+              </th>
               <th />
             </tr>
           </thead>
@@ -386,6 +390,10 @@ function Leaders({ d, set, now, openBy, onToggle }: {
                   <span className="inline-flex"><Switch on={!!l.ignore_sells} label="Ignore its sells"
                     onClick={() => flip(i, { ignore_sells: !l.ignore_sells })} /></span>
                 </td>
+                <td className="text-center">
+                  <span className="inline-flex"><Switch on={!!l.mirror} label="Mirror its sells"
+                    onClick={() => flip(i, { mirror: !l.mirror })} /></span>
+                </td>
                 <td className="text-right">
                   <button type="button" aria-label="Remove" className="text-muted hover:text-bear"
                     onClick={() => {
@@ -399,7 +407,7 @@ function Leaders({ d, set, now, openBy, onToggle }: {
             ))}
             {d.leaders.length === 0 && (
               <tr>
-                <td colSpan={10} className="text-xs text-faint">
+                <td colSpan={11} className="text-xs text-faint">
                   No smart wallets yet: this account will not buy anything.
                 </td>
               </tr>

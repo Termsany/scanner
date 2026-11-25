@@ -314,6 +314,9 @@ class Leader:
     quick_tp_pct: float | None = None    # quick exit for this wallet: take profit at +%  (None = LIVE_QUICK_TP_PCT)
     quick_sl_pct: float | None = None    # stop loss at -% (a negative number; None = LIVE_QUICK_SL_PCT)
     quick_hours: float | None = None     # time limit in hours (None = LIVE_QUICK_MAX_HOLD_MINUTES)
+    # mirror (user's request 2026-11-26, for 5Y9pyD): every time it sells, sell the same share of what we hold; no
+    # take-capital at 2x, no copy stop loss, no "the rest waits for its full exit". Max hold still applies.
+    mirror: bool = False
 
 
 _FROM_SETTINGS = object()
@@ -1689,6 +1692,11 @@ class CopyEngine:
         ld = self.a.leaders.get(pos.leader_wallet or "")
         return bool(ld and ld.quick_exit) and not self._hold(pos.token_address) and not pos.hands_off
 
+    def _mirror(self, pos: LivePosition) -> bool:
+        """This position's wallet is mirrored: only its sells (same share) take it out."""
+        ld = self.a.leaders.get(pos.leader_wallet or "")
+        return bool(ld and ld.mirror) and not self._hold(pos.token_address) and not pos.hands_off
+
     def _take_capital_target(self) -> float | None:
         t = self.a.take_capital_at_pct
         return self.s.live_take_capital_at_pct if t is _FROM_SETTINGS else t
@@ -1890,7 +1898,12 @@ class CopyEngine:
             log.info("live: %s ignoring %s's sell (%.0f%%): its sells are not followed",
                      t.symbol or t.token_address[:6], t.wallet_label or t.wallet[:6], share * 100)
             return
-        if pos is not None and self._quick(pos):
+        if pos is not None and self._mirror(pos):
+            # mirror: sell the same share it sold, every time
+            pos.leader_trade_id = t.id
+            await self._sell(session, pos, share, "leader_sold" if share >= 0.99 else "leader_trim")
+            await session.commit()
+        elif pos is not None and self._quick(pos):
             # quick exit: the wallet's first sell (any size) takes the whole position out
             pos.leader_trade_id = t.id
             await self._sell(session, pos, 1.0, "leader_sold")
@@ -2317,6 +2330,7 @@ class CopyEngine:
                 if not self._hold(p.token_address)
                 and not p.hands_off                                            # the owner manages it
                 and not self._quick(p)                                         # quick exit has its own targets
+                and not self._mirror(p)                                        # mirrored: only its sells
                 and not taken(p)
                 and not (self.s.live_follow_after_trim and self._following(p))   # following the leader instead
                 # with the cap: until that share of the coins is sold; without: until the cost is back
@@ -2449,7 +2463,7 @@ class CopyEngine:
             LivePosition.status == "open", *self._mine()))).scalars().all()
             if int(p.tokens_raw or 0) > 0 and not p.manual_sell_frac and not p.hands_off
             and p.leader_wallet != MANUAL and not (p.leader_wallet or "").startswith("curve:")
-            and not self._quick(p) and not self._hold(p.token_address)
+            and not self._quick(p) and not self._mirror(p) and not self._hold(p.token_address)
             and p.stop_pct is None and p.stop_price is None
             and not any(x.get("side") == "sell_failed" for x in (p.fills or []))]
         if not rows or not hasattr(self.x, "token_prices"):

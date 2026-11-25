@@ -802,6 +802,7 @@ class LeaderIn(BaseModel):
     quick_tp_pct: float | None = None    # quick exit for this wallet: +% take profit (None = default)
     quick_sl_pct: float | None = None    # -% stop loss, negative (None = default)
     quick_hours: float | None = None     # time limit in hours (None = default)
+    mirror: bool = False                 # sell the same share every time it sells; no 2x rule, no copy stop
 
 
 class AccountIn(BaseModel):

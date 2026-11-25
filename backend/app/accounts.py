@@ -103,7 +103,7 @@ def clean_leaders(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "unconditional": bool(d.get("unconditional")), "new_tokens_only": bool(d.get("new_tokens_only")),
                     "size_usd": size, "enabled": d.get("enabled") is not False, "max_chase_pct": chase,
                     "quick_exit": bool(d.get("quick_exit")), "ignore_sells": bool(d.get("ignore_sells")),
-                    "quick_tp_pct": q_tp, "quick_sl_pct": q_sl, "quick_hours": q_h})
+                    "quick_tp_pct": q_tp, "quick_sl_pct": q_sl, "quick_hours": q_h, "mirror": bool(d.get("mirror"))})
     if len(out) > MAX_LEADERS:
         raise AccountError(f"at most {MAX_LEADERS} smart wallets per account")
     return out
@@ -127,7 +127,8 @@ def to_account(row: TradingAccount, s: Settings, private_key: str | None) -> Acc
     leaders = {d["wallet"]: Leader(d["wallet"], d.get("label") or "", bool(d.get("unconditional")),
                                    bool(d.get("new_tokens_only")), d.get("size_usd"), d.get("enabled") is not False,
                                    d.get("max_chase_pct"), bool(d.get("quick_exit")), bool(d.get("ignore_sells")),
-                                   d.get("quick_tp_pct"), d.get("quick_sl_pct"), d.get("quick_hours"))
+                                   d.get("quick_tp_pct"), d.get("quick_sl_pct"), d.get("quick_hours"),
+                                   mirror=bool(d.get("mirror")))
                for d in row.leaders or []}
     return Account(row.name, row.size_usd, row.max_open_usd, row.max_daily_loss_usd, list(leaders), private_key,
                    leaders=leaders, paused=bool(row.paused or row.billing_hold), take_capital_at_pct=row.take_capital_at_pct,

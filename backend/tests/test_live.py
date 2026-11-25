@@ -2667,3 +2667,41 @@ def test_coin_alerts_end_with_the_address_and_its_page():
     assert _ca("ADDR1pump") == "\nADDR1pump\nhttps://pump.fun/coin/ADDR1pump"
     assert _ca("So1Other") == "\nSo1Other\nhttps://dexscreener.com/solana/So1Other"
     assert _ca(None) == ""
+
+
+def test_mirror_follows_every_sell_and_skips_take_capital_and_the_copy_stop():
+    from app.live import Account, Leader
+
+    x = PricedExec()
+    acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, unconditional=True, mirror=True)})
+    s = _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0,
+           live_copy_sl_pct=-35.0, live_copy_trims=False, live_follow_after_trim=True,
+           live_bag_waits_for_full_exit=True, live_take_capital_at_pct=100.0)
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=acct)
+        await eng.step(sess)
+        sess.add(_trade())                                            # $30 for 1 token
+        await sess.commit()
+        await eng.step(sess)
+        x.price.update(M1=75.0)                                       # 2.5x: no take-capital
+        await eng.step(sess)
+        await eng.step(sess)
+        x.price.update(M1=10.0)                                       # -67%: no copy stop
+        await eng.step(sess)
+        await eng.step(sess)
+        quiet = [c for c in x.calls if c[0] == "sell"]
+        sess.add(_trade(side="sell", pct_sold=40, remaining=6))       # it trims 40%: so do we
+        await sess.commit()
+        await eng.step(sess)
+        trim = [c for c in x.calls if c[0] == "sell"]
+        sess.add(_trade(side="sell", pct_sold=100, remaining=0))      # then everything
+        await sess.commit()
+        await eng.step(sess)
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        return quiet, trim, p
+
+    quiet, trim, p = _db(body)
+    assert quiet == []
+    assert trim == [("sell", "M1", 400_000)]
+    assert p.status == "closed" and int(p.tokens_raw) == 0
