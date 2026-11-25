@@ -729,3 +729,20 @@ def test_late_stop_waits_a_minute_unless_the_drop_is_deep():
     t = _organic_coin(c2, "D2", 70.5)
     c2.on_curve("D2", acct(50), t + 5)                # about -44 % at 5 s: past -40 %, out at once
     assert "curve_70_organic_v2_late_sl" not in c2.watch["D2"].held
+
+
+def test_curve_70_slow3_only_buys_coins_that_took_3_minutes_to_reach_70():
+    from app.curve_live import live_rules
+
+    def run(mint, at):
+        c = PaperCurve(S())
+        c.on_create({**create(mint), "symbol": mint, "initialBuy": 0.05 * REAL_TOKENS_START}, 0.0)
+        c.on_curve(mint, acct(60.0), at - 10)
+        c.on_curve(mint, acct(70.0), at)
+        c.on_curve(mint, acct(70.3), at + 2.5)
+        return c.watch[mint].held
+
+    assert "curve_70_slow3" in run("S1", 200.0) and "curve_70" in run("S1", 200.0)
+    held = run("S2", 60.0)                              # 70 % in a minute: skipped, plain curve_70 still buys
+    assert "curve_70_slow3" not in held and "curve_70" in held
+    assert "curve_70_slow3" not in live_rules()         # paper only

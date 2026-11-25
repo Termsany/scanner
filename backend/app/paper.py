@@ -65,7 +65,8 @@ SELF_PRICED = ("snipe_all", "snipe_momentum", "grad_all", "grad_confirm", "curve
                "curve_30_70_sl", "snipe_fast_tp", "curve_fast19", "curve_fast34", "curve_93_fast",
                "curve_70_live", "curve_fast34_mom", "curve_fast34_mom2", "curve_70_organic",
                "curve_70_organic_slow", "curve_70_organic_grad", "curve_70_organic_v2",
-               "curve_70_organic_v2_late_sl", "curve_70_quiet", "curve_70_quiet_wide_sl")
+               "curve_70_organic_v2_late_sl", "curve_70_quiet", "curve_70_quiet_wide_sl",
+               "curve_70_slow3")
 
 STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("wallet_follow", "Follow a tracked wallet (exit when it sells)"),
@@ -153,6 +154,8 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              "if known), sell at 99% sold, stop -25%", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),
     Strategy("curve_70_quiet_wide_sl", "Bonding curve: curve_70_quiet with a wider stop (-45%)", tp_pct=0.0,
              sl_pct=-45.0, max_hold_minutes=60),
+    Strategy("curve_70_slow3", "Bonding curve: 70% reached 3+ min after launch; rides graduation, sells 30% under "
+             "the high, stop -25%", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),
     # user's choice (2026-11-23): curve_70 traded with real money ($10); sells just before graduation
     Strategy("curve_70_live", "Bonding curve: $10, buy at 70% sold, sell at 99% (before graduation), stop -25% "
              "(curve_70 for real)", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),

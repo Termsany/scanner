@@ -176,6 +176,13 @@ CURVE_RULES: dict[str, CurveRule] = {
                                              sl_after_s=60.0, early_sl=-40.0,
                                              title="curve_70_organic_v2 with a later stop: -40% in the first minute, "
                                                    "then -25%"),
+    # (2026-11-25, 619 coins entered at 70 %): the ones that took 3+ min to get there did best (108 coins, +8 to +10 %
+    # a trade) and those under 60 s worst (402, -13 %); no other filter, rides graduation like curve_70_organic.
+    # Paper only.
+    "curve_70_slow3": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, min_secs=180.0,
+                                grad_trail=30.0, paper_only=True,
+                                title="curve 70% reached 3+ min after launch; rides graduation, sells 30% under the "
+                                      "high, stop -25%"),
     "curve_70_organic": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
                                   min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True, grad_trail=30.0,
                                   title="curve 70% with organic trading (10+ buys, 5+ sells in a minute, dev under "
