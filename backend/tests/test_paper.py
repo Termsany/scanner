@@ -479,3 +479,26 @@ def test_w67q_copies_only_that_wallets_first_buys():
         return True
 
     assert _db(body)
+
+
+def test_w5y9_copies_only_that_wallets_first_buys():
+    from app.paper import W5Y9
+
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)
+        await sess.commit()
+        first = _trade(1, W5Y9, mint=MINT)
+        first.first_buy = True
+        other = _trade(2, OTHER, mint="Mint3")
+        other.first_buy = True
+        sess.add_all([first, other])
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy.like("w5y9%")))).scalars().all()
+        assert {(r.token_address, r.strategy) for r in rows} == {(MINT, "w5y9_mirror"), (MINT, "w5y9_live")}
+        return True
+
+    assert _db(body)

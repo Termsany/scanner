@@ -35,6 +35,7 @@ log = logging.getLogger("paper")
 CLUSTER_MINUTES = 10
 DULX = "DULX3e6vt1ZpHq3AdCUBZLPZ1CrhApdNKcewMPxZQRXf"
 W67Q = "67Q1NscZdLxBMNgbjJ4jprm9J5GSUX1c9aVFigBzxFWg"   # auto 18/34: fast trader (4 min median hold)
+W5Y9 = "5Y9pyDnwdaJ32kWjeChBNvVRubhe6k4Z8bnioUfM3bNd"   # auto 13/25: +$5.9k in 4 days, 8.5 min median hold
 CLUSTER_MIN_WALLETS = 2
 CURSOR_TRADES = "paper:wallet_trades"
 CURSOR_SIGNALS = "paper:signals"
@@ -84,6 +85,12 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              leader=W67Q, mirror=True),
     Strategy("w67q_live", "Copy 67Q1Ns like live (50% at 2x, rest on its full exit)", tp_pct=0.0, sl_pct=0.0,
              leader=W67Q, live_rule=True),
+    # 5Y9pyD test (user's request 2026-11-25): 62% of 104 full exits won, +$5.9k in 4 days; wallet_follow copies of it
+    # +$937 on 61. Its first buys, copied the same two ways as 67Q1Ns
+    Strategy("w5y9_mirror", "Copy 5Y9pyD: buy with it, sell the same share when it sells", tp_pct=0.0, sl_pct=0.0,
+             leader=W5Y9, mirror=True),
+    Strategy("w5y9_live", "Copy 5Y9pyD like live (50% at 2x, rest on its full exit)", tp_pct=0.0, sl_pct=0.0,
+             leader=W5Y9, live_rule=True),
     # wallet scout trials (app/wallet_scout.py): each candidate's first buys, copied like live
     Strategy("scout_trial", "Wallet scout: paper trial of a candidate wallet (live exit rule)", tp_pct=0.0,
              sl_pct=0.0, live_rule=True),
