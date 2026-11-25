@@ -50,6 +50,8 @@ from app.config import Settings, get_settings
 from app.models import Chain, PaperPosition
 
 log = logging.getLogger("curve")
+HOLDER_WAIT_S = 15.0     # a holder read that takes longer than this skips the fill (the price has moved on)
+HOLDER_PARALLEL = 4
 
 FEED_URL = "wss://pumpportal.fun/api/data"
 REAL_TOKENS_START = 793_100_000.0          # sellable tokens on a fresh classic pump.fun curve (6 decimals)
@@ -108,12 +110,19 @@ class CurveRule:
     # custom: once the trade has been up this %, the stop moves to the entry price (nothing is sold). 2026-11-25: 39 of
     # curve_70_organic's 162 stopped trades had been +50 % first, and still closed at about -35 %
     be_at: float | None = None
+    # holders at the fill, read from the coin's own history on-chain (app/curve_holders.py; 2026-11-26, 682 past 70 %
+    # coins: snipers sold out by our entry +23.6 % vs -13.8 % on curve_70_organic; one holder at 12 %+ -39.7 %)
+    max_sniper_pct: float | None = None   # skip if wallets that first bought within ~1 s of the create hold this %+
+    max_top1_pct: float | None = None     # skip if the biggest holder (bonding curve aside) holds this %+
+
+    def holder_check(self) -> bool:
+        return self.max_sniper_pct is not None or self.max_top1_pct is not None
 
     def waits(self) -> bool:
         return (self.min_fill is not None or self.max_dev is not None or self.min_rise is not None
                 or self.skip_copycat or self.min_buys_60s is not None or self.min_sells_60s is not None
                 or bool(self.skip_hosts) or self.max_paid_pct is not None or self.max_buys_60s is not None
-                or self.max_net_sol_60s is not None or self.min_buyers_60s is not None)
+                or self.max_net_sol_60s is not None or self.min_buyers_60s is not None or self.holder_check())
 
 
 CURVE_RULES: dict[str, CurveRule] = {
@@ -198,6 +207,12 @@ CURVE_RULES: dict[str, CurveRule] = {
                                        grad_trail=30.0, be_at=50.0, paper_only=True,
                                        title="curve_70_organic with the stop moved to the entry once it is +50%; "
                                              "rides graduation, 30% trailing"),
+    # (2026-11-26, user's request) curve_70_organic plus the two holder filters that held on 682 past coins
+    "curve_70_organic_safe": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
+                                       min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True,
+                                       grad_trail=30.0, max_sniper_pct=0.01, max_top1_pct=12.0, paper_only=True,
+                                       title="curve_70_organic, only when the launch snipers have sold out and no "
+                                             "holder has 12%+ (read on-chain at the fill); rides graduation"),
     "curve_70_organic": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
                                   min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True, grad_trail=30.0,
                                   title="curve 70% with organic trading (10+ buys, 5+ sells in a minute, dev under "
@@ -375,6 +390,9 @@ class PaperCurve:
         self.pp_events = 0
         self.rules: dict[str, CurveRule] = dict(CURVE_RULES)
         self._social_todo: set[str] = set()
+        self.holders: dict[str, dict[str, Any] | None] = {}   # mint -> holder facts (None: the read failed)
+        self._holder_asked: dict[str, float] = {}              # mint -> when a fill first asked for them
+        self._holder_task: asyncio.Task | None = None
         self._lost_at: float | None = None      # when the sockets dropped (None: connected)
 
     def set_custom(self, rules: dict[str, CurveRule]) -> None:
@@ -605,6 +623,20 @@ class PaperCurve:
             if rule.min_buyers_60s is not None and pre.get("buyers_60s") is not None \
                     and pre["buyers_60s"] < rule.min_buyers_60s:
                 continue                                  # one or two wallets pushing it
+            if rule.holder_check():
+                if w.mint not in self.holders:            # not read yet: ask, and try this fill again shortly
+                    asked = self._holder_asked.setdefault(w.mint, now)
+                    if now - asked < HOLDER_WAIT_S:
+                        w.pending[strat] = (now + 0.5, decision_px, why)
+                    continue
+                h = self.holders[w.mint]
+                if h is None:
+                    continue                              # couldn't read who holds it: don't guess
+                if rule.max_sniper_pct is not None and h["sniper_hold_pct"] >= rule.max_sniper_pct:
+                    continue                              # the launch snipers still hold: they sell into buyers
+                if rule.max_top1_pct is not None and h["top1_pct"] >= rule.max_top1_pct:
+                    continue                              # one wallet holds too much
+                pre = {**pre, **{f"h_{k}": v for k, v in h.items() if k != "creator"}}
             if paper_switches.paused(strat):              # paused on /paper: no paper trade, live signal still goes
                 if rule.waits() and self.live_signals and strat in self.live_signals:
                     curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
@@ -805,6 +837,38 @@ class PaperCurve:
                 row.features = f
         self._social_todo.update((row.features or {}).get("uri") for _, row in rows)
         self._social_todo -= {None, ""} | set(self._social_cache)
+
+    def _holder_todo(self) -> list[str]:
+        return [m for m in self._holder_asked if m not in self.holders]
+
+    async def fetch_holders(self) -> None:
+        """Background: read who holds the coins a fill is waiting on (app/curve_holders.py), then retry those
+        fills at once. A read that fails is remembered as None: the fill is skipped."""
+        from app import curve_holders
+
+        todo = self._holder_todo()[:HOLDER_PARALLEL]
+        if not todo:
+            return
+        url = self.s.live_rpc_url or self.s.solana_rpc_url
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10) as http:
+            got = await asyncio.gather(*[asyncio.wait_for(curve_holders.check(url, m, http), HOLDER_WAIT_S)
+                                         for m in todo], return_exceptions=True)
+        for mint, res in zip(todo, got):
+            if isinstance(res, BaseException):
+                log.info("curve (paper): holders of %s unread: %s", mint[:8], res)
+                res = None
+            self.holders[mint] = res
+        if len(self.holders) > 5000:                  # forget coins we no longer watch
+            for m in [m for m in self.holders if m not in self.watch]:
+                self.holders.pop(m, None)
+                self._holder_asked.pop(m, None)
+        now = time.monotonic()
+        for mint in todo:
+            w = self.watch.get(mint)
+            if w is not None and w.pending:
+                self._fills(w, now)
 
     async def fetch_socials(self, SessionLocal) -> None:
         """Background: read queued token metadata and add the socials to their paper rows."""
@@ -1026,6 +1090,8 @@ class PaperCurve:
             if now - last_px >= 60.0:
                 last_px = now
                 await self._refresh_sol_usd()
+            if self._holder_todo() and not (self._holder_task and not self._holder_task.done()):
+                self._holder_task = asyncio.create_task(self.fetch_holders())
             if self._social_todo and not (self._social_task and not self._social_task.done()):
                 self._social_task = asyncio.create_task(self.fetch_socials(SessionLocal))
             if self.riding() and now - last_ride >= self.s.curve_trail_price_seconds:

@@ -766,3 +766,72 @@ def test_organic_2min_and_be50_variants():
     be = [p for p in c.closed if p["strategy"] == "curve_70_organic_be50"]
     assert [p["reason"] for p in be] == ["breakeven_stop"] and be[0]["pnl_pct"] > -10
     assert "curve_70_organic_2min" not in live_rules() and "curve_70_organic_be50" not in live_rules()
+
+
+def test_organic_safe_waits_for_holders_and_skips_snipers_and_whales():
+    from app.curve_live import live_rules
+
+    def run(mint, facts, fail=False):
+        c = PaperCurve(S())
+        t = _organic_coin(c, mint, 70.5)
+        w = c.watch[mint]
+        assert "curve_70_organic" in w.held and "curve_70_organic_safe" not in w.held
+        assert mint in c._holder_todo() and "curve_70_organic_safe" in w.pending   # asked, waiting
+
+        async def check(url, m, http=None, until=None):
+            if fail:
+                raise RuntimeError("down")
+            return facts
+        import app.curve_holders as ch
+        real = ch.check
+        ch.check = check
+        try:
+            asyncio.run(c.fetch_holders())
+        finally:
+            ch.check = real
+        c.on_curve(mint, acct(70.6), t + 1)
+        return c.watch[mint]
+
+    ok = {"creator": "D", "holders": 60, "top1_pct": 4.0, "top10_pct": 25.0, "dev_hold_pct": 0.0,
+          "sniper_n": 3, "sniper_hold_pct": 0.0}
+    w = run("H1", ok)
+    assert "curve_70_organic_safe" in w.held
+    assert w.held["curve_70_organic_safe"]["features"]["h_top1_pct"] == 4.0
+    assert "curve_70_organic_safe" not in run("H2", {**ok, "sniper_hold_pct": 6.5}).held     # snipers still hold
+    assert "curve_70_organic_safe" not in run("H3", {**ok, "top1_pct": 12.0}).held           # a whale
+    w = run("H4", ok, fail=True)                                                             # unread: skipped
+    assert "curve_70_organic_safe" not in w.held and "curve_70_organic_safe" not in w.pending
+    assert "curve_70_organic_safe" not in live_rules()
+
+
+def test_organic_safe_gives_up_when_holders_never_come():
+    c = PaperCurve(S())
+    t = _organic_coin(c, "H5", 70.5)
+    for k in range(1, 40):
+        c.on_curve("H5", acct(70.5 + k * 0.01), t + k * 0.6)
+    assert "curve_70_organic_safe" not in c.watch["H5"].pending and "curve_70_organic_safe" not in c.watch["H5"].held
+
+
+def test_curve_holders_replay_finds_snipers_top_holder_and_skips_the_curve():
+    from app import curve_holders, pump_tx
+
+    mint = "So11111111111111111111111111111111111111112"
+    bc = pump_tx.curve_address(mint)
+
+    def tx(slot, pre, post, create=False):
+        def bals(d):
+            return [{"mint": mint, "owner": o, "uiTokenAmount": {"uiAmount": v}} for o, v in d.items()]
+        return {"slot": slot, "transaction": {"message": {"accountKeys": ["DEV"]}},
+                "meta": {"err": None, "logMessages": ["Program log: Instruction: Create"] if create else [],
+                         "preTokenBalances": bals(pre), "postTokenBalances": bals(post)}}
+
+    txs = [tx(100, {}, {bc: 900e6, "DEV": 50e6}, create=True),
+           tx(101, {bc: 900e6}, {bc: 860e6, "SNIPE": 40e6}),          # sniper, 1 slot after the create
+           tx(150, {bc: 860e6}, {bc: 830e6, "LATE": 30e6}),
+           tx(160, {"SNIPE": 40e6}, {})]                                # sniper sold out, account closed
+    h = curve_holders.replay(mint, txs)
+    assert h["sniper_n"] == 1 and h["sniper_hold_pct"] == 0.0
+    assert h["top1_pct"] == 5.0 and h["dev_hold_pct"] == 5.0 and h["holders"] == 2
+    import pytest
+    with pytest.raises(curve_holders.NotPump):
+        curve_holders.replay(mint, txs[1:])

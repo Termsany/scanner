@@ -72,7 +72,8 @@ SELF_PRICED = ("snipe_all", "snipe_momentum", "grad_all", "grad_confirm", "curve
                "curve_70_live", "curve_fast34_mom", "curve_fast34_mom2", "curve_70_organic",
                "curve_70_organic_slow", "curve_70_organic_grad", "curve_70_organic_v2",
                "curve_70_organic_v2_late_sl", "curve_70_quiet", "curve_70_quiet_wide_sl",
-               "curve_70_slow3", "curve_70_organic_2min", "curve_70_organic_be50")
+               "curve_70_slow3", "curve_70_organic_2min", "curve_70_organic_be50",
+               "curve_70_organic_safe")
 
 STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     Strategy("wallet_follow", "Follow a tracked wallet (exit when it sells)"),
@@ -175,6 +176,8 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              sl_pct=-45.0, max_hold_minutes=60),
     Strategy("curve_70_organic_2min", "Bonding curve: curve_70_organic, only coins that took 2-5 min to reach 70%",
              tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),
+    Strategy("curve_70_organic_safe", "Bonding curve: curve_70_organic, only when the launch snipers have sold out "
+             "and no holder has 12%+", tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),
     Strategy("curve_70_organic_be50", "Bonding curve: curve_70_organic, stop moved to the entry once it is +50%",
              tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60),
     Strategy("curve_70_slow3", "Bonding curve: 70% reached 3+ min after launch; rides graduation, sells 30% under "
