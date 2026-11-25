@@ -34,6 +34,7 @@ log = logging.getLogger("paper")
 
 CLUSTER_MINUTES = 10
 DULX = "DULX3e6vt1ZpHq3AdCUBZLPZ1CrhApdNKcewMPxZQRXf"
+W67Q = "67Q1NscZdLxBMNgbjJ4jprm9J5GSUX1c9aVFigBzxFWg"   # auto 18/34: fast trader (4 min median hold)
 CLUSTER_MIN_WALLETS = 2
 CURSOR_TRADES = "paper:wallet_trades"
 CURSOR_SIGNALS = "paper:signals"
@@ -76,6 +77,12 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              leader=DULX, live_rule=True),
     Strategy("dulx_50_1000", "Copy DULX3e like live, only its $50-1000 buys", tp_pct=0.0, sl_pct=0.0,
              leader=DULX, min_usd=50.0, max_usd=1000.0, live_rule=True),
+    # 67Q1Ns test (user's request 2026-11-25): it made ~+$3.7k in a week but holds 4 minutes for +3% median;
+    # does a copy keep any of that? Its first buys, copied two ways
+    Strategy("w67q_mirror", "Copy 67Q1Ns: buy with it, sell the same share when it sells", tp_pct=0.0, sl_pct=0.0,
+             leader=W67Q, mirror=True),
+    Strategy("w67q_live", "Copy 67Q1Ns like live (50% at 2x, rest on its full exit)", tp_pct=0.0, sl_pct=0.0,
+             leader=W67Q, live_rule=True),
     # wallet scout trials (app/wallet_scout.py): each candidate's first buys, copied like live
     Strategy("scout_trial", "Wallet scout: paper trial of a candidate wallet (live exit rule)", tp_pct=0.0,
              sl_pct=0.0, live_rule=True),

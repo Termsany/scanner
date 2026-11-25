@@ -454,3 +454,28 @@ def test_custom_curve_strategies_show_on_the_paper_page_and_can_be_reset():
     st = _db(body)
     assert st["custom"]["enabled"] and "buy at 30% sold" in st["title"] and "sell all at 70% sold" in st["title"]
     assert st["sl_pct"] == -30.0 and st["tp_pct"] > 150                                  # ~+160% from 30% to 70%
+
+
+def test_w67q_copies_only_that_wallets_first_buys():
+    from app.paper import W67Q
+
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)                     # cursors
+        await sess.commit()
+        first = _trade(1, W67Q, mint=MINT)
+        first.first_buy = True
+        again = _trade(2, W67Q, mint="Mint2")
+        again.first_buy = False                            # a second buy of a coin: not a new copy
+        other = _trade(3, OTHER, mint="Mint3")
+        other.first_buy = True
+        sess.add_all([first, again, other])
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy.like("w67q%")))).scalars().all()
+        assert {(r.token_address, r.strategy) for r in rows} == {(MINT, "w67q_mirror"), (MINT, "w67q_live")}
+        return True
+
+    assert _db(body)
