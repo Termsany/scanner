@@ -190,6 +190,15 @@ class JupiterBetter(Exception):
 ATA_RENT_SOL = 0.00203928       # a new token account's rent: both routes pay it on a first buy
 
 
+def _ca(mint: str | None) -> str:
+    """A coin's address and its page, on their own lines, for a Telegram alert (user's request 2026-11-25: every
+    alert about a coin, bought or skipped, carries its address to open it)."""
+    if not mint:
+        return ""
+    page = f"https://pump.fun/coin/{mint}" if mint.endswith("pump") else f"https://dexscreener.com/solana/{mint}"
+    return f"\n{mint}\n{page}"
+
+
 def route_edge_buy(pp_tokens: int, pp_sol: float, jup_tokens: int, jup_sol: float) -> float:
     """How much more Jupiter gives per SOL than PumpPortal, all costs included (+0.02 = 2% more tokens)."""
     if pp_tokens <= 0 or pp_sol <= 0 or jup_sol <= 0:
@@ -1744,7 +1753,7 @@ class CopyEngine:
                 if not quiet:
                     self._said[key] = time.monotonic()
             if not quiet:
-                await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}")
+                await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: {why}{_ca(t.token_address)}")
                 if why.startswith("not enough SOL"):
                     await self.tell_user(user_note(self.a.user_lang, "low_sol"))
                 elif why.startswith("daily loss limit"):
@@ -1755,7 +1764,7 @@ class CopyEngine:
             res = await self.screener.check(t.token_address, t.wallet_label or t.wallet[:6])
             if not res.ok:
                 log.info("live: skip buy %s (scanner: %s)", sym, res.reason)
-                await self.notify(f"{self._tag()} 🛡 Skipped ${sym}: scanner says {res.reason}")
+                await self.notify(f"{self._tag()} 🛡 Skipped ${sym}: scanner says {res.reason}{_ca(t.token_address)}")
                 return
             log.info("live: %s passed the scanner (%s)", sym, res.reason)
         chase = self._chase(t.wallet, free)
@@ -1768,14 +1777,14 @@ class CopyEngine:
             over = (exc.pay / t.price_usd - 1) * 100
             log.info("live: skip buy %s (price +%.0f%% over the leader's, limit +%.0f%%)", sym, over, chase)
             await self.notify(f"{self._tag()} ⏭ Skipped ${sym}: price already +{over:.0f}% above where "
-                              f"{t.wallet_label or t.wallet[:6]} bought (limit +{chase:.0f}%)")
+                              f"{t.wallet_label or t.wallet[:6]} bought (limit +{chase:.0f}%){_ca(t.token_address)}")
             return
         except Exception as exc:
             log.warning("live: buy %s failed: %s", sym, exc)
             session.add(LivePosition(mode=self.x.mode, account=self.a.name, token_address=t.token_address, symbol=t.symbol or "",
                                      leader_wallet=t.wallet, leader_trade_id=t.id, status="failed",
                                      cost_usd=0.0, error=str(exc)[:300], closed_at=_now()))
-            await self.notify(f"{self._tag()} ❌ Buy ${sym} failed: {str(exc)[:200]}")
+            await self.notify(f"{self._tag()} ❌ Buy ${sym} failed: {str(exc)[:200]}{_ca(t.token_address)}")
             return
         timing = {"block_to_seen": round((seen - utc(t.block_time)).total_seconds(), 2) if seen and t.block_time else None,
                   "pickup": round(pickup, 2) if pickup is not None else None, "checks": round(checks, 2),
@@ -1793,7 +1802,7 @@ class CopyEngine:
                  " ".join(f"{k}={v}" for k, v in timing.items() if v is not None))
         log.info("live: BUY %s for %.4f SOL ($%.2f) %s", sym, f.sol, f.usd, f.signature)
         await self.notify(f"{self._tag()} ✅ Bought ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})\n"
-                          f"Copying {t.wallet_label or t.wallet[:6]}\n{self._tx(f.signature)}")
+                          f"Copying {t.wallet_label or t.wallet[:6]}{_ca(t.token_address)}\n{self._tx(f.signature)}")
         await self.tell_user(user_note(self.a.user_lang, "bought", sym=sym, usd=f.usd, tx=self._tx(f.signature)))
 
     # ---- sells -------------------------------------------------------------
@@ -1811,7 +1820,7 @@ class CopyEngine:
                 await session.commit()
                 log.info("live: %s is hold-only: leader sold %.0f%%, keeping it", sym, share * 100)
                 await self.notify(f"{self._tag()} 🔒 {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
-                                  f"${sym}, but ${sym} is hold-only: keeping it (sell by hand if you want)")
+                                  f"${sym}, but ${sym} is hold-only: keeping it (sell by hand if you want){_ca(t.token_address)}")
             return
         if pos is not None and pos.hands_off:
             # the owner manages it: only their target / stop (or a sell from the page) takes it out
@@ -1842,7 +1851,7 @@ class CopyEngine:
                     await session.commit()
                     log.info("live: %s 50%% already out at 2x: ignoring leader trim %.0f%%", sym, share * 100)
                     await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of "
-                                      f"${sym}; half was already sold at 2x, the rest waits for its full exit")
+                                      f"${sym}; half was already sold at 2x, the rest waits for its full exit{_ca(pos.token_address)}")
                 else:
                     # the leader trims before 2x: copy it, and from now on follow every sell of this token
                     await self._sell(session, pos, share, "leader_trim")
@@ -1854,14 +1863,14 @@ class CopyEngine:
                 sym = pos.symbol or pos.token_address[:6]
                 log.info("live: %s capital already out: ignoring leader trim %.0f%%", sym, share * 100)
                 await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of ${sym}; "
-                                  "your capital is already out, so the rest waits for its full exit")
+                                  f"your capital is already out, so the rest waits for its full exit{_ca(pos.token_address)}")
             elif share < 0.99 and not self.s.live_copy_trims:
                 # the user's rule: partial sells are not copied; the rest leaves on the leader's full exit
                 await session.commit()
                 sym = pos.symbol or pos.token_address[:6]
                 log.info("live: %s ignoring leader trim %.0f%%", sym, share * 100)
                 await self.notify(f"{self._tag()} ⏸ {t.wallet_label or t.wallet[:6]} sold {share * 100:.0f}% of ${sym}; "
-                                  "partial sells are not copied, the rest waits for its full exit")
+                                  f"partial sells are not copied, the rest waits for its full exit{_ca(pos.token_address)}")
             elif share < 0.99 and self.s.live_trim_cap_pct is not None:
                 await self._capped_trim(session, pos, t, share)
             else:
@@ -1913,7 +1922,7 @@ class CopyEngine:
         pnl = ""
         if pos is not None and pos.cost_usd:
             pnl = f" · in ${pos.cost_usd:,.2f}, out so far ${pos.proceeds_usd or 0:,.2f}"
-        await self.notify(f"{self._tag()} 🚪 {who} sold ALL its ${sym}{pnl}\n{what}")
+        await self.notify(f"{self._tag()} 🚪 {who} sold ALL its ${sym}{pnl}\n{what}{_ca(t.token_address)}")
 
     @staticmethod
     def _following(pos: LivePosition) -> bool:
@@ -1944,14 +1953,14 @@ class CopyEngine:
             await session.commit()
             log.info("live: %s trim cap reached: ignoring leader trim %.0f%%", sym, share * 100)
             await self.notify(f"{self._tag()} ⏸ {who} sold {share * 100:.0f}% of ${sym}; {cap * 100:.0f}% is already "
-                              "sold, so the rest waits for its full exit")
+                              f"sold, so the rest waits for its full exit{_ca(pos.token_address)}")
             return
         take = min(want, room)
         await self._sell(session, pos, (take + 0.5) / held, "leader_trim")   # +0.5: int() in _sell lands on take
         await session.commit()
         if take < want:
             await self.notify(f"{self._tag()} ⏸ ${sym}: sold only up to {cap * 100:.0f}% of the position; "
-                              "the rest waits for the leader's full exit")
+                              f"the rest waits for the leader's full exit{_ca(pos.token_address)}")
 
     async def _sell_manual(self, session: AsyncSession, t: WalletTrade, share: float) -> None:
         """Tokens the owner bought by hand in this wallet follow the leader out too (same share): the hand buys
@@ -1990,7 +1999,7 @@ class CopyEngine:
                 self._reconciled = 0.0          # sold by hand? check the wallet on the next step
             if attempts in (1, MAX_SELL_ATTEMPTS):
                 await self.notify(f"{self._tag()} ⚠️ Sell ${sym} failed{' again, giving up retries' if attempts >= MAX_SELL_ATTEMPTS else ', retrying'}: "
-                                  f"{str(exc)[:160]}")
+                                  f"{str(exc)[:160]}{_ca(pos.token_address)}")
             return False
         finally:
             _FAST.reset(fast)
@@ -2012,7 +2021,7 @@ class CopyEngine:
         tail = (f"\nClosed: P&L {'+' if pos.pnl_usd >= 0 else '−'}${abs(pos.pnl_usd):,.2f}" if done
                 else f"\nStill holding {100 - share * 100:.0f}% of the position")
         await self.notify(f"{self._tag()} 💰 Sold {share * 100:.0f}% of ${sym} for {f.sol:.4f} SOL (${f.usd:,.2f})"
-                          f" · {reason.replace('_', ' ')}{tail}\n{self._tx(f.signature)}")
+                          f" · {reason.replace('_', ' ')}{tail}{_ca(pos.token_address)}\n{self._tx(f.signature)}")
         await self.tell_user(user_note(self.a.user_lang, "sold", sym=sym, usd=f.usd, share=share, done=done,
                                        reason=reason, pnl=pos.pnl_usd or 0, tx=self._tx(f.signature)))
         return True
@@ -2539,7 +2548,7 @@ class CopyEngine:
                     key = "curve " + why.split(" ")[0]
                     if time.monotonic() - self._said.get(key, -1e9) >= 6 * 3600:
                         self._said[key] = time.monotonic()
-                        await self.notify(f"{self._tag()} ⏸ curve {strat}: skipped ${sym} ({why})")
+                        await self.notify(f"{self._tag()} ⏸ curve {strat}: skipped ${sym} ({why}){_ca(sig.mint)}")
                 continue
             decision_usd = sig.px_sol * sol_usd
             max_price = decision_usd * (1 + self.s.live_curve_max_chase_pct / 100)
@@ -2551,7 +2560,7 @@ class CopyEngine:
                 continue
             except Exception as exc:
                 log.warning("live[%s]: curve %s buy %s failed: %s", self.a.name, strat, sym, exc)
-                await self.notify(f"{self._tag()} ❌ curve {strat}: buy ${sym} failed: {str(exc)[:160]}")
+                await self.notify(f"{self._tag()} ❌ curve {strat}: buy ${sym} failed: {str(exc)[:160]}{_ca(sig.mint)}")
                 continue
             finally:
                 _FAST.reset(fast)
@@ -2585,8 +2594,7 @@ class CopyEngine:
                               + f"{f' or +{tp_pct:g}%' if tp_pct else ''} "
                               f"or {sig.sl_pct:+.0f}% or after "
                               f"{sig.max_hold_s / 60:.0f} min\n"
-                              # the coin's address (user's request 2026-11-25: to open it from the alert)
-                              f"{sig.mint}\nhttps://pump.fun/coin/{sig.mint}\n{self._tx(f.signature)}")
+                              f"{_ca(sig.mint)}\n{self._tx(f.signature)}")
 
     async def _curve_exits(self, session: AsyncSession) -> None:
         """Real curve positions: stop and exit level checked on every step against the paper engine's own

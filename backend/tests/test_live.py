@@ -2659,3 +2659,11 @@ def test_a_tipped_transaction_goes_through_sender_and_the_rpc():
         got = asyncio.run(go())
     # the RPC refused the send but Sender took it: it is followed like any send, and lands
     assert got == (sig, True) and hits["sender"] == 1 and hits["rpc_send"] == 1
+
+
+def test_coin_alerts_end_with_the_address_and_its_page():
+    from app.live import _ca
+
+    assert _ca("ADDR1pump") == "\nADDR1pump\nhttps://pump.fun/coin/ADDR1pump"
+    assert _ca("So1Other") == "\nSo1Other\nhttps://dexscreener.com/solana/So1Other"
+    assert _ca(None) == ""
