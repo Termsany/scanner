@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     scout_trial_min_trades: int = 5
     paper_size_usd: float = 100.0
     paper_slippage_pct: float = 1.5             # charged on entry AND exit (pump.fun fee + slippage)
+    # gas per Ethereum swap for costs=True paper strategies (signal_eth). 2026-11-25: 0.17 gwei, ETH $1,648, so a
+    # ~250k-gas aggregator swap ~$0.07; $0.50 leaves room for gas spikes, a priority fee and the token approval
+    paper_eth_gas_usd: float = 0.5
     paper_no_price_minutes: int = 60            # no market price this long: close at last known price
     # wallet_mirror copies these tracked wallets (buy with them, sell the same share when they sell).
     # Empty = every tracked wallet.

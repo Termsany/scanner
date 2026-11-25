@@ -537,3 +537,38 @@ def test_signal_eth_and_gecko_first_filters():
         return True
 
     assert _db(body)
+
+
+def test_signal_eth_charges_gas_and_tax_and_skips_honeypots():
+    from app.paper import _value
+
+    s = _settings()
+
+    async def body(sess):
+        ok = Token(chain=Chain.ethereum, address="0xtax", symbol="TAX", buy_tax=5.0, sell_tax=10.0)
+        hp = Token(chain=Chain.ethereum, address="0xhp", symbol="HP", is_honeypot=True)
+        sess.add_all([ok, hp])
+        await sess.flush()
+        await process_entries(sess, s)                 # cursors
+        await sess.commit()
+        for t in (ok, hp):
+            sess.add(Signal(token_id=t.id, score=85, badge=Badge.strong_alpha, price_usd=1.0, payload={}))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy == "signal_eth"))).scalars().all()
+        assert [r.token_address for r in rows] == ["0xtax"]          # the honeypot is skipped
+        p = rows[0]
+        size, gas, slip = s.paper_size_usd, s.paper_eth_gas_usd, s.paper_slippage_pct
+        tokens = (size - gas) * 0.95 / (1 + slip / 100)
+        assert abs(size / p.fill_price - tokens) < 1e-9
+        # flat price: lose slippage twice, both taxes and two gas fees
+        want = tokens * (1 - slip / 100) * 0.90 - gas
+        assert abs(_value(p, 1.0, s) - want) < 1e-9
+        # signal_80 on the same coin pays slippage only
+        p80 = (await sess.execute(select(PaperPosition).where(
+            PaperPosition.strategy == "signal_80", PaperPosition.token_address == "0xtax"))).scalar_one()
+        assert abs(_value(p80, 1.0, s) - size / (1 + slip / 100) * (1 - slip / 100)) < 1e-9
+        return True
+
+    assert _db(body)

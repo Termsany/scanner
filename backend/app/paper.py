@@ -61,6 +61,8 @@ class Strategy:
     chains: tuple[str, ...] | None = None   # signal strategies: only tokens on these chains
     first_signal: bool = False              # signal strategies: only the token's first signal
     sources_any: tuple[str, ...] | None = None   # signal strategies: only tokens found by one of these feeds
+    costs: bool = False     # also charge what a real trade pays on top of slippage: the chain's gas on each swap
+                            # (PAPER_ETH_GAS_USD on Ethereum) and the token's buy / sell tax; skip honeypots
 
 
 # priced and closed by their own loops (app/sniper.py, app/grad.py), second by second
@@ -103,7 +105,9 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     # all signals), but 96% also fell 30%; two exits to see which comes first
     # (2026-11-25, 1,682 signal_80 trades 11-19..11-23: -5.2% a trade, every day; score didn't help): the two simple
     # filters that held in both halves of the data. Same exits as signal_80 to compare
-    Strategy("signal_eth", "Scanner signal, score >= 80, Ethereum only", min_score=80, chains=("ethereum",)),
+    # costs=True (user's request 2026-11-25, before trading it for real): gas on both swaps and the token's taxes
+    Strategy("signal_eth", "Scanner signal, score >= 80, Ethereum only (with gas and token tax)", min_score=80,
+             chains=("ethereum",), costs=True),
     Strategy("signal_gecko_first", "Scanner signal, score >= 80: the token's first signal, found by GeckoTerminal "
              "(new or trending pools)", min_score=80, first_signal=True, sources_any=("gecko_new", "gecko_trending")),
     Strategy("signal_dulx", "Scanner signal after DULX3e bought it (within 1 h): TP +100%, stop -40%, 6 h",
@@ -232,21 +236,26 @@ async def _open_keys(session: AsyncSession) -> set[tuple[str, str, str]]:
 
 def _open(session: AsyncSession, keys: set, strategy: Strategy, *, chain: Chain, token: str, symbol: str,
           price: float, trigger: str, at: datetime, s: Settings, wallet: str | None = None,
-          leader_trade_id: int | None = None) -> PaperPosition | None:
+          leader_trade_id: int | None = None, costs: dict[str, float] | None = None) -> PaperPosition | None:
     from app import paper_switches
 
     key = (strategy.name, chain.value, token)
     if key in keys or not price or price <= 0 or paper_switches.paused(strategy.name):
         return None
     keys.add(key)
+    fill = price * (1 + s.paper_slippage_pct / 100)
+    if costs:
+        # the buy's gas comes out of the stake and its tax out of the tokens: both raise the price paid per token
+        fill = fill / (1 - costs["buy_tax"] / 100) * s.paper_size_usd / (s.paper_size_usd - costs["gas_usd"])
     pos = PaperPosition(
         strategy=strategy.name, chain=chain, token_address=token, symbol=symbol or "", trigger=trigger[:160],
         trigger_wallet=wallet, status="open", size_usd=s.paper_size_usd, entry_time=at, entry_price=price,
-        fill_price=price * (1 + s.paper_slippage_pct / 100), tp_pct=strategy.tp_pct, sl_pct=strategy.sl_pct,
+        fill_price=fill, tp_pct=strategy.tp_pct, sl_pct=strategy.sl_pct,
         max_hold_minutes=(s.paper_mirror_max_hold_hours * 60 if strategy.mirror or strategy.live_rule
                           else strategy.max_hold_minutes),
         last_price=price, last_priced_at=at, peak_pct=0.0, trough_pct=0.0,
         remaining_frac=1.0, proceeds_usd=0.0, leader_trade_id=leader_trade_id,
+        features={"costs": costs} if costs else None,
     )
     session.add(pos)
     log.info("paper OPEN %s %s %s @ %.10g (%s)", strategy.name, chain.value, symbol or token, price, trigger)
@@ -383,8 +392,13 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
                     if not bought_by[w]:
                         continue
                     trigger += f" after {w[:6]} bought"
+                costs = None
+                if strat.costs:
+                    if tok.is_honeypot:
+                        continue
+                    costs = trade_costs(chain, tok.buy_tax, tok.sell_tax, s)
                 if _open(session, keys, strat, chain=tok.chain, token=tok.address, symbol=tok.symbol,
-                         price=sig.price_usd or 0.0, trigger=trigger, at=now, s=s):
+                         price=sig.price_usd or 0.0, trigger=trigger, at=now, s=s, costs=costs):
                     opened += 1
         await _set_cursor(session, CURSOR_SIGNALS, max_sig)
     return opened
@@ -395,10 +409,22 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
 # ---------------------------------------------------------------------------
 
 
+def trade_costs(chain: str, buy_tax: float | None, sell_tax: float | None, s: Settings) -> dict[str, float]:
+    """What a real trade pays besides slippage (strategy costs=True): gas per swap and the token's taxes (%)."""
+    gas = s.paper_eth_gas_usd if chain == "ethereum" else 0.0
+    return {"gas_usd": gas, "buy_tax": min(max(buy_tax or 0.0, 0.0), 99.0),
+            "sell_tax": min(max(sell_tax or 0.0, 0.0), 100.0)}
+
+
 def _value(pos: PaperPosition, price: float, s: Settings) -> float:
-    """Proceeds already banked plus what the remaining share would fetch at `price` (after slippage)."""
+    """Proceeds already banked plus what the remaining share would fetch at `price` (after slippage, and for a
+    costs=True position after the sell tax and the sell's gas)."""
     frac = 1.0 if pos.remaining_frac is None else pos.remaining_frac
-    return (pos.proceeds_usd or 0.0) + pos.size_usd * frac / pos.fill_price * price * (1 - s.paper_slippage_pct / 100)
+    rest = pos.size_usd * frac / pos.fill_price * price * (1 - s.paper_slippage_pct / 100)
+    costs = (pos.features or {}).get("costs") if isinstance(pos.features, dict) else None
+    if costs and frac > 0:
+        rest = rest * (1 - costs.get("sell_tax", 0.0) / 100) - costs.get("gas_usd", 0.0)
+    return (pos.proceeds_usd or 0.0) + rest
 
 
 def _close(pos: PaperPosition, price: float, reason: str, at: datetime, s: Settings) -> None:
