@@ -432,26 +432,46 @@ class JupiterGate:
         self._lock = asyncio.Lock()
         self._last = 0.0
         self._waiting = 0           # calls queued for a slot right now
+        self._urgent = 0            # of those, real-money calls: dry-run calls wait until none is queued
         self._cool_until = 0.0      # after a 429, background calls stay away for a while
 
-    async def _slot(self) -> None:
+    async def _slot(self, low: bool = False) -> None:
+        """low: a dry-run account's call. It lets every queued real-money call go first (user's request 2026-11-26:
+        dulx_dry copies DULX3e like mustafa, and its quotes held mustafa's buys up in this queue)."""
         t0 = time.monotonic()
         self._waiting += 1
+        if not low:
+            self._urgent += 1
+        held = False
         try:
-            await self._lock.acquire()
+            while True:
+                await self._lock.acquire()
+                held = True
+                if low and self._urgent > 0:
+                    self._lock.release()          # a real trade is waiting: step aside
+                    held = False
+                    await asyncio.sleep(0.05)
+                    continue
+                wait = self._last + self.interval - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                    if low and self._urgent > 0:  # one came in while we waited for the slot: it takes it
+                        self._lock.release()
+                        held = False
+                        await asyncio.sleep(0)
+                        continue
+                self._last = time.monotonic()
+                break
         finally:
+            if held:
+                self._lock.release()
             self._waiting -= 1
-        try:
-            wait = self._last + self.interval - time.monotonic()
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._last = time.monotonic()
-        finally:
-            self._lock.release()
+            if not low:
+                self._urgent -= 1
         _took("jup_queue", time.monotonic() - t0)     # waiting for our turn in the shared Jupiter gate
 
     async def request(self, http: httpx.AsyncClient, method: str, url: str, background: bool = False,
-                      retries: int | None = None, **kw) -> httpx.Response | None:
+                      retries: int | None = None, low: bool = False, **kw) -> httpx.Response | None:
         """background: price checks and paper (never trades): skipped (None) while a trade is queued or for a while
         after a 429, and never retried, so they can't hold up a buy or sell."""
         if background and (self._waiting or self._lock.locked() or time.monotonic() < self._cool_until):
@@ -459,7 +479,7 @@ class JupiterGate:
         tries = (0 if background else self.retries) if retries is None else retries
         r: httpx.Response | None = None
         for attempt in range(tries + 1):
-            await self._slot()
+            await self._slot(low)
             r = await http.request(method, url, **kw)
             if r.status_code == 429:
                 self._cool_until = time.monotonic() + 15.0
@@ -529,7 +549,7 @@ class JupiterExecutor:
 
     async def _prices(self, mints: list[str]) -> dict[str, Any]:
         r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/price/v3",
-                                  params={"ids": ",".join(mints)})
+                                  params={"ids": ",".join(mints)}, low=self.mode == "dry")
         if r.status_code != 200:
             raise SwapError(f"price API {r.status_code}: {r.text[:120]}")
         data = r.json() or {}
@@ -567,7 +587,7 @@ class JupiterExecutor:
 
     async def quote(self, input_mint: str, output_mint: str, amount: int,
                     slippage_bps: int | None = None) -> dict[str, Any]:
-        r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/swap/v1/quote", params={
+        r = await JUPITER.request(self.http, "GET", f"{self.s.jupiter_api_url}/swap/v1/quote", low=self.mode == "dry", params={
             "inputMint": input_mint, "outputMint": output_mint, "amount": str(amount),
             "slippageBps": slippage_bps or self.s.live_slippage_bps, "restrictIntermediateTokens": "true",
         })
@@ -793,7 +813,7 @@ class JupiterExecutor:
         from solders.transaction import VersionedTransaction
 
         t_build = time.monotonic()
-        r = await JUPITER.request(self.http, "POST", f"{self.s.jupiter_api_url}/swap/v1/swap", json={
+        r = await JUPITER.request(self.http, "POST", f"{self.s.jupiter_api_url}/swap/v1/swap", low=self.mode == "dry", json={
             "quoteResponse": q, "userPublicKey": self.pubkey, "wrapAndUnwrapSol": True,
             "dynamicComputeUnitLimit": True,
             "prioritizationFeeLamports": {"priorityLevelWithMaxLamports": {

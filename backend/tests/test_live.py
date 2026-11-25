@@ -2733,3 +2733,28 @@ def test_buy_and_sell_alerts_name_the_copied_wallet_by_its_label():
     sold = [n for n in notes if "💰 Sold" in n]
     assert buy and f"Copying {who}" in buy[0]
     assert sold and f"Copied from {who}" in sold[0]
+
+
+def test_jupiter_gate_lets_real_money_calls_go_before_dry_run_ones():
+    import httpx
+    import respx
+
+    from app.live import JupiterGate
+
+    gate = JupiterGate(interval=0.1, retries=0)
+    order = []
+
+    async def go():
+        with respx.mock:
+            respx.get(url__regex=r"https://jup\.test/.*").mock(
+                side_effect=lambda req: (order.append(req.url.path), httpx.Response(200))[1])
+            async with httpx.AsyncClient() as http:
+                await gate.request(http, "GET", "https://jup.test/first")          # the next slot is 0.1 s away
+                dry1 = asyncio.ensure_future(gate.request(http, "GET", "https://jup.test/dry1", low=True))
+                dry2 = asyncio.ensure_future(gate.request(http, "GET", "https://jup.test/dry2", low=True))
+                await asyncio.sleep(0.01)                                           # both dry calls queued first
+                live = asyncio.ensure_future(gate.request(http, "GET", "https://jup.test/live"))
+                await asyncio.gather(dry1, dry2, live)
+
+    asyncio.run(go())
+    assert order[0] == "/first" and order[1] == "/live" and set(order[2:]) == {"/dry1", "/dry2"}
