@@ -44,6 +44,7 @@ from app.schemas import (
     SecurityReport,
     SmartMoneyInfo,
 )
+from app.gecko_budget import GeckoBudget
 from app.scoring_engine import compute_alpha_score, top_reasons
 from app.holdings import HoldingsChecker
 from app.smart_money import SmartWalletRegistry
@@ -155,6 +156,8 @@ class Http:
             if resp.status_code == 404:
                 return None
             if resp.status_code == 429 or resp.status_code >= 500:
+                if resp.status_code == 429 and hasattr(limiter, "penalize"):
+                    await limiter.penalize()          # a shared budget: everyone pauses, not just this call
                 if attempt == retries:
                     log.warning("GET %s gave up after HTTP %s", url, resp.status_code)
                     return None
@@ -227,9 +230,10 @@ class GeckoTerminalClient:
     BASE = "https://api.geckoterminal.com/api/v2"
     HEADERS = {"Accept": "application/json;version=20230302"}
 
-    def __init__(self, http: Http) -> None:
+    def __init__(self, http: Http, cache: Cache | None = None) -> None:
         self.http = http
-        self.limiter = RateLimiter(25, 60.0)
+        # one budget with the API's charts and peaks (same IP, same quota); in-process without Redis
+        self.limiter = GeckoBudget(cache or Cache(None))
 
     async def ohlcv(self, chain: Chain, pool: str, *, aggregate_minutes: int = 15, limit: int = 120,
                     before_ts: int | None = None) -> list[list[float]]:
@@ -629,7 +633,7 @@ class Scanner:
         self.http = Http(self.settings)
         self.cache = Cache(self.settings.redis_url)
         self.dex = DexScreenerClient(self.http)
-        self.gecko = GeckoTerminalClient(self.http)
+        self.gecko = GeckoTerminalClient(self.http, self.cache)
         self.goplus = GoPlusClient(self.http, self.settings.goplus_access_token)
         self.rugcheck = RugCheckClient(self.http, self.settings.rugcheck_api_key)
         self.smart_money = SmartWalletRegistry(self.settings)

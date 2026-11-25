@@ -81,6 +81,22 @@ class Cache:
             self._mem[key] = (time.monotonic() + ttl_seconds, "1")
             return True
 
+    async def incr(self, key: str, ttl_seconds: int) -> int:
+        """Atomic counter (shared by every process through Redis); the TTL is set when the key is created."""
+        if self._redis is not None:
+            try:
+                n = int(await self._redis.incr(key))
+                if n == 1:
+                    await self._redis.expire(key, ttl_seconds)
+                return n
+            except Exception:
+                log.warning("Redis INCR failed for %s", key, exc_info=True)
+        async with self._lock:
+            item = self._mem.get(key)
+            n = (int(item[1]) if item and item[0] >= time.monotonic() else 0) + 1
+            self._mem[key] = (item[0] if item and n > 1 else time.monotonic() + ttl_seconds, str(n))
+            return n
+
     async def publish(self, channel: str, payload: dict[str, Any]) -> None:
         """Publish to Redis pub/sub (consumed by the Phase 2 WebSocket server)."""
         if self._redis is None:

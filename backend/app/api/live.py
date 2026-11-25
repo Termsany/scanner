@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
+from app.gecko_budget import GeckoBudget
 from app.models import Chain, LivePosition
 from app.repository import utc
 
@@ -437,17 +438,28 @@ async def _pool_of(http: httpx.AsyncClient, mint: str) -> str | None:
     return await _cached(f"pool:{mint}", 3600.0, fetch)
 
 
-async def peak_since(http: httpx.AsyncClient, mint: str, since: int) -> dict[str, Any] | None:
+class NoGeckoSlot(Exception):
+    """GeckoTerminal's shared budget is used up this minute (or it just sent a 429): keep the last value."""
+
+
+async def peak_since(http: httpx.AsyncClient, mint: str, since: int,
+                     budget: GeckoBudget | None = None) -> dict[str, Any] | None:
     """Highest price (USD per token) since `since`, from GeckoTerminal candles: 5-minute candles for up to 3 days,
-    15-minute up to 10, hourly beyond. None when the pool or its candles can't be read."""
+    15-minute up to 10, hourly beyond. None when the pool or its candles can't be read. Raises NoGeckoSlot when
+    the shared GeckoTerminal budget (app.gecko_budget) has no call left, so the caller keeps its last value."""
     pool = await _pool_of(http, mint)
     if not pool:
         return None
+    if budget is not None and not await budget.try_take():
+        raise NoGeckoSlot(mint)
     age = max(time.time() - since, 60)
     frame, agg = ("minute", 5) if age < 3 * 86400 else ("minute", 15) if age < 10 * 86400 else ("hour", 1)
     r = await http.get(f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool}/ohlcv/{frame}",
                        params={"aggregate": agg, "limit": 1000, "currency": "usd"},
                        headers={"Accept": "application/json;version=20230302"}, timeout=10)
+    if r.status_code == 429 and budget is not None:
+        await budget.block()
+        raise NoGeckoSlot(mint)
     if r.status_code != 200:
         return None
     rows = ((r.json().get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
@@ -463,10 +475,12 @@ async def peak_since(http: httpx.AsyncClient, mint: str, since: int) -> dict[str
 async def peaks(body: list[PeakIn], request: Request, _: Auth) -> dict[str, Any]:
     """{mint: {"price", "at"}}: each coin's highest price since the given time (at most 25 coins, cached a minute)."""
     http: httpx.AsyncClient = request.app.state.http
+    budget = GeckoBudget(request.app.state.cache)          # shared with the scanner: same IP, same quota
     out: dict[str, Any] = {}
     for item in body[:25]:
         since = item.since - item.since % 300              # same cache key within 5 minutes
-        val = await _cached(f"peak:{item.mint}:{since}", 60.0, lambda i=item, t=since: peak_since(http, i.mint, t))
+        val = await _cached(f"peak:{item.mint}:{since}", 60.0,
+                            lambda i=item, t=since: peak_since(http, i.mint, t, budget))
         if val:
             out[item.mint] = val
     return {"peaks": out}

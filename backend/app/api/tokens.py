@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache import Cache
 from app.db import get_session
+from app.gecko_budget import GeckoBudget
 from app.models import Chain, MarketSnapshot, SmartWallet, WalletSource
 from app.repository import get_token, list_tokens, recent_signals, scanner_status, token_detail, utc
 from app.scanner_worker import GECKO_NETWORK
@@ -77,10 +78,10 @@ async def get_token_chart(
 
     timeframe, aggregate, step = CHART_INTERVALS[interval]
     candles: list[Candle] = []
-    # GeckoTerminal's keyless quota (~30/min) is shared with the scanner's discovery calls; after a 429,
-    # serve snapshots for 30s instead of hammering it.
-    gecko_blocked = bool(await cache.get_json("chart:gecko_blocked"))
-    if token.pair_address and not gecko_blocked:
+    # GeckoTerminal's keyless quota (~30/min) is shared with the scanner's discovery calls: one budget for both
+    # (app.gecko_budget); with no slot left this minute, or after a 429, serve snapshots instead.
+    budget = GeckoBudget(cache)
+    if token.pair_address and await budget.try_take():
         http: httpx.AsyncClient = request.app.state.http
         url = (f"https://api.geckoterminal.com/api/v2/networks/{GECKO_NETWORK[chain]}/pools/"
                f"{token.pair_address}/ohlcv/{timeframe}")
@@ -93,7 +94,7 @@ async def get_token_chart(
                                   close=float(r[4]), volume=float(r[5] or 0)) for r in rows if len(r) >= 6]
                 candles.sort(key=lambda c: c.time)
             elif resp.status_code == 429:
-                await cache.set_json("chart:gecko_blocked", True, ttl_seconds=30)
+                await budget.block()
         except (httpx.HTTPError, ValueError, TypeError):
             candles = []
 
