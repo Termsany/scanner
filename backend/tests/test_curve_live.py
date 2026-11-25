@@ -401,3 +401,72 @@ def test_the_curve_buy_alert_carries_the_coin_address():
     _db(body)
     buy = [m for m in sent if "bought $ADR" in m]
     assert buy and "ADDR1pump" in buy[0] and "https://pump.fun/coin/ADDR1pump" in buy[0]
+
+
+def test_the_curve_buy_alert_carries_a_security_line():
+    from app.live import security_line
+
+    s = S()
+    curve = Account("curve", 10, 30, 20, [], curve_strategy="curve_fast34")
+    x = FakeExec()
+
+    async def curve_security(mint):
+        return 18.4, {"score_normalised": 41, "risks": [{"name": "Low liquidity", "level": "warn"},
+                                                         {"name": "Top holder owns 20%", "level": "danger"}]}
+    x.curve_security = curve_security
+    sent = []
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=curve)
+
+        async def notify(text):
+            sent.append(text)
+        eng.notify = notify
+        await eng.step(sess)
+        curve_live.publish("curve_fast34", CURVE_RULES["curve_fast34"], "SEC1pump", "SEC", 2e-7, 34.0,
+                           "curve 34% at 40s", 900,
+                           facts={"dev_pct": 4.2, "dev_sold": True, "buyers_60s": 23, "secs_to_level": 142.0,
+                                  "level_at": 34.1, "copycat": False})
+        await eng.step(sess)
+
+    _db(body)
+    buy = [m for m in sent if "bought $SEC" in m]
+    assert buy
+    line = "🔒 dev bought 4.2%, sold · top10 hold 18% · 23 buyers in 60s · 34% in 142s · RugCheck 41: Top holder owns 20%"
+    assert line in buy[0] and "SEC1pump" in buy[0]
+    # nothing known: no line; RugCheck clean and rugged
+    assert security_line(None, None, None) == ""
+    assert security_line({}, None, {"score": 1, "risks": []}) == "\n🔒 RugCheck 1, no danger flags"
+    assert "RUGGED" in security_line({}, None, {"rugged": True})
+
+
+def test_curve_security_reads_holders_without_the_curve_and_never_raises():
+    import asyncio
+
+    from app import pump_tx
+    from app.live import JupiterExecutor
+
+    x = JupiterExecutor(S(live_mode="dry"), live=False)
+    bc_ata = pump_tx.ata(pump_tx.curve_address("So11111111111111111111111111111111111111112"),
+                         "So11111111111111111111111111111111111111112", pump_tx.TOKEN_2022_PROGRAM)
+
+    async def rpc(method, params):
+        assert method == "getTokenLargestAccounts"
+        return {"value": [{"address": bc_ata, "uiAmount": 600_000_000.0}] +
+                         [{"address": f"A{i}", "uiAmount": 10_000_000.0} for i in range(12)]}
+    x._rpc = rpc
+
+    class R:
+        status_code = 500
+
+    async def get(*a, **k):
+        return R()
+    x.http.get = get
+    top10, rug = asyncio.run(x.curve_security("So11111111111111111111111111111111111111112"))
+    assert abs(top10 - 10.0) < 1e-9 and rug is None
+
+    async def boom(*a, **k):
+        raise RuntimeError("down")
+    x._rpc = boom
+    x.http.get = boom
+    assert asyncio.run(x.curve_security("So11111111111111111111111111111111111111112")) == (None, None)

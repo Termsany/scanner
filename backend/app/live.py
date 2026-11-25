@@ -199,6 +199,35 @@ def _ca(mint: str | None) -> str:
     return f"\n{mint}\n{page}"
 
 
+def security_line(facts: dict[str, Any] | None, top10_pct: float | None, rug: dict[str, Any] | None) -> str:
+    """A curve coin's safety at a glance, one line under its alert (user's request 2026-11-25). pump.fun revokes
+    mint and freeze on every coin, so what matters on the curve: what the dev holds and did, how concentrated the
+    holders are, how many wallets are buying, how fast it got here, and RugCheck's own danger flags."""
+    f = facts or {}
+    parts: list[str] = []
+    if f.get("dev_pct") is not None:
+        parts.append(f"dev bought {float(f['dev_pct']):.1f}%" + (", sold" if f.get("dev_sold") else ""))
+    elif f.get("dev_sold"):
+        parts.append("dev sold")
+    if top10_pct is not None:
+        parts.append(f"top10 hold {top10_pct:.0f}%")
+    if f.get("buyers_60s") is not None:
+        parts.append(f"{f['buyers_60s']} buyers in 60s")
+    if f.get("secs_to_level") is not None and f.get("level_at") is not None:
+        parts.append(f"{float(f['level_at']):.0f}% in {float(f['secs_to_level']):.0f}s")
+    if f.get("copycat"):
+        parts.append("copycat name")
+    if rug:
+        score = rug.get("score_normalised") if rug.get("score_normalised") is not None else rug.get("score")
+        bad = [str(r.get("name")) for r in rug.get("risks") or []
+               if isinstance(r, dict) and str(r.get("level", "")).lower() == "danger" and r.get("name")]
+        if rug.get("rugged") is True:
+            bad.insert(0, "RUGGED")
+        txt = f"RugCheck {float(score):.0f}" if isinstance(score, (int, float)) else "RugCheck"
+        parts.append(txt + (": " + ", ".join(bad[:3]) if bad else ", no danger flags"))
+    return f"\n🔒 {' · '.join(parts)}" if parts else ""
+
+
 def route_edge_buy(pp_tokens: int, pp_sol: float, jup_tokens: int, jup_sol: float) -> float:
     """How much more Jupiter gives per SOL than PumpPortal, all costs included (+0.02 = 2% more tokens)."""
     if pp_tokens <= 0 or pp_sol <= 0 or jup_sol <= 0:
@@ -1155,6 +1184,30 @@ class JupiterExecutor:
         if got <= 0:
             raise SwapError(f"buy {sig} {'not confirmed' if not ok else 'returned no tokens'}")
         return Fill(sig, max(sol0 - sol1, 0.0), got, px)
+
+    async def curve_security(self, mint: str) -> tuple[float | None, dict[str, Any] | None]:
+        """(share the 10 biggest holders own, %, without the bonding curve; RugCheck's report) for a curve coin's
+        alert. Never raises: a part that fails or is slow is left out."""
+        from app import pump_tx
+
+        async def top10() -> float | None:
+            res = await self._rpc("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])
+            bc = pump_tx.curve_address(mint)
+            skip = {pump_tx.ata(bc, mint, prog) for prog in (pump_tx.TOKEN_PROGRAM, pump_tx.TOKEN_2022_PROGRAM)}
+            held = [float(a.get("uiAmount") or 0) for a in (res or {}).get("value") or []
+                    if a.get("address") not in skip]
+            return sum(sorted(held, reverse=True)[:10]) / 1e9 * 100      # pump.fun coins: 1B supply
+
+        async def rug() -> dict[str, Any] | None:
+            key = self.s.rugcheck_api_key
+            r = await self.http.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report",
+                                    headers={"X-API-KEY": key} if key else None, timeout=5.0)
+            return r.json() if r.status_code == 200 else None
+
+        got = await asyncio.gather(asyncio.wait_for(top10(), 6.0), asyncio.wait_for(rug(), 6.0),
+                                   return_exceptions=True)
+        a, b = (None if isinstance(x, BaseException) else x for x in got)
+        return a, b if isinstance(b, dict) else None
 
     async def _dry_curve(self, mint: str) -> Any:
         """The coin's pump.fun bonding curve while it trades there (SOL-paired), else None."""
@@ -2518,6 +2571,16 @@ class CopyEngine:
                 return f"not enough SOL ({bal:.3f})"
         return None
 
+    async def _curve_security(self, sig: Any) -> str:
+        """The security line for a curve alert (security_line); "" when nothing could be read."""
+        try:
+            check = getattr(self.x, "curve_security", None)
+            top10, rug = await check(sig.mint) if check else (None, None)
+            return security_line(getattr(sig, "facts", None), top10, rug)
+        except Exception as exc:
+            log.debug("curve security %s: %s", sig.mint[:8], exc)
+            return ""
+
     async def _curve(self, session: AsyncSession) -> None:
         """Real buys of the account's curve rule (app/curve_live.py): the paper engine decided, we buy now at the
         account's entry size, capped at LIVE_CURVE_MAX_CHASE_PCT above the decision price. The position is
@@ -2537,6 +2600,7 @@ class CopyEngine:
             cfg = cfg if isinstance(cfg, dict) else {"size_usd": cfg}
             size = cfg.get("size_usd") or self.a.size_usd
             sym = sig.symbol or sig.mint[:6]
+            sec = asyncio.ensure_future(self._curve_security(sig))      # runs beside the buy, for the alert
             try:
                 why = await self._curve_skip(session, sig.mint, size)
                 sol_usd = await self.x.sol_price()
@@ -2548,7 +2612,10 @@ class CopyEngine:
                     key = "curve " + why.split(" ")[0]
                     if time.monotonic() - self._said.get(key, -1e9) >= 6 * 3600:
                         self._said[key] = time.monotonic()
-                        await self.notify(f"{self._tag()} ⏸ curve {strat}: skipped ${sym} ({why}){_ca(sig.mint)}")
+                        await self.notify(f"{self._tag()} ⏸ curve {strat}: skipped ${sym} ({why})"
+                                          f"{await sec}{_ca(sig.mint)}")
+                if not sec.done():
+                    sec.cancel()
                 continue
             decision_usd = sig.px_sol * sol_usd
             max_price = decision_usd * (1 + self.s.live_curve_max_chase_pct / 100)
@@ -2557,10 +2624,12 @@ class CopyEngine:
                 f = await self.x.buy(sig.mint, size, max_price=max_price)
             except ChaseError as exc:
                 log.info("live[%s]: curve %s skip %s (%s)", self.a.name, strat, sym, exc)
+                sec.cancel()
                 continue
             except Exception as exc:
                 log.warning("live[%s]: curve %s buy %s failed: %s", self.a.name, strat, sym, exc)
-                await self.notify(f"{self._tag()} ❌ curve {strat}: buy ${sym} failed: {str(exc)[:160]}{_ca(sig.mint)}")
+                await self.notify(f"{self._tag()} ❌ curve {strat}: buy ${sym} failed: {str(exc)[:160]}"
+                                  f"{await sec}{_ca(sig.mint)}")
                 continue
             finally:
                 _FAST.reset(fast)
@@ -2593,7 +2662,8 @@ class CopyEngine:
                                  f"ride graduation, then {sig.trail_pct:g}% under the high" if sig.trail_pct else "")
                               + f"{f' or +{tp_pct:g}%' if tp_pct else ''} "
                               f"or {sig.sl_pct:+.0f}% or after "
-                              f"{sig.max_hold_s / 60:.0f} min\n"
+                              f"{sig.max_hold_s / 60:.0f} min"
+                              f"{await sec}\n"
                               f"{_ca(sig.mint)}\n{self._tx(f.signature)}")
 
     async def _curve_exits(self, session: AsyncSession) -> None:

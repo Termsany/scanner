@@ -36,6 +36,7 @@ class CurveSignal:
     why: str
     trail_pct: float | None = None   # rides graduation: from the graduation price, sell this % under the high
     grad_ratio: float | None = None  # price at graduation / price now (classic curve)
+    facts: dict[str, Any] | None = None   # the paper engine's snapshot at the decision (dev %, buyers, ...)
 
 
 SIGNALS: deque[CurveSignal] = deque(maxlen=500)
@@ -61,14 +62,15 @@ def live_rules() -> dict[str, Any]:
 
 
 def publish(strategy: str, rule: Any, mint: str, symbol: str, px_sol: float, progress: float, why: str,
-            max_hold_s: float, now: float | None = None) -> CurveSignal | None:
+            max_hold_s: float, now: float | None = None, facts: dict[str, Any] | None = None) -> CurveSignal | None:
     """Called by the paper engine when it decides to enter `strategy`. Wakes the live engines."""
     if strategy not in live_rules() or not px_sol:
         return None
     sig = CurveSignal(next(_ids), strategy, mint, symbol, time.monotonic() if now is None else now, px_sol,
                       progress, price_ratio(progress, rule.exit_at) if rule.exit_at is not None else None,
                       float(rule.sl), float(max_hold_s), why,
-                      trail_pct=getattr(rule, "grad_trail", None), grad_ratio=price_ratio(progress, 100.0))
+                      trail_pct=getattr(rule, "grad_trail", None), grad_ratio=price_ratio(progress, 100.0),
+                      facts=facts)
     SIGNALS.append(sig)
     try:
         from app.fast_watch import WAKE

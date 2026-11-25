@@ -500,7 +500,7 @@ class PaperCurve:
                 if self.live_signals and strat in self.live_signals and not rule.waits():   # traded for real
                     curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
                                        f"curve {w.progress:.0f}% at {now - w.created:.0f}s",
-                                       rule.max_hold_s or self.s.curve_max_hold_s)
+                                       rule.max_hold_s or self.s.curve_max_hold_s, facts=w.pre.get(strat))
         self._fills(w, now)
         self._exits(w, now)
 
@@ -608,7 +608,8 @@ class PaperCurve:
             if paper_switches.paused(strat):              # paused on /paper: no paper trade, live signal still goes
                 if rule.waits() and self.live_signals and strat in self.live_signals:
                     curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
-                                       f"{why}, {w.progress:.0f}% at the fill", rule.max_hold_s or self.s.curve_max_hold_s)
+                                       f"{why}, {w.progress:.0f}% at the fill", rule.max_hold_s or self.s.curve_max_hold_s,
+                                       facts=pre)
                 continue
             pos = {"strategy": strat, "mint": w.mint, "symbol": w.symbol, "market": w.price,
                    "fill": w.price * (1 + self._cost()), "at": now, "wall": _now(), "peak": 0.0, "trough": 0.0,
@@ -622,7 +623,8 @@ class PaperCurve:
             if rule.waits() and self.live_signals and strat in self.live_signals:
                 # its filters passed: the live accounts buy now, at this price
                 curve_live.publish(strat, rule, w.mint, w.symbol, w.price, w.progress,
-                                   f"{why}, {w.progress:.0f}% at the fill", rule.max_hold_s or self.s.curve_max_hold_s)
+                                   f"{why}, {w.progress:.0f}% at the fill", rule.max_hold_s or self.s.curve_max_hold_s,
+                                   facts=pre)
 
     def _size(self, strat: str) -> float:
         rule = self.rules[strat]
