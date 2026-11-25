@@ -134,6 +134,34 @@ def test_mirror_ignores_tp_sl_but_follow_hits_them():
     assert _db(body)
 
 
+def test_signal_dulx_only_trades_signals_dulx_bought_in_the_hour_before():
+    s = _settings()
+
+    async def body(sess):
+        toks = [Token(chain=Chain.solana, address=a, symbol=a[:4]) for a in (MINT, "Mint2", "Mint3")]
+        sess.add_all(toks)
+        recent = _trade(1, LEADER, mint=MINT)
+        recent.block_time -= timedelta(minutes=20)
+        old = _trade(2, LEADER, mint="Mint2")
+        old.block_time -= timedelta(minutes=90)            # too long before the signal
+        other = _trade(3, OTHER, mint="Mint3")             # bought, but not by DULX3e
+        sess.add_all([recent, old, other])
+        await sess.flush()
+        await process_entries(sess, s)                     # cursors start here: those buys are not copied
+        await sess.commit()
+        for t in toks:
+            sess.add(Signal(token_id=t.id, score=76, badge=Badge.moderate, price_usd=1.0, payload={}))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition))).scalars().all()
+        assert {(r.token_address, r.strategy) for r in rows} == {(MINT, "signal_dulx"), (MINT, "signal_dulx_tight")}
+        assert all("after DULX3e bought" in r.trigger for r in rows)
+        return True
+
+    assert _db(body)
+
+
 def test_signals_stop_loss_and_no_price():
     s = _settings(paper_no_price_minutes=60)
 

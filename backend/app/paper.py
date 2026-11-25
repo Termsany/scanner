@@ -37,6 +37,7 @@ DULX = "DULX3e6vt1ZpHq3AdCUBZLPZ1CrhApdNKcewMPxZQRXf"
 CLUSTER_MIN_WALLETS = 2
 CURSOR_TRADES = "paper:wallet_trades"
 CURSOR_SIGNALS = "paper:signals"
+AFTER_WALLET_MINUTES = 60
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,8 @@ class Strategy:
     max_usd: float | None = None
     live_rule: bool = False     # exit like the live engine: leader trims before 2x -> follow every leader sell;
                                 # otherwise 50% at 2x, the rest only on the leader's full exit
+    after_wallet: str | None = None   # signal strategies: only when this wallet bought the token in the
+                                      # AFTER_WALLET_MINUTES before the signal
 
 
 # priced and closed by their own loops (app/sniper.py, app/grad.py), second by second
@@ -78,6 +81,12 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              sl_pct=0.0, live_rule=True),
     Strategy("signal_80", "Scanner signal, score >= 80", min_score=80),
     Strategy("signal_85", "Scanner signal, score >= 85", min_score=85),
+    # (2026-11-25, 704 coins' first signals): when DULX3e bought in the hour before, 50% reached +100% (28% for
+    # all signals), but 96% also fell 30%; two exits to see which comes first
+    Strategy("signal_dulx", "Scanner signal after DULX3e bought it (within 1 h): TP +100%, stop -40%, 6 h",
+             tp_pct=100.0, sl_pct=-40.0, min_score=0, after_wallet=DULX),
+    Strategy("signal_dulx_tight", "Scanner signal after DULX3e bought it (within 1 h): TP +50%, stop -25%, 6 h",
+             tp_pct=50.0, sl_pct=-25.0, min_score=0, after_wallet=DULX),
     # run by app/sniper.py (own live feed and exits); listed here so /paper shows them
     Strategy("snipe_all", "Sniper: sample of every new pump.fun token", tp_pct=50.0, sl_pct=-30.0, max_hold_minutes=5),
     Strategy("snipe_fast_tp", "Sniper: same tokens as snipe_all, out at +25% or 15% off the high", tp_pct=25.0,
@@ -317,11 +326,25 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
             .where(Signal.id > since).order_by(Signal.id)
         )).all()
         for sig, tok in rows:
+            bought_by: dict[str, bool] = {}
             for strat in STRATEGIES.values():
                 if strat.min_score is None or sig.score < strat.min_score:
                     continue
+                trigger = f"score {sig.score}"
+                if strat.after_wallet:
+                    w = strat.after_wallet
+                    if w not in bought_by:
+                        at = utc(sig.created_at)
+                        bought_by[w] = (await session.execute(select(WalletTrade.id).where(
+                            WalletTrade.wallet == w, WalletTrade.chain == tok.chain,
+                            WalletTrade.token_address == tok.address, WalletTrade.side == "buy",
+                            WalletTrade.block_time >= at - timedelta(minutes=AFTER_WALLET_MINUTES),
+                            WalletTrade.block_time <= at).limit(1))).first() is not None
+                    if not bought_by[w]:
+                        continue
+                    trigger += f" after {w[:6]} bought"
                 if _open(session, keys, strat, chain=tok.chain, token=tok.address, symbol=tok.symbol,
-                         price=sig.price_usd or 0.0, trigger=f"score {sig.score}", at=now, s=s):
+                         price=sig.price_usd or 0.0, trigger=trigger, at=now, s=s):
                     opened += 1
         await _set_cursor(session, CURSOR_SIGNALS, max_sig)
     return opened
