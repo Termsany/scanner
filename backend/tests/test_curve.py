@@ -746,3 +746,23 @@ def test_curve_70_slow3_only_buys_coins_that_took_3_minutes_to_reach_70():
     held = run("S2", 60.0)                              # 70 % in a minute: skipped, plain curve_70 still buys
     assert "curve_70_slow3" not in held and "curve_70" in held
     assert "curve_70_slow3" not in live_rules()         # paper only
+
+
+def test_organic_2min_and_be50_variants():
+    from app.curve_live import live_rules, price_ratio
+
+    c = PaperCurve(S())
+    t = _organic_coin(c, "A1", 70.5, t0=100.0)        # 70 % about 157 s after launch
+    held = c.watch["A1"].held
+    assert {"curve_70_organic", "curve_70_organic_2min", "curve_70_organic_be50"} <= set(held)
+    _organic_coin(c, "A2", 70.5, t0=10.0)              # about 67 s: too fast for the 2-min variant
+    assert "curve_70_organic" in c.watch["A2"].held and "curve_70_organic_2min" not in c.watch["A2"].held
+
+    up = next(x / 10 for x in range(706, 990) if price_ratio(70.5, x / 10) >= 1.55)   # +55 %
+    c.on_curve("A1", acct(up), t + 20)
+    c.on_curve("A1", acct(70.0), t + 40)               # back under the entry: only be50 leaves, at about 0
+    held = c.watch["A1"].held
+    assert "curve_70_organic_be50" not in held and "curve_70_organic" in held
+    be = [p for p in c.closed if p["strategy"] == "curve_70_organic_be50"]
+    assert [p["reason"] for p in be] == ["breakeven_stop"] and be[0]["pnl_pct"] > -10
+    assert "curve_70_organic_2min" not in live_rules() and "curve_70_organic_be50" not in live_rules()

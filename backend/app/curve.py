@@ -105,6 +105,9 @@ class CurveRule:
     max_net_sol_60s: float | None = None   # skip if more than this SOL went into the curve (buys - sells) in 60 s
     min_buyers_60s: int | None = None      # skip if fewer distinct buyers were seen (unknown, not streamed: allowed)
     paper_only: bool = False               # not offered for real money until it proves itself on paper
+    # custom: once the trade has been up this %, the stop moves to the entry price (nothing is sold). 2026-11-25: 39 of
+    # curve_70_organic's 162 stopped trades had been +50 % first, and still closed at about -35 %
+    be_at: float | None = None
 
     def waits(self) -> bool:
         return (self.min_fill is not None or self.max_dev is not None or self.min_rise is not None
@@ -183,6 +186,18 @@ CURVE_RULES: dict[str, CurveRule] = {
                                 grad_trail=30.0, paper_only=True,
                                 title="curve 70% reached 3+ min after launch; rides graduation, sells 30% under the "
                                       "high, stop -25%"),
+    # (2026-11-25, all 196 curve_70_organic trades) two changes to test on paper: only coins that took 2+ min to reach
+    # 70 % (46 trades, +$200; under 60 s: 119 trades, -$162), and the stop moved to the entry once a trade is +50 %
+    "curve_70_organic_2min": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
+                                       min_secs=120.0, min_buys_60s=10, min_sells_60s=5, max_dev=25.0,
+                                       skip_copycat=True, grad_trail=30.0, paper_only=True,
+                                       title="curve_70_organic, only coins that took 2-5 min to reach 70%; rides "
+                                             "graduation, 30% trailing, stop -25%"),
+    "curve_70_organic_be50": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
+                                       min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True,
+                                       grad_trail=30.0, be_at=50.0, paper_only=True,
+                                       title="curve_70_organic with the stop moved to the entry once it is +50%; "
+                                             "rides graduation, 30% trailing"),
     "curve_70_organic": CurveRule(70.0, "custom", sl=-25.0, size=10.0, max_hold_s=3600.0, max_secs=300.0,
                                   min_buys_60s=10, min_sells_60s=5, max_dev=25.0, skip_copycat=True, grad_trail=30.0,
                                   title="curve 70% with organic trading (10+ buys, 5+ sells in a minute, dev under "
@@ -670,6 +685,9 @@ class PaperCurve:
                 elif rule.tp is not None and pct >= rule.tp:
                     reason = "take_profit"
                 elif pos["half"] and w.price <= pos["market"]:
+                    reason = "breakeven_stop"
+                elif (rule.be_at is not None and not riding and pos["peak"] >= rule.be_at
+                      and w.price <= pos["market"]):
                     reason = "breakeven_stop"
                 elif not pos["half"] and rule.sl is not None and pct <= (
                         rule.early_sl if rule.sl_after_s is not None and rule.early_sl is not None
