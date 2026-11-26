@@ -29,6 +29,7 @@ def _db(body):
 
 
 def _settings(**kw):
+    kw.setdefault("paper_eth_quotes", False)          # no KyberSwap calls from tests
     return Settings(paper_size_usd=100.0, paper_slippage_pct=1.5, paper_mirror_wallets=[LEADER], **kw)
 
 
@@ -619,3 +620,59 @@ def test_signal_eth_liq100_only_takes_deep_pools():
         return True
 
     assert _db(body)
+
+
+def test_signal_eth_rt_skips_coins_that_cannot_be_sold_back(monkeypatch):
+    from app import eth_quotes
+
+    losses = {"0xgood": 0.8, "0xbad": 60.0, "0xnone": None}
+
+    async def fake(token, usd):
+        return losses[token]
+    monkeypatch.setattr(eth_quotes, "roundtrip_loss_pct", fake)
+    s = _settings(paper_eth_quotes=True)
+
+    async def body(sess):
+        toks = [Token(chain=Chain.ethereum, address=a, symbol=a[2:].upper()) for a in losses]
+        sess.add_all(toks)
+        await sess.flush()
+        await process_entries(sess, s)                 # cursors
+        await sess.commit()
+        for t in toks:
+            sess.add(Signal(token_id=t.id, score=85, badge=Badge.strong_alpha, price_usd=1.0, payload={}))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy == "signal_eth_rt"))).scalars().all()
+        assert [r.token_address for r in rows] == ["0xgood"] and "rt 0.8%" in rows[0].trigger
+        return True
+
+    assert _db(body)
+
+
+def test_roundtrip_loss_from_kyber_quotes():
+    import asyncio
+
+    import httpx
+    import respx
+
+    from app import eth_quotes
+
+    eth_quotes._cache.clear()
+    eth_quotes._eth_usd = (0.0, 0.0)
+
+    def route(req):
+        q = dict(req.url.params)
+        if q["tokenOut"].startswith("0xdAC17"):                                   # ETH price probe: 0.01 ETH = $20
+            return httpx.Response(200, json={"data": {"routeSummary": {"amountInUsd": "20", "amountOut": "1"}}})
+        if q["tokenIn"] == eth_quotes.NATIVE:                                      # buy: tokens out
+            return httpx.Response(200, json={"data": {"routeSummary": {"amountOut": "5000", "gasUsd": "0.5"}}})
+        wei = int(100 / 2000 * 1e18)                                               # sell: 70% of the ETH back
+        return httpx.Response(200, json={"data": {"routeSummary": {"amountOut": str(int(wei * 0.7)), "gasUsd": "0.5"}}})
+
+    async def go():
+        with respx.mock:
+            respx.get(eth_quotes.KYBER).mock(side_effect=route)
+            return await eth_quotes.roundtrip_loss_pct("0xcoin", 100.0)
+
+    assert asyncio.run(go()) == 31.0                          # 30% lost in the pools + $1 gas on $100

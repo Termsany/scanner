@@ -63,6 +63,9 @@ class Strategy:
     first_signal: bool = False              # signal strategies: only the token's first signal
     sources_any: tuple[str, ...] | None = None   # signal strategies: only tokens found by one of these feeds
     min_liquidity: float | None = None   # signal strategies: only tokens with at least this much liquidity (USD)
+    # signal strategies on Ethereum: skip a token whose quoted buy-and-sell-back (KyberSwap, at the paper size, gas
+    # in) loses more than this %; no route either way is a skip too (app/eth_quotes.py)
+    max_roundtrip_pct: float | None = None
     costs: bool = False     # also charge what a real trade pays on top of slippage: the chain's gas on each swap
                             # (PAPER_ETH_GAS_USD on Ethereum) and the token's buy / sell tax; skip honeypots
 
@@ -119,6 +122,10 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              chains=("ethereum",), costs=True),
     # (user's request 2026-11-26) 126 Ethereum signal_80 trades: coins with $100k+ liquidity +13.8% avg (55), under
     # $20k +0.7% (35); the profit leans on one coin (mihao, $706 of ~$1,070). Same rule, only the deeper pools
+    # (user's request 2026-11-26) signal_eth's paper profit leaned on mihao, whose real round trip loses ~78%:
+    # the same rule, only coins a real quote says can be sold back (round trip under 5%)
+    Strategy("signal_eth_rt", "Scanner signal, score >= 80, Ethereum only, round trip under 5% on a real quote "
+             "(with gas and tax)", min_score=80, chains=("ethereum",), costs=True, max_roundtrip_pct=5.0),
     Strategy("signal_eth_liq100", "Scanner signal, score >= 80, Ethereum only, liquidity $100k+ (with gas and tax)",
              min_score=80, chains=("ethereum",), costs=True, min_liquidity=100_000.0),
     Strategy("signal_gecko_first", "Scanner signal, score >= 80: the token's first signal, found by GeckoTerminal "
@@ -414,6 +421,16 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
                     if tok.is_honeypot:
                         continue
                     costs = trade_costs(chain, tok.buy_tax, tok.sell_tax, s)
+                if strat.max_roundtrip_pct is not None:
+                    from app import eth_quotes
+
+                    if not s.paper_eth_quotes:
+                        continue
+                    loss = await eth_quotes.roundtrip_loss_pct(tok.address, s.paper_size_usd)
+                    if loss is None or loss > strat.max_roundtrip_pct:
+                        log.info("paper %s: skip %s (round trip %s%%)", strat.name, tok.symbol, loss)
+                        continue
+                    trigger += f" rt {loss:.1f}%"
                 if _open(session, keys, strat, chain=tok.chain, token=tok.address, symbol=tok.symbol,
                          price=sig.price_usd or 0.0, trigger=trigger, at=now, s=s, costs=costs):
                     opened += 1
