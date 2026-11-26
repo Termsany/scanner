@@ -315,7 +315,7 @@ function Leaders({ d, set, now, openBy, onToggle }: {
                 Ignore its sells
               </th>
               <th className="text-center"
-                title="On: every time this wallet sells, the bot sells the same share. No 50% at 2x and no stop loss: only its sells (or the max hold) take the position out">
+                title="On: every time this wallet sells, the bot sells the same share. No stop loss; at the account's take-capital target (2x) the cost comes back and the rest keeps following its sells. One buy per coin a day">
                 Mirror
               </th>
               <th />

@@ -2669,7 +2669,7 @@ def test_coin_alerts_end_with_the_address_and_its_page():
     assert _ca(None) == ""
 
 
-def test_mirror_follows_every_sell_and_skips_take_capital_and_the_copy_stop():
+def test_mirror_follows_every_sell_takes_capital_at_2x_and_skips_the_copy_stop():
     from app.live import Account, Leader
 
     x = PricedExec()
@@ -2684,14 +2684,14 @@ def test_mirror_follows_every_sell_and_skips_take_capital_and_the_copy_stop():
         sess.add(_trade())                                            # $30 for 1 token
         await sess.commit()
         await eng.step(sess)
-        x.price.update(M1=75.0)                                       # 2.5x: no take-capital
+        x.price.update(M1=75.0)                                       # 2.5x: the cost comes back
         await eng.step(sess)
         await eng.step(sess)
         x.price.update(M1=10.0)                                       # -67%: no copy stop
         await eng.step(sess)
         await eng.step(sess)
         quiet = [c for c in x.calls if c[0] == "sell"]
-        sess.add(_trade(side="sell", pct_sold=40, remaining=6))       # it trims 40%: so do we
+        sess.add(_trade(side="sell", pct_sold=40, remaining=6))       # it trims 40%: so do we, of what is left
         await sess.commit()
         await eng.step(sess)
         trim = [c for c in x.calls if c[0] == "sell"]
@@ -2702,8 +2702,8 @@ def test_mirror_follows_every_sell_and_skips_take_capital_and_the_copy_stop():
         return quiet, trim, p
 
     quiet, trim, p = _db(body)
-    assert quiet == []
-    assert trim == [("sell", "M1", 400_000)]
+    assert quiet == [("sell", "M1", 400_000)]                    # $30 of $75: take-capital only, no stop at -67%
+    assert trim == [("sell", "M1", 400_000), ("sell", "M1", 240_000)]
     assert p.status == "closed" and int(p.tokens_raw) == 0
 
 

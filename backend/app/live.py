@@ -318,7 +318,8 @@ class Leader:
     quick_sl_pct: float | None = None    # stop loss at -% (a negative number; None = LIVE_QUICK_SL_PCT)
     quick_hours: float | None = None     # time limit in hours (None = LIVE_QUICK_MAX_HOLD_MINUTES)
     # mirror (user's request 2026-11-26, for 5Y9pyD): every time it sells, sell the same share of what we hold; no
-    # take-capital at 2x, no copy stop loss, no "the rest waits for its full exit". Max hold still applies.
+    # copy stop loss, no "the rest waits for its full exit". The account's take-capital still applies (user's choice
+    # 2026-11-26: at 2x take the cost back, the rest keeps mirroring). Max hold still applies.
     mirror: bool = False
 
 
@@ -2404,9 +2405,9 @@ class CopyEngine:
                 if not self._hold(p.token_address)
                 and not p.hands_off                                            # the owner manages it
                 and not self._quick(p)                                         # quick exit has its own targets
-                and not self._mirror(p)                                        # mirrored: only its sells
                 and not taken(p)
-                and not (self.s.live_follow_after_trim and self._following(p))   # following the leader instead
+                # following the leader instead (a mirrored position follows it anyway and still takes its capital)
+                and not (self.s.live_follow_after_trim and self._following(p) and not self._mirror(p))
                 # with the cap: until that share of the coins is sold; without: until the cost is back
                 and (self._cap_room(p) > int(p.tokens_bought_raw or 0) // 100 if capped
                      else (p.proceeds_usd or 0) < p.cost_usd)
