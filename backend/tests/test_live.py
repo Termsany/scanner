@@ -2837,3 +2837,116 @@ def test_take_capital_switch_off_on_a_wallet_keeps_its_positions_whole_at_2x():
     # the page's switch: missing means on, an explicit false is kept
     assert clean_leaders([{"wallet": LEADER}])[0]["take_capital"] is True
     assert clean_leaders([{"wallet": LEADER, "take_capital": False}])[0]["take_capital"] is False
+
+
+def _wallet_run(leader, prices, s_extra=None, steps_after=2):
+    """Buy $30 for 1 token, then walk the price through `prices` (one engine step each)."""
+    from app.live import Account
+
+    x = PricedExec()
+    acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: leader})
+    s = _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0,
+           live_copy_sl_pct=-35.0, live_take_capital_at_pct=100.0, **(s_extra or {}))
+
+    async def body(sess):
+        eng = CopyEngine(x, s, account=acct)
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)
+        for px in prices:
+            x.price.update(M1=px)
+            await eng.step(sess)
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        return [c for c in x.calls if c[0] == "sell"], p
+
+    return _db(body)
+
+
+def test_wallet_sell_everything_at_its_multiple():
+    from app.live import Leader
+
+    sells, p = _wallet_run(Leader(LEADER, unconditional=True, mirror=True, take_capital=False, full_exit_x=3.0),
+                           [60.0, 60.0, 91.0, 91.0])                   # 2x: nothing; 3.03x twice: all out
+    assert sells == [("sell", "M1", 1_000_000)] and p.status == "closed" and p.exit_reason == "full_exit"
+
+
+def test_wallet_cost_back_at_its_own_multiple_then_all_out_later():
+    from app.live import Leader
+
+    sells, p = _wallet_run(Leader(LEADER, unconditional=True, mirror=True, take_capital_x=1.5, full_exit_x=4.0),
+                           [46.0, 46.0, 125.0, 125.0])
+    assert sells[0][2] < 1_000_000 and p.status == "closed" and p.exit_reason == "full_exit"   # cost back, then 4x
+
+
+def test_wallet_trailing_stop_follows_the_high():
+    from app.live import Leader
+
+    sells, p = _wallet_run(Leader(LEADER, unconditional=True, mirror=True, take_capital=False, trail_pct=30.0),
+                           [50.0, 80.0, 70.0, 55.0, 55.0])            # high 80: line 56; 55 twice -> out
+    assert sells == [("sell", "M1", 1_000_000)] and p.exit_reason == "trailing_stop" and p.trail_peak == 80.0
+
+
+def test_wallet_stop_switch_and_its_own_level():
+    from app.live import Leader
+
+    off, p_off = _wallet_run(Leader(LEADER, unconditional=True, take_capital=False, stop=False), [10.0, 10.0])
+    assert off == [] and p_off.status == "open"                       # -67%, stop off: kept
+    own, p_own = _wallet_run(Leader(LEADER, unconditional=True, take_capital=False, mirror=True, stop=True,
+                                    stop_pct=-20.0), [23.0, 23.0])    # -23%, its own -20% stop (mirror allows it)
+    assert own == [("sell", "M1", 1_000_000)] and p_own.exit_reason == "stop_loss"
+
+
+def test_wallet_time_limit():
+    from datetime import timedelta
+
+    from app.live import Account, Leader
+
+    x = PricedExec()
+    acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, unconditional=True, max_hours=2.0)})
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(live_reconcile_seconds=0, live_quick_check_seconds=0), account=acct)
+        await eng.step(sess)
+        sess.add(_trade())
+        await sess.commit()
+        await eng.step(sess)
+        p = (await sess.execute(select(LivePosition))).scalars().one()
+        p.opened_at = p.opened_at - timedelta(hours=3)
+        await sess.commit()
+        await eng.step(sess)
+        await sess.refresh(p)
+        return p
+
+    p = _db(body)
+    assert p.status == "closed" and p.exit_reason == "time_limit"
+
+
+def test_one_buy_a_day_is_its_own_switch_and_option_changes_are_announced():
+    from dataclasses import replace
+
+    from app.live import Account, Leader
+
+    x = FakeExec()
+    ld = Leader(LEADER, label="Smart1", unconditional=True, one_buy_day=True)      # not mirrored
+    acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: ld})
+    notes = []
+
+    async def note(text):
+        notes.append(text)
+
+    async def body(sess):
+        eng = CopyEngine(x, _s(), notify=note, account=acct)
+        await eng.step(sess)
+        for batch in ([_trade()], [_trade(side="sell", pct_sold=100, remaining=0)], [_trade()]):
+            sess.add_all(batch)
+            await sess.commit()
+            await eng.step(sess)
+        eng.update(Account("main", 30, 100, 50, [LEADER],
+                           leaders={LEADER: replace(ld, mirror=True, full_exit_x=3.0, trail_pct=25.0)}))
+        await asyncio.sleep(0)
+        return [c for c in x.calls if c[0] == "buy"]
+
+    buys = _db(body)
+    assert len(buys) == 1
+    assert any("⚙ Smart1" in n and "mirror" in n and "all out at 3x" in n and "trailing 25%" in n for n in notes)

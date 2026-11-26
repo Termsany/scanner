@@ -99,12 +99,24 @@ def clean_leaders(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
             d = {**d, "quick_sl_pct": -d["quick_sl_pct"]}     # "15" on the page means a 15% stop loss
         q_sl = num("quick_sl_pct", -99, -1, "quick exit stop loss %")
         q_h = num("quick_hours", 0.05, 24 * 30, "quick exit time limit (hours)")
+        # the wallet's own exit rules (2026-11-26): each one on its own, the first one reached sells
+        tc_x = num("take_capital_x", 1.1, 100, "take-capital multiple")
+        fx = num("full_exit_x", 1.05, 1000, "sell-all multiple")
+        if isinstance(d.get("stop_pct"), (int, float)) and d["stop_pct"] > 0:
+            d = {**d, "stop_pct": -d["stop_pct"]}             # "35" on the page means a 35% stop loss
+        sl = num("stop_pct", -99, -1, "stop loss %")
+        trail = num("trail_pct", 1, 95, "trailing stop %")
+        hours = num("max_hours", 0.05, 24 * 90, "time limit (hours)")
+        stop = d.get("stop")
+        one = d.get("one_buy_day")
         out.append({"wallet": w, "label": str(d.get("label") or "")[:40],
                     "unconditional": bool(d.get("unconditional")), "new_tokens_only": bool(d.get("new_tokens_only")),
                     "size_usd": size, "enabled": d.get("enabled") is not False, "max_chase_pct": chase,
                     "quick_exit": bool(d.get("quick_exit")), "ignore_sells": bool(d.get("ignore_sells")),
                     "quick_tp_pct": q_tp, "quick_sl_pct": q_sl, "quick_hours": q_h, "mirror": bool(d.get("mirror")),
-                    "take_capital": d.get("take_capital") is not False})
+                    "take_capital": d.get("take_capital") is not False, "take_capital_x": tc_x, "full_exit_x": fx,
+                    "stop": None if stop is None else bool(stop), "stop_pct": sl, "trail_pct": trail,
+                    "max_hours": hours, "one_buy_day": None if one is None else bool(one)})
     if len(out) > MAX_LEADERS:
         raise AccountError(f"at most {MAX_LEADERS} smart wallets per account")
     return out
@@ -129,7 +141,10 @@ def to_account(row: TradingAccount, s: Settings, private_key: str | None) -> Acc
                                    bool(d.get("new_tokens_only")), d.get("size_usd"), d.get("enabled") is not False,
                                    d.get("max_chase_pct"), bool(d.get("quick_exit")), bool(d.get("ignore_sells")),
                                    d.get("quick_tp_pct"), d.get("quick_sl_pct"), d.get("quick_hours"),
-                                   mirror=bool(d.get("mirror")), take_capital=d.get("take_capital") is not False)
+                                   mirror=bool(d.get("mirror")), take_capital=d.get("take_capital") is not False,
+                                   take_capital_x=d.get("take_capital_x"), full_exit_x=d.get("full_exit_x"),
+                                   stop=d.get("stop"), stop_pct=d.get("stop_pct"), trail_pct=d.get("trail_pct"),
+                                   max_hours=d.get("max_hours"), one_buy_day=d.get("one_buy_day"))
                for d in row.leaders or []}
     return Account(row.name, row.size_usd, row.max_open_usd, row.max_daily_loss_usd, list(leaders), private_key,
                    leaders=leaders, paused=bool(row.paused or row.billing_hold), take_capital_at_pct=row.take_capital_at_pct,

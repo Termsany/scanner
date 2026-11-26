@@ -804,6 +804,13 @@ class LeaderIn(BaseModel):
     quick_hours: float | None = None     # time limit in hours (None = default)
     mirror: bool = False                 # sell the same share every time it sells; no copy stop
     take_capital: bool = True            # take the cost back at the account's 2x target; off: never
+    take_capital_x: float | None = None  # its own take-capital multiple (2 = 2x); None = the account's
+    full_exit_x: float | None = None     # sell everything at this multiple; None = off
+    stop: bool | None = None             # stop loss on / off; None = default (on, off for mirrored wallets)
+    stop_pct: float | None = None        # % under entry (negative); None = LIVE_COPY_SL_PCT
+    trail_pct: float | None = None       # trailing stop % under the high since the buy; None = off
+    max_hours: float | None = None       # sell everything after this many hours; None = off
+    one_buy_day: bool | None = None      # one buy per coin a day; None = default (mirrored wallets)
 
 
 class AccountIn(BaseModel):

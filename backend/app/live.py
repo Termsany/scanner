@@ -231,6 +231,45 @@ def security_line(facts: dict[str, Any] | None, top10_pct: float | None, rug: di
     return f"\n🔒 {' · '.join(parts)}" if parts else ""
 
 
+def rules_text(ld: Leader, eng: Any) -> str:
+    """One line of a wallet's options as the engine runs them, for the Telegram note."""
+    if not ld.enabled:
+        return "OFF (no new buys; open positions still follow its sells)"
+    size = ld.size_usd or eng.a.size_usd
+    buy = [f"entry ${size:g}"]
+    if ld.max_chase_pct is not None:
+        buy.append(f"chase +{ld.max_chase_pct:g}%")
+    if ld.unconditional:
+        buy.append("no checks")
+    if ld.new_tokens_only:
+        buy.append("new tokens only")
+    if ld.one_buy_day if ld.one_buy_day is not None else ld.mirror:
+        buy.append("1 buy/coin/day")
+    out = []
+    if ld.quick_exit:
+        out.append("quick exit")
+    if ld.ignore_sells:
+        out.append("ignores its sells")
+    elif ld.mirror:
+        out.append("mirror")
+    if ld.take_capital:
+        goal = ld.take_capital_x or (1 + (eng._take_capital_target() or 0) / 100 if eng._take_capital_target() else None)
+        if goal:
+            out.append(f"capital at {goal:g}x")
+    if ld.full_exit_x:
+        out.append(f"all out at {ld.full_exit_x:g}x")
+    on = ld.stop if ld.stop is not None else not ld.mirror
+    if on:
+        sl = ld.stop_pct if ld.stop_pct is not None else eng.s.live_copy_sl_pct
+        if sl is not None:
+            out.append(f"stop {sl:g}%")
+    if ld.trail_pct:
+        out.append(f"trailing {ld.trail_pct:g}%")
+    if ld.max_hours:
+        out.append(f"{ld.max_hours:g} h")
+    return " · ".join(buy) + " | " + (" · ".join(out) or "its sells")
+
+
 def route_edge_buy(pp_tokens: int, pp_sol: float, jup_tokens: int, jup_sol: float) -> float:
     """How much more Jupiter gives per SOL than PumpPortal, all costs included (+0.02 = 2% more tokens)."""
     if pp_tokens <= 0 or pp_sol <= 0 or jup_sol <= 0:
@@ -324,6 +363,14 @@ class Leader:
     # take the cost back at the account's take-capital target (2x) on this wallet's positions; off: never
     # (user's request 2026-11-26: a switch per wallet on the Accounts page)
     take_capital: bool = True
+    # The wallet's own exit rules, each one on its own (user's request 2026-11-26), whichever comes first:
+    take_capital_x: float | None = None  # take the cost back at this multiple (2 = 2x); None = the account's target
+    full_exit_x: float | None = None     # sell everything at this multiple of our entry (3 = 3x); None = off
+    stop: bool | None = None             # stop loss on / off; None = as before (on, except mirrored wallets)
+    stop_pct: float | None = None        # the stop, % under our entry (negative); None = LIVE_COPY_SL_PCT
+    trail_pct: float | None = None       # trailing stop: sell everything this % under the highest price since the buy
+    max_hours: float | None = None       # sell everything after this many hours; None = only the account's max hold
+    one_buy_day: bool | None = None      # one buy per coin a day; None = as before (mirrored wallets only)
 
 
 _FROM_SETTINGS = object()
@@ -357,11 +404,13 @@ class Account:
 
 
 # What a user is told about an exit: never which wallet, only what happened
-USER_REASON = {"leader_sold": "exit signal", "leader_trim": "partial exit", "take_capital": "capital taken back",
+USER_REASON = {"full_exit": "profit target", "trailing_stop": "trailing stop", "time_limit": "time limit",
+               "leader_sold": "exit signal", "leader_trim": "partial exit", "take_capital": "capital taken back",
                "sold_by_hand": "sold by hand", "manual": "sold from your page", "max_hold": "max hold time",
                "time_stop": "time limit, no profit", "take_profit": "profit target", "stop_loss": "stop loss",
                "quick_time": "time limit", "your_target": "your target", "your_stop": "your stop loss"}
-USER_REASON_AR = {"leader_sold": "إشارة خروج", "leader_trim": "خروج جزئي", "take_capital": "سحب رأس المال",
+USER_REASON_AR = {"full_exit": "وصل هدف الربح", "trailing_stop": "وقف متحرك", "time_limit": "انتهى الوقت",
+                  "leader_sold": "إشارة خروج", "leader_trim": "خروج جزئي", "take_capital": "سحب رأس المال",
                   "sold_by_hand": "اتباعت يدوي", "manual": "اتباعت من صفحتك", "max_hold": "انتهت مدة الاحتفاظ",
                   "time_stop": "انتهى الوقت من غير ربح", "take_profit": "وصل هدف الربح", "stop_loss": "وقف الخسارة",
                   "quick_time": "انتهى الوقت", "your_target": "وصل هدفك", "your_stop": "وقف الخسارة بتاعك"}
@@ -1698,6 +1747,8 @@ class CopyEngine:
         self._target_at = 0.0                   # last check of owner-set targets
         self._copy_sl_at = 0.0                  # last check of the copy stop loss
         self._copy_sl_seen: dict[int, int] = {}  # position id -> readings in a row under the stop
+        self._wx_at = 0.0                          # last check of the wallets' own exits
+        self._wx_seen: dict[int, int] = {}         # position id -> readings in a row past a wallet exit
         self._target_seen: dict[int, int] = {}  # position id -> readings in a row past its target / stop
         self._orders_at = 0.0                   # last check of the owner's price orders (app/orders.py)
         from app import curve_live
@@ -1706,9 +1757,18 @@ class CopyEngine:
         self._order_seen: dict[int, int] = {}   # order id -> readings in a row past its trigger
 
     def update(self, account: Account) -> None:
-        """New settings from the /accounts page; takes effect on the next step."""
+        """New settings from the /accounts page; takes effect on the next step. A wallet whose options changed gets
+        one Telegram note with its rules as the bot now runs them (user's request 2026-11-26)."""
+        old = self.a.leaders
         self.a = account
         self.wallets = set(account.wallets)
+        changed = [ld for w, ld in account.leaders.items() if w in old and old[w] != ld]
+        if changed:
+            text = "\n".join(f"{self._tag()} ⚙ {self._who(ld.wallet)}: {rules_text(ld, self)}" for ld in changed)
+            try:
+                asyncio.get_running_loop().create_task(self.notify(text))
+            except RuntimeError:
+                pass
 
     def _free(self, wallet: str) -> bool:
         ld = self.a.leaders.get(wallet)
@@ -1760,6 +1820,32 @@ class CopyEngine:
         ld = self.a.leaders.get(wallet)
         name = (ld.label if ld and ld.label else "") or label or ""
         return f"{name} ({wallet[:6]})" if name and name != wallet[:6] else wallet[:6]
+
+    def _ld(self, pos: LivePosition) -> Leader | None:
+        return self.a.leaders.get(pos.leader_wallet or "")
+
+    def _stop_for(self, pos: LivePosition) -> float | None:
+        """This position's copy stop (% under entry, negative), or None: the wallet's own, else the default."""
+        ld = self._ld(pos)
+        if ld is None:
+            return self.s.live_copy_sl_pct
+        on = ld.stop if ld.stop is not None else not ld.mirror
+        if not on:
+            return None
+        return ld.stop_pct if ld.stop_pct is not None else self.s.live_copy_sl_pct
+
+    def _capital_goal(self, pos: LivePosition) -> float | None:
+        """Take-capital target for this position, % up: the wallet's multiple, else the account's."""
+        ld = self._ld(pos)
+        if ld is not None and ld.take_capital_x:
+            return (ld.take_capital_x - 1) * 100
+        return self._take_capital_target()
+
+    def _one_buy_day(self, wallet: str) -> bool:
+        ld = self.a.leaders.get(wallet)
+        if ld is None:
+            return False
+        return ld.one_buy_day if ld.one_buy_day is not None else ld.mirror
 
     def _takes_capital(self, pos: LivePosition) -> bool:
         """The position's wallet has "2x capital" on (the default; positions without a wallet: on)."""
@@ -1854,12 +1940,12 @@ class CopyEngine:
             *self._mine()))).first()
         if exists:
             return "already holding"
-        if ld is not None and ld.mirror and (await session.execute(select(LivePosition.id).where(
+        if self._one_buy_day(t.wallet) and (await session.execute(select(LivePosition.id).where(
                 LivePosition.token_address == t.token_address, LivePosition.leader_wallet == t.wallet,
                 LivePosition.status != "failed",
                 LivePosition.opened_at >= _now() - timedelta(hours=MIRROR_ONE_BUY_HOURS), *self._mine())
                 .limit(1))).first():
-            return "already traded this coin from this wallet (mirror: one buy per coin a day)"
+            return "already traded this coin from this wallet (one buy per coin a day)"
         open_cost = (await session.execute(select(func.sum(LivePosition.cost_usd)).where(
             LivePosition.status == "open", *self._mine()))).scalar() or 0.0
         if open_cost + size > self.a.max_open_usd + 1e-6:
@@ -2395,8 +2481,7 @@ class CopyEngine:
     async def _take_capital(self, session: AsyncSession) -> None:
         """Position up LIVE_TAKE_CAPITAL_AT_PCT (value now + already sold vs cost): sell tokens worth what is still
         missing to get the cost back, once per position. The rest keeps following the leader's sells."""
-        target = self._take_capital_target()
-        if target is None or not hasattr(self.x, "token_prices"):
+        if not hasattr(self.x, "token_prices"):
             return
         if time.monotonic() - self._priced < self.s.live_take_capital_check_seconds:
             return
@@ -2415,6 +2500,7 @@ class CopyEngine:
                 and not self._quick(p)                                         # quick exit has its own targets
                 and not taken(p)
                 and self._takes_capital(p)                                     # the wallet's switch on the page
+                and self._capital_goal(p) is not None                          # a target: the wallet's or the account's
                 # following the leader instead (a mirrored position follows it anyway and still takes its capital)
                 and not (self.s.live_follow_after_trim and self._following(p) and not self._mirror(p))
                 # with the cap: until that share of the coins is sold; without: until the cost is back
@@ -2435,10 +2521,10 @@ class CopyEngine:
                 return None
             return int(p.tokens_raw) / 10 ** int(px["decimals"]) * float(px["usd"]) + (p.proceeds_usd or 0)
 
-        goal = 1 + target / 100
+        goals = {p.id: 1 + (self._capital_goal(p) or 0.0) / 100 for p in todo}
         unpriced = {p.token_address for p in todo if worth(p, prices.get(p.token_address)) is None}
         close = {p.token_address for p in todo if p.token_address not in unpriced
-                 and worth(p, prices.get(p.token_address)) >= p.cost_usd * (1 + (goal - 1) * self.s.live_take_capital_fast_from)}
+                 and worth(p, prices.get(p.token_address)) >= p.cost_usd * (1 + (goals[p.id] - 1) * self.s.live_take_capital_fast_from)}
         near = sorted(unpriced | close)
         # the Jupiter gate is shared with swaps: every check only when a position is close to its target,
         # otherwise (no DexScreener price yet) at most every 10 s
@@ -2456,6 +2542,7 @@ class CopyEngine:
             total = worth(p, px)
             if total is None:
                 continue
+            goal = goals[p.id]
             value = total - (p.proceeds_usd or 0)
             if value <= 0 or total < p.cost_usd * goal:
                 self._up_seen.pop(p.id, None)
@@ -2539,15 +2626,14 @@ class CopyEngine:
         """Positions copied from a wallet in the normal mode (not quick exit, not the owner's, not curve trades):
         sell everything once the price is LIVE_COPY_SL_PCT under our average entry. Two readings in a row, one
         when far past (like quick exit); the on-chain pool / Jupiter price first, DexScreener as a backup."""
-        sl = self.s.live_copy_sl_pct
-        if sl is None or time.monotonic() - self._copy_sl_at < self.s.live_quick_check_seconds:
+        if time.monotonic() - self._copy_sl_at < self.s.live_quick_check_seconds:
             return
         self._copy_sl_at = time.monotonic()
         rows = [p for p in (await session.execute(select(LivePosition).where(
             LivePosition.status == "open", *self._mine()))).scalars().all()
             if int(p.tokens_raw or 0) > 0 and not p.manual_sell_frac and not p.hands_off
             and p.leader_wallet != MANUAL and not (p.leader_wallet or "").startswith("curve:")
-            and not self._quick(p) and not self._mirror(p) and not self._hold(p.token_address)
+            and not self._quick(p) and self._stop_for(p) is not None and not self._hold(p.token_address)
             and p.stop_pct is None and p.stop_price is None
             and not any(x.get("side") == "sell_failed" for x in (p.fills or []))]
         if not rows or not hasattr(self.x, "token_prices"):
@@ -2567,7 +2653,8 @@ class CopyEngine:
                 log.warning("live: copy-stop backup prices failed: %s", exc)
         for p in rows:
             px = prices.get(p.token_address)
-            if not px or not px.get("usd") or not p.cost_usd:
+            sl = self._stop_for(p)
+            if sl is None or not px or not px.get("usd") or not p.cost_usd:
                 continue
             bought = int(p.tokens_bought_raw or p.tokens_raw) / 10 ** int(px["decimals"])
             if bought <= 0:
@@ -2582,6 +2669,77 @@ class CopyEngine:
             self._copy_sl_seen.pop(p.id, None)
             log.info("live[%s]: copy stop %s at %+.0f%% from entry", self.a.name, p.symbol, (r - 1) * 100)
             await self._sell(session, p, 1.0, "stop_loss")
+            await session.commit()
+
+    async def _wallet_exits(self, session: AsyncSession) -> None:
+        """The wallet's own exits (Accounts page, user's request 2026-11-26), each on its own, first one wins: sell
+        everything at full_exit_x times our entry, trail_pct % under the highest price since the buy, or after
+        max_hours. Prices two readings in a row (one when far past), like the copy stop."""
+        if time.monotonic() - self._wx_at < self.s.live_quick_check_seconds:
+            return
+        self._wx_at = time.monotonic()
+        rows = [p for p in (await session.execute(select(LivePosition).where(
+            LivePosition.status == "open", *self._mine()))).scalars().all()
+            if int(p.tokens_raw or 0) > 0 and not p.manual_sell_frac and not p.hands_off
+            and p.leader_wallet != MANUAL and not (p.leader_wallet or "").startswith("curve:")
+            and not self._quick(p) and not self._hold(p.token_address)
+            and not any(x.get("side") == "sell_failed" for x in (p.fills or []))
+            and (ld := self._ld(p)) is not None and (ld.full_exit_x or ld.trail_pct or ld.max_hours)]
+        if not rows:
+            return
+        now = _now()
+        priced = []
+        for p in rows:
+            ld = self._ld(p)
+            if ld.max_hours and now - utc(p.opened_at) >= timedelta(hours=ld.max_hours):
+                log.info("live[%s]: %s time limit (%g h)", self.a.name, p.symbol, ld.max_hours)
+                await self._sell(session, p, 1.0, "time_limit")
+                await session.commit()
+            elif ld.full_exit_x or ld.trail_pct:
+                priced.append(p)
+        if not priced or not hasattr(self.x, "token_prices"):
+            return
+        mints = sorted({p.token_address for p in priced})
+        prices: dict[str, dict[str, float]] = {}
+        if hasattr(self.x, "token_prices_fast"):
+            try:
+                prices = dict(await self.x.token_prices_fast(mints) or {})
+            except Exception as exc:
+                log.warning("live: wallet-exit prices failed: %s", exc)
+        missing = [m for m in mints if m not in prices]
+        if missing:
+            try:
+                prices.update(await self.x.token_prices(missing) or {})
+            except Exception as exc:
+                log.warning("live: wallet-exit backup prices failed: %s", exc)
+        for p in priced:
+            ld, px = self._ld(p), prices.get(p.token_address)
+            if not px or not px.get("usd") or not p.cost_usd:
+                continue
+            usd = float(px["usd"])
+            bought = int(p.tokens_bought_raw or p.tokens_raw) / 10 ** int(px["decimals"])
+            if bought <= 0:
+                continue
+            entry = p.cost_usd / bought
+            reason, far = None, False
+            if ld.full_exit_x and usd >= entry * ld.full_exit_x:
+                reason, far = "full_exit", usd >= entry * ld.full_exit_x * 1.1
+            elif ld.trail_pct:
+                if p.trail_peak is None or usd > p.trail_peak:
+                    p.trail_peak = max(usd, entry)          # the high since the buy (kept across restarts)
+                    await session.commit()
+                line = p.trail_peak * (1 - ld.trail_pct / 100)
+                if usd <= line:
+                    reason, far = "trailing_stop", usd <= line * 0.9
+            if reason is None:
+                self._wx_seen.pop(p.id, None)
+                continue
+            self._wx_seen[p.id] = self._wx_seen.get(p.id, 0) + 1
+            if self._wx_seen[p.id] < 2 and not far:
+                continue                                     # two readings in a row, unless far past
+            self._wx_seen.pop(p.id, None)
+            log.info("live[%s]: %s %s at %.3gx entry", self.a.name, reason, p.symbol, usd / entry)
+            await self._sell(session, p, 1.0, reason)
             await session.commit()
 
     async def _targets(self, session: AsyncSession) -> None:
@@ -2916,7 +3074,7 @@ class CopyEngine:
     async def _housekeeping(self, session: AsyncSession) -> None:
         """Book hand sales; take the capital out at the target; retry failed sells; sell after max hold."""
         # a copied wallet just traded (WebSocket watcher): stop here, the next step takes it first
-        for part in (self._curve, self._curve_exits, self._trails, self._publish_prices, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits, self._copy_stops,
+        for part in (self._curve, self._curve_exits, self._trails, self._publish_prices, self._reconcile, self._adopt_hand_buys, self._take_capital, self._quick_exits, self._copy_stops, self._wallet_exits,
                      self._targets, self._sell_by, self._orders):
             if self.wake is not None and self.wake.is_set():
                 return

@@ -643,6 +643,13 @@ export interface LeaderCfg {
   ignore_sells?: boolean; // never sell because it sells (fast wallets): exits only from quick exit / max hold
   mirror?: boolean;       // sell the same share every time it sells: no copy stop loss
   take_capital?: boolean; // take the cost back at the account's 2x target (default on); false: never
+  take_capital_x?: number | null;  // its own cost-back multiple (2 = 2x); null = the account's target
+  full_exit_x?: number | null;     // sell everything at this multiple of the entry; null = off
+  stop?: boolean | null;           // stop loss on / off; null = default (on, off for mirrored wallets)
+  stop_pct?: number | null;        // stop, negative % under the entry; null = server default (-35)
+  trail_pct?: number | null;       // trailing stop, % under the high since the buy; null = off
+  max_hours?: number | null;       // sell everything after this many hours; null = off
+  one_buy_day?: boolean | null;    // one buy per coin a day; null = default (mirrored wallets)
   quick_tp_pct?: number | null;   // quick exit take profit +% (null = default 50)
   quick_sl_pct?: number | null;   // quick exit stop loss, negative % (null = default -25)
   quick_hours?: number | null;    // quick exit time limit in hours (null = default 6)

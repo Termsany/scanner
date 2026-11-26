@@ -1,12 +1,14 @@
 "use client";
 
 import {
+  ChevronDown,
   Copy,
   ExternalLink,
   KeyRound,
   Lock,
   Plus,
   Power,
+  Settings2,
   Check,
   Loader2,
   ScrollText,
@@ -15,7 +17,8 @@ import {
   Trash2,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import { AdminSignIn, adminSignOut, useAdminResume } from "@/components/AdminAuth";
 import { AppNav } from "@/components/AppNav";
@@ -274,6 +277,175 @@ function FollowCell({ l, open, onToggle }: { l: LeaderCfg; open: number; onToggl
   );
 }
 
+type Preset = { name: string; hint: string; patch: Partial<LeaderCfg> };
+
+// whole exit set at once; every option stays editable after (user's request 2026-11-26)
+const PRESETS: Preset[] = [
+  { name: "Mirror", hint: "Sell when it sells, same share. No stop, no 2x", patch: {
+    mirror: true, ignore_sells: false, quick_exit: false, take_capital: false, take_capital_x: null, full_exit_x: null,
+    stop: false, stop_pct: null, trail_pct: null, max_hours: null, one_buy_day: true } },
+  { name: "Mirror + 2x", hint: "Mirror, and take the cost back at 2x", patch: {
+    mirror: true, ignore_sells: false, quick_exit: false, take_capital: true, take_capital_x: 2, full_exit_x: null,
+    stop: false, stop_pct: null, trail_pct: null, max_hours: null, one_buy_day: true } },
+  { name: "Safe", hint: "Stop −35%, cost back at 2x, the rest on its full exit", patch: {
+    mirror: false, ignore_sells: false, quick_exit: false, take_capital: true, take_capital_x: 2, full_exit_x: null,
+    stop: true, stop_pct: -35, trail_pct: null, max_hours: null, one_buy_day: false } },
+  { name: "Scalper", hint: "All out at 1.5x, stop −25%, 6 h, or its first sell", patch: {
+    mirror: false, ignore_sells: false, quick_exit: false, take_capital: false, take_capital_x: null, full_exit_x: 1.5,
+    stop: true, stop_pct: -25, trail_pct: null, max_hours: 6, one_buy_day: true } },
+];
+
+const stopOn = (l: LeaderCfg) => (l.stop ?? !l.mirror);
+const oneBuy = (l: LeaderCfg) => (l.one_buy_day ?? !!l.mirror);
+const fmtX = (x: number) => `${Number(x.toFixed(2))}x`;
+
+/** The wallet's rules as short chips, in the order the bot checks them. */
+function ruleChips(l: LeaderCfg, accountX: number | null): { text: string; tone: "mint" | "gold" | "bear" | "sky" | "muted" }[] {
+  const out: { text: string; tone: "mint" | "gold" | "bear" | "sky" | "muted" }[] = [];
+  if (l.quick_exit) out.push({ text: "Quick exit", tone: "gold" });
+  if (l.ignore_sells) out.push({ text: "Ignores its sells", tone: "muted" });
+  else if (l.mirror) out.push({ text: "Mirror", tone: "sky" });
+  else out.push({ text: "Follows its exits", tone: "muted" });
+  const capX = l.take_capital_x ?? accountX;
+  if (l.take_capital !== false && capX) out.push({ text: `Cost back ${fmtX(capX)}`, tone: "mint" });
+  if (l.full_exit_x) out.push({ text: `All out ${fmtX(l.full_exit_x)}`, tone: "mint" });
+  if (stopOn(l)) out.push({ text: `Stop ${l.stop_pct ?? -35}%`, tone: "bear" });
+  if (l.trail_pct) out.push({ text: `Trailing ${l.trail_pct}%`, tone: "bear" });
+  if (l.max_hours) out.push({ text: `${l.max_hours} h`, tone: "muted" });
+  if (oneBuy(l)) out.push({ text: "1 buy/coin/day", tone: "muted" });
+  if (l.unconditional) out.push({ text: "No checks", tone: "gold" });
+  return out;
+}
+
+/** One option line in the settings panel: switch, name, value box, what it does. */
+function Rule({ on, onFlip, title, hint, children }: {
+  on: boolean; onFlip: () => void; title: string; hint: string; children?: ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-3 py-2">
+      <span className="pt-0.5"><Switch on={on} label={title} onClick={onFlip} /></span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`text-sm font-medium ${on ? "text-ink" : "text-muted"}`}>{title}</span>
+          {on && children}
+        </div>
+        <div className="text-[11px] text-faint">{hint}</div>
+      </div>
+    </div>
+  );
+}
+
+function NumBox({ value, onChange, placeholder, prefix, suffix, w = "w-16" }: {
+  value: number | null | undefined; onChange: (v: number | null) => void; placeholder: string;
+  prefix?: string; suffix?: string; w?: string;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1 text-xs text-muted">
+      {prefix}
+      <input className={`${tiny} ${w}`} inputMode="decimal" placeholder={placeholder} value={value ?? ""}
+        onChange={(e) => {
+          const raw = e.target.value.replace("-", "").trim();
+          const v = Number(raw);
+          onChange(raw === "" || !Number.isFinite(v) ? null : v);
+        }} />
+      {suffix}
+    </span>
+  );
+}
+
+/** A wallet's options: entry on the left, exits on the right; every switch saves at once. */
+function WalletPanel({ l, upd, flip, accountX }: {
+  l: LeaderCfg;
+  upd: (p: Partial<LeaderCfg>) => void;
+  flip: (p: Partial<LeaderCfg>) => void;
+  accountX: number | null;
+}) {
+  const capX = l.take_capital_x ?? accountX;
+  const clash = l.take_capital !== false && l.full_exit_x && capX && l.full_exit_x <= capX;
+  return (
+    <div className="space-y-4 bg-carbon/60 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-medium tracking-[0.12em] text-muted uppercase">Presets</span>
+        {PRESETS.map((p) => (
+          <button key={p.name} type="button" title={p.hint} className={button("secondary", "!px-2.5 !py-1 text-xs")}
+            onClick={() => flip(p.patch)}>
+            {p.name}
+          </button>
+        ))}
+        <span className="text-[11px] text-faint">A preset sets the exit rules below; change any of them after.</span>
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <section className="rounded-xl border border-line bg-surface p-4">
+          <h4 className="mb-1 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">Buying</h4>
+          <div className="divide-y divide-line">
+            <div className="flex flex-wrap items-center gap-3 py-2">
+              <span className="text-sm font-medium">Max chase</span>
+              <NumBox value={l.max_chase_pct} placeholder={l.unconditional ? "50" : "10"} prefix="+" suffix="%"
+                onChange={(v) => upd({ max_chase_pct: v })} />
+              <span className="text-[11px] text-faint">never pay more than this above its price</span>
+            </div>
+            <Rule on={!!l.unconditional} onFlip={() => flip({ unconditional: !l.unconditional })} title="No checks"
+              hint="Buy without the liquidity and scanner checks" />
+            <Rule on={!!l.new_tokens_only} onFlip={() => flip({ new_tokens_only: !l.new_tokens_only })}
+              title="New tokens only" hint="Only coins it did not hold before" />
+            <Rule on={oneBuy(l)} onFlip={() => flip({ one_buy_day: !oneBuy(l) })} title="One buy per coin a day"
+              hint="Skip a coin it buys again within 24 h" />
+          </div>
+        </section>
+        <section className="rounded-xl border border-line bg-surface p-4">
+          <h4 className="mb-1 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">
+            Selling <span className="normal-case tracking-normal text-faint">· each rule on its own, the first one reached sells</span>
+          </h4>
+          <div className="divide-y divide-line">
+            <Rule on={!!l.mirror && !l.ignore_sells} title="Mirror its sells"
+              onFlip={() => flip({ mirror: !l.mirror, ignore_sells: false })}
+              hint="When it sells a share, sell the same share. Off: copy its trims before 2x, the rest on its full exit" />
+            <Rule on={l.take_capital !== false} onFlip={() => flip({ take_capital: l.take_capital === false })}
+              title="Take the cost back" hint="Sell enough to get what you paid back; the rest stays">
+              <NumBox value={l.take_capital_x} placeholder={accountX ? String(Number(accountX.toFixed(2))) : "2"}
+                prefix="at" suffix="x" onChange={(v) => upd({ take_capital_x: v })} />
+            </Rule>
+            <Rule on={!!l.full_exit_x} onFlip={() => flip({ full_exit_x: l.full_exit_x ? null : 3 })}
+              title="Sell everything" hint="Close the whole position at this multiple of your entry">
+              <NumBox value={l.full_exit_x} placeholder="3" prefix="at" suffix="x"
+                onChange={(v) => upd({ full_exit_x: v })} />
+            </Rule>
+            <Rule on={stopOn(l)} onFlip={() => flip({ stop: !stopOn(l) })} title="Stop loss"
+              hint="Sell everything this far under your entry (two price checks in a row)">
+              <NumBox value={l.stop_pct == null ? null : Math.abs(l.stop_pct)} placeholder="35" prefix="−" suffix="%"
+                onChange={(v) => upd({ stop_pct: v == null ? null : -Math.abs(v) })} />
+            </Rule>
+            <Rule on={!!l.trail_pct} onFlip={() => flip({ trail_pct: l.trail_pct ? null : 30 })}
+              title="Trailing stop" hint="Sell everything this far under the highest price since the buy">
+              <NumBox value={l.trail_pct} placeholder="30" suffix="% under the high"
+                onChange={(v) => upd({ trail_pct: v })} />
+            </Rule>
+            <Rule on={!!l.max_hours} onFlip={() => flip({ max_hours: l.max_hours ? null : 24 })}
+              title="Time limit" hint="Sell everything after this long">
+              <NumBox value={l.max_hours} placeholder="24" suffix="hours" onChange={(v) => upd({ max_hours: v })} />
+            </Rule>
+            <Rule on={!!l.ignore_sells} onFlip={() => flip({ ignore_sells: !l.ignore_sells })} title="Ignore its sells"
+              hint="For wallets too fast to follow: only your rules above sell" />
+            <Rule on={!!l.quick_exit} onFlip={() => flip({ quick_exit: !l.quick_exit })} title="Quick exit (classic)"
+              hint="All out at +TP / −SL / hours, or on its first sell; replaces the rules above">
+              <NumBox value={l.quick_tp_pct} placeholder="50" prefix="+" suffix="%" w="w-12"
+                onChange={(v) => upd({ quick_tp_pct: v })} />
+              <NumBox value={l.quick_sl_pct == null ? null : Math.abs(l.quick_sl_pct)} placeholder="25" prefix="−"
+                suffix="%" w="w-12" onChange={(v) => upd({ quick_sl_pct: v == null ? null : -Math.abs(v) })} />
+              <NumBox value={l.quick_hours} placeholder="6" suffix="h" w="w-12" onChange={(v) => upd({ quick_hours: v })} />
+            </Rule>
+          </div>
+          {clash ? (
+            <p className="mt-2 rounded-md bg-gold-soft px-2.5 py-1.5 text-[11px] text-gold">
+              “Sell everything” at {fmtX(l.full_exit_x!)} comes before the cost-back at {fmtX(capX!)}: the cost-back never runs.
+            </p>
+          ) : null}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function Leaders({ d, set, now, openBy, onToggle }: {
   d: Draft;
   set: (d: Draft) => void;     // typing
@@ -282,140 +454,94 @@ function Leaders({ d, set, now, openBy, onToggle }: {
   onToggle?: Toggle;           // saved accounts: the switch applies right away
 }) {
   const [add, setAdd] = useState("");
+  const [openRow, setOpenRow] = useState<string | null>(null);
   const upd = (i: number, patch: Partial<LeaderCfg>) =>
     set({ ...d, leaders: d.leaders.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
   const flip = (i: number, patch: Partial<LeaderCfg>) =>
     now({ ...d, leaders: d.leaders.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
+  const accountX = d.take_on && Number(d.take_capital_at_pct) > 0 ? 1 + Number(d.take_capital_at_pct) / 100 : null;
   return (
     <div className="mt-4">
       <div className="mb-2 text-[11px] font-medium tracking-[0.12em] text-muted uppercase">
         Smart wallets to copy ({d.leaders.length})
       </div>
       <div className="overflow-x-auto rounded-xl border border-line">
-        <table className="data-table min-w-[640px] text-sm">
+        <table className="data-table min-w-[720px] text-sm">
           <thead>
             <tr>
               <th className="text-left">Follow</th>
               <th className="text-left">Wallet</th>
               <th className="text-left">Label</th>
               <th className="text-left">Entry</th>
-              <th className="text-left" title="Never buy more than this % above the wallet's own price. Empty = default (+10%, or +50% for no-checks wallets)">
-                Max chase %
-              </th>
-              <th className="text-center" title="Copy with no liquidity, chase or scanner checks">
-                No checks
-              </th>
-              <th className="text-center" title="Only tokens it did not hold before">New tokens only</th>
-              <th className="text-center"
-                title="On: sell the whole position at +50%, at -25%, after 6 hours, or on the wallet's first sell. Off: your rule (50% at 2x, the rest on its full exit)">
-                Quick exit
-              </th>
-              <th className="text-center"
-                title="On: when this wallet sells, the bot does not sell with it (for fast wallets). Use it with Quick exit, so positions still leave at +50% / -25% / 6 hours">
-                Ignore its sells
-              </th>
-              <th className="text-center"
-                title="On: every time this wallet sells, the bot sells the same share. No stop loss; at the account's take-capital target (2x) the cost comes back and the rest keeps following its sells. One buy per coin a day">
-                Mirror
-              </th>
-              <th className="text-center"
-                title="On: when a position from this wallet reaches the account's take-capital target (2x), the bot sells enough to get its cost back and the rest stays. Off: it never does this for this wallet">
-                2x capital
-              </th>
+              <th className="text-left">Rules</th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {d.leaders.map((l, i) => (
-              <tr key={l.wallet} className={l.enabled === false ? "opacity-60" : ""}>
-                <td>
-                  {onToggle ? (
-                    <FollowCell l={l} open={openBy?.[l.wallet] ?? 0} onToggle={onToggle} />
-                  ) : (
-                    <Switch on={l.enabled !== false} label="Follow"
-                      onClick={() => flip(i, { enabled: l.enabled === false })} />
+            {d.leaders.map((l, i) => {
+              const open = openRow === l.wallet;
+              return (
+                <Fragment key={l.wallet}>
+                  <tr className={l.enabled === false ? "opacity-60" : ""}>
+                    <td>
+                      {onToggle ? (
+                        <FollowCell l={l} open={openBy?.[l.wallet] ?? 0} onToggle={onToggle} />
+                      ) : (
+                        <Switch on={l.enabled !== false} label="Follow"
+                          onClick={() => flip(i, { enabled: l.enabled === false })} />
+                      )}
+                    </td>
+                    <td className="num">
+                      <a className="inline-flex items-center gap-1 hover:underline" target="_blank" rel="noreferrer"
+                        href={`https://solscan.io/account/${l.wallet}`}>
+                        {short(l.wallet)} <ExternalLink className="size-3" />
+                      </a>
+                    </td>
+                    <td>
+                      <input className={`${input} min-w-28`} value={l.label} maxLength={40} placeholder="Name"
+                        onChange={(e) => upd(i, { label: e.target.value })} />
+                    </td>
+                    <td>
+                      <input className={`${input} num w-24`} inputMode="decimal" placeholder="account"
+                        value={l.size_usd ?? ""}
+                        onChange={(e) => upd(i, { size_usd: e.target.value ? Number(e.target.value) : null })} />
+                    </td>
+                    <td>
+                      <button type="button" onClick={() => setOpenRow(open ? null : l.wallet)}
+                        className="flex max-w-[26rem] flex-wrap gap-1 text-left" title="Edit this wallet's rules">
+                        {ruleChips(l, accountX).map((c) => <Badge key={c.text} tone={c.tone}>{c.text}</Badge>)}
+                      </button>
+                    </td>
+                    <td className="text-right whitespace-nowrap">
+                      <button type="button" aria-label="Wallet settings" aria-expanded={open}
+                        className={`mr-2 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs ${
+                          open ? "bg-raised text-ink" : "text-muted hover:text-ink"}`}
+                        onClick={() => setOpenRow(open ? null : l.wallet)}>
+                        <Settings2 className="size-4" /> Settings
+                        <ChevronDown className={`size-3.5 transition ${open ? "rotate-180" : ""}`} />
+                      </button>
+                      <button type="button" aria-label="Remove" className="text-muted hover:text-bear"
+                        onClick={() => {
+                          if (onToggle && !confirm(`Remove ${short(l.wallet)}${l.label ? ` (${l.label})` : ""} from this account?`)) return;
+                          now({ ...d, leaders: d.leaders.filter((_, j) => j !== i) });
+                        }}>
+                        <Trash2 className="size-4" />
+                      </button>
+                    </td>
+                  </tr>
+                  {open && (
+                    <tr>
+                      <td colSpan={6} className="!p-0">
+                        <WalletPanel l={l} accountX={accountX} upd={(p) => upd(i, p)} flip={(p) => flip(i, p)} />
+                      </td>
+                    </tr>
                   )}
-                </td>
-                <td className="num ">
-                  <a className="inline-flex items-center gap-1 hover:underline" target="_blank" rel="noreferrer"
-                    href={`https://solscan.io/account/${l.wallet}`}>
-                    {short(l.wallet)} <ExternalLink className="size-3" />
-                  </a>
-                </td>
-                <td >
-                  <input className={input} value={l.label} maxLength={40}
-                    onChange={(e) => upd(i, { label: e.target.value })} />
-                </td>
-                <td >
-                  <input className={`${input} num w-24`} inputMode="decimal" placeholder="account"
-                    value={l.size_usd ?? ""}
-                    onChange={(e) => upd(i, { size_usd: e.target.value ? Number(e.target.value) : null })} />
-                </td>
-                <td>
-                  <input className={`${input} num w-24`} inputMode="decimal"
-                    placeholder={l.unconditional ? "50" : "10"}
-                    value={l.max_chase_pct ?? ""}
-                    onChange={(e) => upd(i, { max_chase_pct: e.target.value === "" ? null : Number(e.target.value) })} />
-                </td>
-                <td className="text-center">
-                  <span className="inline-flex"><Switch on={!!l.unconditional} label="unconditional"
-                    onClick={() => flip(i, { unconditional: !l.unconditional })} /></span>
-                </td>
-                <td className="text-center">
-                  <span className="inline-flex"><Switch on={!!l.new_tokens_only} label="new tokens only"
-                    onClick={() => flip(i, { new_tokens_only: !l.new_tokens_only })} /></span>
-                </td>
-                <td className="text-center">
-                  <span className="inline-flex"><Switch on={!!l.quick_exit} label="Quick exit"
-                    onClick={() => flip(i, { quick_exit: !l.quick_exit })} /></span>
-                  {l.quick_exit && (
-                    <div className="mt-1 flex min-w-[13rem] items-center justify-center gap-1 text-[11px] text-muted">
-                      <input className={`${tiny} w-14`} inputMode="decimal" placeholder="50"
-                        title="Take profit: sell everything at +this %" value={l.quick_tp_pct ?? ""}
-                        onChange={(e) => upd(i, { quick_tp_pct: e.target.value === "" ? null : Number(e.target.value) })} />
-                      <span>%/</span>
-                      <span className="text-bear">−</span>
-                      <input className={`${tiny} w-12`} inputMode="decimal" placeholder="25"
-                        title="Stop loss: sell everything when it is down this % (type 15 for -15%)"
-                        value={l.quick_sl_pct == null ? "" : Math.abs(l.quick_sl_pct)}
-                        onChange={(e) => {
-                          const v = Number(e.target.value.replace("-", ""));
-                          upd(i, { quick_sl_pct: e.target.value === "" || !Number.isFinite(v) ? null : -Math.abs(v) });
-                        }} />
-                      <span>%/</span>
-                      <input className={`${tiny} w-12`} inputMode="decimal" placeholder="6"
-                        title="Time limit: sell everything after this many hours" value={l.quick_hours ?? ""}
-                        onChange={(e) => upd(i, { quick_hours: e.target.value === "" ? null : Number(e.target.value) })} />
-                      <span>h</span>
-                    </div>
-                  )}
-                </td>
-                <td className="text-center">
-                  <span className="inline-flex"><Switch on={!!l.ignore_sells} label="Ignore its sells"
-                    onClick={() => flip(i, { ignore_sells: !l.ignore_sells })} /></span>
-                </td>
-                <td className="text-center">
-                  <span className="inline-flex"><Switch on={!!l.mirror} label="Mirror its sells"
-                    onClick={() => flip(i, { mirror: !l.mirror })} /></span>
-                </td>
-                <td className="text-center">
-                  <span className="inline-flex"><Switch on={l.take_capital !== false} label="Take the capital back at 2x"
-                    onClick={() => flip(i, { take_capital: l.take_capital === false })} /></span>
-                </td>
-                <td className="text-right">
-                  <button type="button" aria-label="Remove" className="text-muted hover:text-bear"
-                    onClick={() => {
-                      if (onToggle && !confirm(`Remove ${short(l.wallet)}${l.label ? ` (${l.label})` : ""} from this account?`)) return;
-                      now({ ...d, leaders: d.leaders.filter((_, j) => j !== i) });
-                    }}>
-                    <Trash2 className="size-4" />
-                  </button>
-                </td>
-              </tr>
-            ))}
+                </Fragment>
+              );
+            })}
             {d.leaders.length === 0 && (
               <tr>
-                <td colSpan={12} className="text-xs text-faint">
+                <td colSpan={6} className="text-xs text-faint">
                   No smart wallets yet: this account will not buy anything.
                 </td>
               </tr>
