@@ -433,6 +433,11 @@ class Settings(BaseSettings):
     telegram_signal_alerts: bool = True       # false = Telegram sends only tracked-wallet buy/sell alerts
     telegram_trade_group_seconds: int = 45    # hold wallet alerts this long to merge same-token trades (0 = off)
     telegram_commands_enabled: bool = True   # /top, /token, /status via long polling
+    # free questions to the bot, answered by Claude from the bot's data (app/assistant.py); owner chat only
+    anthropic_api_key: str | None = None
+    assistant_model: str = "claude-opus-5-5"
+    assistant_daily_limit: int = 200          # questions a day, all chats
+    assistant_memory_minutes: float = 30.0    # a chat's conversation is kept this long after its last question
     public_dashboard_url: str | None = None  # deep links in alerts, e.g. https://scanner.example.com
 
     log_level: str = "INFO"

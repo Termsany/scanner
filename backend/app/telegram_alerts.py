@@ -36,6 +36,21 @@ BADGE_TEXT = {Badge.strong_alpha: "STRONG ALPHA", Badge.moderate: "MODERATE", Ba
 BACKLOG_MINUTES = 10   # on startup, don't post signals older than this
 SEND_INTERVAL = 1.1    # Telegram allows ~1 msg/s per chat
 MENU_LIMIT = 30        # wallets per /wallets menu
+# shown by Telegram when "/" is typed; free text (a question) goes to the assistant
+BOT_COMMANDS = [
+    ("live", "Copy trading: accounts, open positions, PnL (/live off, /live on)"),
+    ("sell", "Sell an open position by hand"),
+    ("paper", "Paper strategy results (/paper 24h, /paper 7d)"),
+    ("performance", "How signals did after they fired"),
+    ("status", "Scanner health"),
+    ("top", "Top 5 tokens by Alpha Score"),
+    ("token", "Score card of a token: /token <address>"),
+    ("wallets", "Smart wallets with Track buttons"),
+    ("track", "Buy alerts for a wallet: /track <address> [name]"),
+    ("untrack", "Stop alerts for a wallet"),
+    ("tracked", "Tracked wallets"),
+    ("help", "All commands"),
+]
 SLASHLESS = {"track", "untrack", "tracked", "wallets", "help", "top", "status", "token", "performance", "paper", "live", "sell"}
 
 
@@ -201,6 +216,9 @@ class TelegramAlerts:
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(40.0))
         self._offset = 0
         self.username: str | None = None
+        from app.assistant import Assistant
+
+        self.assistant = Assistant(self.settings)
 
     # ---- transport --------------------------------------------------------
     async def _call(self, method: str, payload: dict[str, Any], timeout: float | None = None) -> Any | None:
@@ -695,7 +713,8 @@ class TelegramAlerts:
                     "/wallets — smart wallets with Track buttons\n"
                     "/track &lt;address&gt; [name] — buy alerts for any wallet (chain auto-detected)\n"
                     "/untrack &lt;address&gt;\n"
-                    "/tracked — tracked wallets with Untrack buttons")
+                    "/tracked — tracked wallets with Untrack buttons\n\n"
+                    "Or just write a question, e.g. <i>كسبت كام النهارده؟</i>")
 
         if cmd in ("/track", "/untrack", "/tracked", "/wallets") and not self._is_owner(chat_id):
             return "Wallet tracking can only be managed from the owner's chat."
@@ -867,6 +886,10 @@ class TelegramAlerts:
                     if owner and text and not text.startswith("/") and text.split()[0].lower() in SLASHLESS:
                         text = "/" + text
                     if not text.startswith("/"):
+                        if owner and text and self.assistant.enabled:
+                            # a free question: Claude answers from the bot's data (app/assistant.py), off the loop
+                            asyncio.create_task(self._answer(chat_id, text))
+                            continue
                         log.info("non-command message in %s chat ignored", "owner" if owner else "other")
                         if owner and text:
                             await self.send(chat_id, "Try <code>track &lt;address&gt; [name]</code>, "
@@ -893,8 +916,24 @@ class TelegramAlerts:
                 log.exception("Telegram command loop error")
                 await asyncio.sleep(5)
 
+    async def _answer(self, chat_id: str | int, text: str) -> None:
+        try:
+            await self._call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+            reply = await self.assistant.ask(chat_id, text)
+            await self.send(chat_id, html.escape(reply)[:4000])
+        except Exception:
+            log.exception("assistant answer failed")
+
+    async def _set_commands(self) -> None:
+        """The command list Telegram shows when the owner types "/" (user's request 2026-11-26)."""
+        await self._call("setMyCommands", {"commands": [{"command": c, "description": d} for c, d in BOT_COMMANDS]})
+
     async def run(self) -> None:
         me = await self._call("getMe", {})
+        try:
+            await self._set_commands()
+        except Exception:
+            log.warning("Telegram: setting the command menu failed", exc_info=True)
         self.username = (me or {}).get("username")  # used by the dashboard's Track deep links
         tasks = [asyncio.create_task(self._alerts_loop())]
         if self.settings.telegram_commands_enabled:

@@ -16,6 +16,7 @@ redis>=5.2,<7.0               # redis.asyncio client; optional at runtime
 
 # --- AI analyst ---------------------------------------------------------------
 openai>=1.55,<3.0             # OpenAI-compatible async client (also works with Gemini's OpenAI endpoint)
+anthropic>=2.14,<3            # Telegram free questions (app/assistant.py)
 # --- Live copy trading (Solana transaction signing) --------------------------
 solders>=0.21,<1.0
 cryptography>=42,<47
