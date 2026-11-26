@@ -113,8 +113,13 @@ class Assistant:
         self._day: tuple[str, int] = ("", 0)
 
     @property
+    def ai(self) -> bool:
+        """Claude answers only when ASSISTANT_AI is on and there is a key; otherwise the fixed questions do."""
+        return bool(self.s.assistant_ai and (self._client or self.s.anthropic_api_key))
+
+    @property
     def enabled(self) -> bool:
-        return bool(self._client or self.s.anthropic_api_key)
+        return True                                   # the fixed questions need nothing
 
     def client(self):
         if self._client is None:
@@ -253,8 +258,14 @@ class Assistant:
         return n <= self.s.assistant_daily_limit
 
     async def ask(self, chat_id: str | int, text: str) -> str:
-        if not self.enabled:
-            return "الأسئلة الحرة مش متفعلة: محتاج ANTHROPIC_API_KEY على السيرفر. جرّب /help."
+        if not self.ai:
+            from app.quick_answers import QuickAnswers
+
+            try:
+                return await QuickAnswers(self).answer(text)
+            except Exception as exc:
+                log.warning("quick answer: %s", exc)
+                return "حصلت مشكلة وأنا بجيب البيانات، جرّب تاني."
         if not self._limit_ok():
             return f"وصلت لحد الأسئلة النهارده ({self.s.assistant_daily_limit}). جرّب الأوامر: /help."
         key = str(chat_id)

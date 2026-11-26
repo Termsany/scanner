@@ -30,7 +30,7 @@ class FakeClient:
 
 
 def _assistant(session_factory, client, **kw):
-    s = Settings(live_mode="live", assistant_daily_limit=kw.pop("limit", 200), **kw)
+    s = Settings(live_mode="live", assistant_ai=True, assistant_daily_limit=kw.pop("limit", 200), **kw)
     return Assistant(s, session_factory=session_factory, client=client)
 
 
@@ -66,11 +66,10 @@ def test_daily_limit_and_no_key():
         a.Session = None
         first = a._limit_ok()
         second = await a.ask(1, "سؤال")
-        off = Assistant(Settings(anthropic_api_key=None), session_factory=lambda: None)
-        return first, second, await off.ask(1, "سؤال"), off.enabled
+        return first, second
 
-    first, second, off, enabled = asyncio.run(go())
-    assert first and "حد الأسئلة" in second and "ANTHROPIC_API_KEY" in off and not enabled
+    first, second = asyncio.run(go())
+    assert first and "حد الأسئلة" in second
 
 
 class _Ctx:
