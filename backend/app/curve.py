@@ -47,7 +47,7 @@ from sqlalchemy import select
 
 from app import curve_live, paper_switches
 from app.config import Settings, get_settings
-from app.models import Chain, PaperPosition
+from app.models import Chain, GradPrice, PaperPosition
 
 log = logging.getLogger("curve")
 HOLDER_WAIT_S = 15.0     # a holder read that takes longer than this skips the fill (the price has moved on)
@@ -394,6 +394,7 @@ class PaperCurve:
         self._holder_asked: dict[str, float] = {}              # mint -> when a fill first asked for them
         self._holder_task: asyncio.Task | None = None
         self._lost_at: float | None = None      # when the sockets dropped (None: connected)
+        self.grads: dict[str, dict[str, Any]] = {}   # BOOST study: graduated coins still being priced
 
     def set_custom(self, rules: dict[str, CurveRule]) -> None:
         """The owner's strategies from the database. One that was deleted keeps running for its open trades,
@@ -490,6 +491,11 @@ class PaperCurve:
             if final and (not w.price or w.price / 20 <= final <= w.price * 20):
                 w.price = final
             w.progress = 100.0
+            if mint not in self.grads and len(self.grads) < 2000:
+                # BOOST study: its price at graduation, then at GRAD_SAMPLE_S after (app/models.GradPrice)
+                self.grads[mint] = {"mint": mint, "symbol": w.symbol, "at": now, "wall": _now(),
+                                    "secs": round(now - w.created, 1), "curve": self._usd(w.price) if w.price else None,
+                                    "sol_usd": self.sol_usd or None, "prices": {}}
             self._exits(w, now)
             if mint in curve_live.EXITS:
                 curve_live.on_price(mint, None, graduated=True)
@@ -1120,7 +1126,8 @@ class PaperCurve:
                 self.on_curve(mint, data, time.monotonic())
 
     async def _housekeep(self, pp, hl, SessionLocal) -> None:
-        last_flush = last_px = last_cost = last_ride = time.monotonic()
+        last_flush = last_px = last_cost = last_ride = last_grad = time.monotonic()
+        self._grad_task: asyncio.Task | None = None
         last_rules = 0.0
         self._social_task: asyncio.Task | None = None
         events_at = self.pp_events
@@ -1150,6 +1157,9 @@ class PaperCurve:
                 self._holder_task = asyncio.create_task(self.fetch_holders())
             if self._social_todo and not (self._social_task and not self._social_task.done()):
                 self._social_task = asyncio.create_task(self.fetch_socials(SessionLocal))
+            if self.grads and now - last_grad >= 5.0 and not (self._grad_task and not self._grad_task.done()):
+                last_grad = now
+                self._grad_task = asyncio.create_task(self.sample_grads(SessionLocal, now))
             if self.riding() and now - last_ride >= self.s.curve_trail_price_seconds:
                 last_ride = now
                 await self._price_riding(now)
@@ -1206,6 +1216,50 @@ class PaperCurve:
                             self._update(m, parse_curve(acc["data"][0]), now)
         except Exception:
             log.warning("curve (paper): reading resumed curves failed", exc_info=True)
+
+    GRAD_SAMPLE_S = (0, 30, 60, 120, 180, 240, 300, 360, 420, 600)
+
+    async def sample_grads(self, SessionLocal, now: float) -> None:
+        """Graduated coins due a price reading (GRAD_SAMPLE_S after graduation): one Jupiter call for all of them,
+        low priority behind real trades. A coin whose readings are done is written to grad_prices."""
+        try:
+            due = [g for g in self.grads.values()
+                   if any(now - g["at"] >= o and str(o) not in g["prices"] for o in self.GRAD_SAMPLE_S)]
+            if due:
+                got = await self._jup_usd([g["mint"] for g in due[:50]])
+                for g in due[:50]:
+                    px = got.get(g["mint"])
+                    age = now - g["at"]
+                    for o in self.GRAD_SAMPLE_S:
+                        if age >= o and str(o) not in g["prices"]:
+                            # a reading more than 20 s late is kept as missing (None): it would blur the curve
+                            g["prices"][str(o)] = px if px and age - o <= 20 else None
+            done = [m for m, g in self.grads.items() if now - g["at"] >= self.GRAD_SAMPLE_S[-1]
+                    and len(g["prices"]) >= len(self.GRAD_SAMPLE_S)]
+            if done:
+                async with SessionLocal() as session:
+                    for m in done:
+                        g = self.grads.pop(m)
+                        session.add(GradPrice(mint=m, symbol=(g["symbol"] or "")[:64], grad_at=g["wall"],
+                                              secs_to_grad=g["secs"], curve_price_usd=g["curve"],
+                                              sol_usd=g["sol_usd"], prices=g["prices"]))
+                    await session.commit()
+        except Exception:
+            log.warning("curve (paper): graduation prices failed", exc_info=True)
+
+    async def _jup_usd(self, mints: list[str]) -> dict[str, float]:
+        import httpx
+
+        from app.live import JUPITER
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await JUPITER.request(c, "GET", f"{self.s.jupiter_api_url}/price/v3", low=True, retries=1,
+                                          params={"ids": ",".join(mints)})
+            data = (r.json() or {}) if r is not None and r.status_code == 200 else {}
+        except Exception:
+            return {}
+        return {m: float(d["usdPrice"]) for m, d in data.items() if isinstance(d, dict) and d.get("usdPrice")}
 
     async def _price_riding(self, now: float) -> None:
         """Graduated coins a trail position still holds: Jupiter's price (USD -> SOL per token)."""

@@ -877,3 +877,36 @@ def test_open_trades_carry_over_a_restart_and_close_normally():
     done = {r.strategy: r for r in rows}
     assert done["curve_70"].status == "closed" and done["curve_70"].exit_reason == "graduated" \
         and done["curve_70"].pnl_usd > 0
+
+
+def test_graduation_prices_are_recorded_for_the_boost_study():
+    from app.models import GradPrice
+
+    async def run():
+        with tempfile.TemporaryDirectory() as d:
+            eng = create_async_engine(f"sqlite+aiosqlite:///{d}/t.db")
+            async with eng.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            Session = async_sessionmaker(eng, expire_on_commit=False)
+            c = PaperCurve(S(), sol_usd=200.0)
+            c.on_create(create("G"), 0.0)
+            c.on_curve("G", acct(90), 50.0)
+            c.on_curve("G", acct(100, complete=True), 60.0)           # graduates at t=60
+            px = iter([1.0, 1.1, 1.2, 1.3, 1.35, 1.4, 1.5, 1.2, 1.1, 0.9])
+
+            async def jup(mints):
+                return {m: next(px) for m in mints}
+            c._jup_usd = jup
+            for o in c.GRAD_SAMPLE_S:                                  # one reading per sample time
+                await c.sample_grads(Session, 60.0 + o)
+            missed = dict(c.grads)
+            async with Session() as s:
+                rows = (await s.execute(select(GradPrice))).scalars().all()
+            await eng.dispose()
+            return rows, missed
+
+    rows, missed = asyncio.run(run())
+    assert not missed and len(rows) == 1
+    r = rows[0]
+    assert r.mint == "G" and r.secs_to_grad == 60.0 and r.curve_price_usd > 0
+    assert r.prices["0"] == 1.0 and r.prices["300"] == 1.5 and r.prices["600"] == 0.9

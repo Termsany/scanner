@@ -257,6 +257,22 @@ class SmartWallet(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class GradPrice(Base):
+    """A pump.fun coin's price around its graduation (user's request 2026-11-26: BOOST Mode buys ~17.6 SOL of the
+    coin over the 5 minutes after it moves to PumpSwap; does the price follow?). prices: {"seconds after": USD}."""
+
+    __tablename__ = "grad_prices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mint: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(64), default="")
+    grad_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    secs_to_grad: Mapped[float | None] = mapped_column(Float, nullable=True)     # launch -> graduation
+    curve_price_usd: Mapped[float | None] = mapped_column(Float, nullable=True)  # last price on the curve
+    sol_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prices: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class PaperPosition(Base):
     """A simulated trade (no real money). One open position per strategy and token at a time."""
 
