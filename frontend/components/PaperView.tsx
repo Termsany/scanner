@@ -27,6 +27,7 @@ const REASON: Record<string, string> = {
   time: "Time limit",
   leader_sold: "Wallet sold",
   no_price: "No price",
+  no_fill: "Never filled",
 };
 
 function money(v: number | null | undefined) {

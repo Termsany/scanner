@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     paper_entry_seconds: float = 3.0
     paper_exit_seconds: float = 10.0
     paper_live_prices: bool = True
+    # 2026-11-26: on the same 53 DULX3e coins the live bot opened a median 24 s after paper and paid ~28% more, so
+    # paper showed +54% a trade where live made +2.5%. A copy trade now waits this long, then fills at the market
+    # price of the next exit pass (every paper_exit_seconds: ~20-30 s in all), never below the wallet's price. 0: off
+    paper_copy_delay_seconds: float = 20.0
 
     # Wallet scout (app/wallet_scout.py): find -> strict filter -> 3-day realistic paper trial -> suggest.
     # Off until turned on: it spends Helius credits (one run a day, capped).

@@ -258,7 +258,10 @@ async def _open_keys(session: AsyncSession) -> set[tuple[str, str, str]]:
 
 def _open(session: AsyncSession, keys: set, strategy: Strategy, *, chain: Chain, token: str, symbol: str,
           price: float, trigger: str, at: datetime, s: Settings, wallet: str | None = None,
-          leader_trade_id: int | None = None, costs: dict[str, float] | None = None) -> PaperPosition | None:
+          leader_trade_id: int | None = None, costs: dict[str, float] | None = None,
+          pending: bool = False) -> PaperPosition | None:
+    """`pending`: a copy trade that is filled later, at the market price PAPER_COPY_DELAY_SECONDS on (_fill_pending);
+    until then `price` is only the wallet's price."""
     from app import paper_switches
 
     key = (strategy.name, chain.value, token)
@@ -277,7 +280,7 @@ def _open(session: AsyncSession, keys: set, strategy: Strategy, *, chain: Chain,
                           else strategy.max_hold_minutes),
         last_price=price, last_priced_at=at, peak_pct=0.0, trough_pct=0.0,
         remaining_frac=1.0, proceeds_usd=0.0, leader_trade_id=leader_trade_id,
-        features={"costs": costs} if costs else None,
+        features=({"costs": costs} if costs else {}) | ({"fill_pending": True} if pending else {}) or None,
     )
     session.add(pos)
     log.info("paper OPEN %s %s %s @ %.10g (%s)", strategy.name, chain.value, symbol or token, price, trigger)
@@ -324,6 +327,7 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
             trials = await trial_wallets(session) if trades else set()
         except Exception:
             trials = set()
+        pend = s.paper_copy_delay_seconds > 0     # filled later at the market price, like the live bot
         for t in trades:
             if not _is_buy(t) or not t.price_usd:
                 continue
@@ -333,17 +337,17 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
             usd = f" ${t.usd_value:,.0f}" if t.usd_value else ""
             if _open(session, keys, STRATEGIES["wallet_follow"], chain=t.chain, token=t.token_address,
                      symbol=t.symbol, price=entry_px, trigger=f"{label} bought{usd}", at=now, s=s,
-                     wallet=t.wallet, leader_trade_id=t.id):
+                     wallet=t.wallet, leader_trade_id=t.id, pending=pend):
                 opened += 1
             if (not mirror_set or t.wallet in mirror_set) and _open(
                     session, keys, STRATEGIES["wallet_mirror"], chain=t.chain, token=t.token_address,
                     symbol=t.symbol, price=entry_px, trigger=f"copy {label}{usd}", at=now, s=s,
-                    wallet=t.wallet, leader_trade_id=t.id):
+                    wallet=t.wallet, leader_trade_id=t.id, pending=pend):
                 opened += 1
             if t.wallet in trials and t.first_buy and _open(
                     session, keys, STRATEGIES["scout_trial"], chain=t.chain, token=t.token_address, symbol=t.symbol,
                     price=entry_px, trigger=f"scout trial {t.wallet[:6]}{usd}", at=now, s=s, wallet=t.wallet,
-                    leader_trade_id=t.id):
+                    leader_trade_id=t.id, pending=pend):
                 opened += 1
             for strat in STRATEGIES.values():          # one leader's first buys, maybe sized
                 if strat.leader != t.wallet or not t.first_buy:
@@ -354,7 +358,7 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
                     continue
                 if _open(session, keys, strat, chain=t.chain, token=t.token_address, symbol=t.symbol,
                          price=entry_px, trigger=f"copy {label}{usd}", at=now, s=s, wallet=t.wallet,
-                         leader_trade_id=t.id):
+                         leader_trade_id=t.id, pending=pend):
                     opened += 1
             # cluster: distinct tracked wallets buying this token in the last CLUSTER_MINUTES
             ref = utc(t.block_time) or utc(t.detected_at) or now
@@ -373,7 +377,8 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
             if len(buyers) >= CLUSTER_MIN_WALLETS:
                 names = ", ".join(list(buyers.values())[:4])
                 if _open(session, keys, STRATEGIES["wallet_cluster"], chain=t.chain, token=t.token_address,
-                         symbol=t.symbol, price=entry_px, trigger=f"{len(buyers)} wallets: {names}", at=now, s=s):
+                         symbol=t.symbol, price=entry_px, trigger=f"{len(buyers)} wallets: {names}", at=now, s=s,
+                         pending=pend):
                     opened += 1
         await _set_cursor(session, CURSOR_TRADES, max_trade)
 
@@ -571,10 +576,16 @@ async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings
 
     closed = 0
     for p in open_pos:
-        entry_time = utc(p.entry_time)
         px = live.get((p.chain, p.token_address))
         if px is not None and sane.get(p.id) is False:
             px = None
+        if _pending(p):
+            state = _fill_pending(p, px, now, s)
+            if state == "closed":
+                closed += 1
+            if state != "filled":
+                continue
+        entry_time = utc(p.entry_time)
         if px is not None:
             p.last_price, p.last_priced_at = px, now
             pct = (px / p.entry_price - 1) * 100
@@ -658,6 +669,38 @@ async def process_exits(session: AsyncSession, prices: PriceFetcher, s: Settings
             _close(p, p.last_price or p.entry_price, "no_price", now, s)
             closed += 1
     return closed
+
+
+def _pending(p: PaperPosition) -> bool:
+    return isinstance(p.features, dict) and bool(p.features.get("fill_pending"))
+
+
+def _fill_pending(p: PaperPosition, px: float | None, now: datetime, s: Settings) -> str:
+    """A copy trade waits PAPER_COPY_DELAY_SECONDS, then fills at the market price then (never below the wallet's
+    price), like the live bot. Its entry time moves to the fill, so the hold and any leader sell before it are
+    measured from when we were really in. Returns "wait", "filled" or "closed" (no price for too long)."""
+    age = now - utc(p.entry_time)
+    if age < timedelta(seconds=s.paper_copy_delay_seconds):
+        return "wait"
+    if px is None:
+        if age >= timedelta(minutes=s.paper_no_price_minutes):
+            _close(p, p.entry_price, "no_fill", now, s)
+            return "closed"
+        return "wait"
+    signal_px = p.entry_price
+    entry = max(px, signal_px)
+    p.fill_price = p.fill_price / signal_px * entry      # keeps the slippage (and any gas / tax) factor
+    p.entry_price = entry
+    p.entry_time = now
+    p.last_price, p.last_priced_at = px, now
+    p.peak_pct = p.trough_pct = 0.0
+    f = {k: v for k, v in p.features.items() if k != "fill_pending"}
+    f.update(signal_price=signal_px, fill_delay_s=round(age.total_seconds(), 1),
+             paid_vs_signal_pct=round((entry / signal_px - 1) * 100, 2))
+    p.features = f                                       # a new dict: JSON columns only save on reassignment
+    log.info("paper FILL %s %s @ %.10g (%+.1f%% vs the wallet, %.0fs later)", p.strategy, p.symbol or p.token_address,
+             entry, (entry / signal_px - 1) * 100, age.total_seconds())
+    return "filled"
 
 
 def _sell_share(p: PaperPosition, share: float, at_px: float, s: Settings) -> None:

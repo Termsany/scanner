@@ -49,7 +49,8 @@ def S(**kw):
     base = dict(scout_enabled=True, scout_min_hits=2, scout_max_trials=4, scout_trial_days=3.0, scout_min_days=3.0,
                 scout_max_swaps_per_day=150, scout_min_closed=15, scout_min_profit_factor=1.3, scout_min_win_rate=40,
                 scout_min_hold_minutes=5, scout_trial_min_trades=2, live_rpc_url="https://rpc.test/?api-key=k",
-                paper_size_usd=100.0, paper_slippage_pct=1.5, scout_max_idle_hours=1e9)
+                paper_size_usd=100.0, paper_slippage_pct=1.5, scout_max_idle_hours=1e9,
+                paper_copy_delay_seconds=0)          # immediate fills (the delay has its own tests in test_paper)
     base.update(kw)
     return Settings(**base)
 

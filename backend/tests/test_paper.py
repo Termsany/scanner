@@ -30,6 +30,7 @@ def _db(body):
 
 def _settings(**kw):
     kw.setdefault("paper_eth_quotes", False)          # no KyberSwap calls from tests
+    kw.setdefault("paper_copy_delay_seconds", 0)      # immediate fills, except in the delayed-fill tests
     return Settings(paper_size_usd=100.0, paper_slippage_pct=1.5, paper_mirror_wallets=[LEADER], **kw)
 
 
