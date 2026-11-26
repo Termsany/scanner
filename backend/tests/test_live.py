@@ -2758,3 +2758,29 @@ def test_jupiter_gate_lets_real_money_calls_go_before_dry_run_ones():
 
     asyncio.run(go())
     assert order[0] == "/first" and order[1] == "/live" and set(order[2:]) == {"/dry1", "/dry2"}
+
+
+def test_jupiter_key_moves_calls_to_api_jup_ag_with_the_header_and_sets_the_pace():
+    import httpx
+    import respx
+
+    from app.live import JupiterGate, gate_interval
+
+    assert gate_interval(False, None) == 1.1                       # no key: as before (lite-api)
+    assert gate_interval(True, None) == 1.1                        # Free key: 1 a second, with room
+    assert abs(gate_interval(True, 10) - 0.125) < 1e-9              # Developer: 8 a second
+    gate = JupiterGate(interval=0.01)
+    gate._ready, gate._key = True, "K123"
+    seen = {}
+
+    async def go():
+        with respx.mock:
+            def hit(req):
+                seen["url"], seen["key"] = str(req.url), req.headers.get("x-api-key")
+                return httpx.Response(200, json={})
+            respx.get(url__regex=r"https://api\.jup\.ag/.*").mock(side_effect=hit)
+            async with httpx.AsyncClient() as http:
+                return await gate.request(http, "GET", "https://lite-api.jup.ag/swap/v1/quote", params={"a": "1"})
+
+    r = asyncio.run(go())
+    assert r.status_code == 200 and seen["url"].startswith("https://api.jup.ag/swap/v1/quote") and seen["key"] == "K123"

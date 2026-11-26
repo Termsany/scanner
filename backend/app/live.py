@@ -427,13 +427,29 @@ class JupiterGate:
     instead of failing the trade.
     """
 
-    def __init__(self, interval: float = 1.1, retries: int = 4) -> None:
-        self.interval, self.retries = interval, retries
+    def __init__(self, interval: float | None = None, retries: int = 4) -> None:
+        self.interval, self.retries = interval or 1.1, retries
+        self._fixed = interval is not None   # tests pass their own spacing; otherwise it comes from the settings
+        self._key: str | None = None
+        self._ready = False
         self._lock = asyncio.Lock()
         self._last = 0.0
         self._waiting = 0           # calls queued for a slot right now
         self._urgent = 0            # of those, real-money calls: dry-run calls wait until none is queued
         self._cool_until = 0.0      # after a 429, background calls stay away for a while
+
+    def _setup(self) -> None:
+        """The key and the spacing, from the settings, on the first call (user's request 2026-11-26)."""
+        if self._ready:
+            return
+        self._ready = True
+        s = get_settings()
+        self._key = (s.jupiter_api_key or "").strip() or None
+        if self._fixed:
+            return
+        self.interval = gate_interval(self._key is not None, s.jupiter_rps)
+        log.info("Jupiter: %s, one call every %.2f s", "API key on (api.jup.ag)" if self._key else "no key (lite-api)",
+                 self.interval)
 
     async def _slot(self, low: bool = False) -> None:
         """low: a dry-run account's call. It lets every queued real-money call go first (user's request 2026-11-26:
@@ -477,6 +493,11 @@ class JupiterGate:
         if background and (self._waiting or self._lock.locked() or time.monotonic() < self._cool_until):
             return None
         tries = (0 if background else self.retries) if retries is None else retries
+        self._setup()
+        if self._key:
+            if url.startswith(LITE_API):
+                url = JUP_API + url[len(LITE_API):]
+            kw["headers"] = {**(kw.get("headers") or {}), "x-api-key": self._key}
         r: httpx.Response | None = None
         for attempt in range(tries + 1):
             await self._slot(low)
@@ -493,6 +514,18 @@ class JupiterGate:
             log.warning("jupiter 429 on %s, retry %d in %.1fs", url.rsplit("/", 2)[-1], attempt + 1, pause)
             await asyncio.sleep(pause)
         return r  # type: ignore[return-value]
+
+
+LITE_API, JUP_API = "https://lite-api.jup.ag", "https://api.jup.ag"
+
+
+def gate_interval(has_key: bool, rps: float | None) -> float:
+    """Seconds between Jupiter calls. No key: 1.1 (lite-api). A key: the plan's rate (JUPITER_RPS, else the Free
+    plan's 1 a second) with room to spare: limits are counted over a sliding minute and a 429 costs a retry."""
+    if not has_key:
+        return 1.1
+    rps = rps if rps and rps > 0 else 1.0
+    return 1.1 / rps if rps <= 2 else 1.0 / (rps * 0.8)
 
 
 JUPITER = JupiterGate()

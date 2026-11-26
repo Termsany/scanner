@@ -318,6 +318,11 @@ class Settings(BaseSettings):
                                                  # is not back N minutes after the buy
     live_rpc_url: str | None = None              # defaults to SOLANA_RPC_URL
     jupiter_api_url: str = "https://lite-api.jup.ag"
+    # Jupiter Developer Platform key (developers.jup.ag/portal). Set: trades, quotes and the bot's price checks go to
+    # api.jup.ag with it (lite-api.jup.ag is being phased out). JUPITER_RPS = the plan's requests per second
+    # (Free 1, Developer 10, Launch 50, Pro 150); the bot stays under it. Without a key: lite-api, ~1 call per 1.1 s
+    jupiter_api_key: str | None = None
+    jupiter_rps: float | None = None
     # Extra trading wallets copying the same leaders with their own budget, e.g.
     # LIVE_ACCOUNTS=[{"name": "big", "size_usd": 50, "max_open_usd": 500, "max_daily_loss_usd": 250}]
     # Each one's key goes in LIVE_PRIVATE_KEY_<NAME> (LIVE_PRIVATE_KEY_BIG); without it the account stays idle.
