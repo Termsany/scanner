@@ -835,3 +835,45 @@ def test_curve_holders_replay_finds_snipers_top_holder_and_skips_the_curve():
     import pytest
     with pytest.raises(curve_holders.NotPump):
         curve_holders.replay(mint, txs[1:])
+
+
+def test_open_trades_carry_over_a_restart_and_close_normally():
+    MV = "7ySJbt6vJG1hnKcmLphmfxwMc626S2tRGNCUdUM1pump"
+    async def run():
+        with tempfile.TemporaryDirectory() as d:
+            eng = create_async_engine(f"sqlite+aiosqlite:///{d}/t.db")
+            async with eng.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            Session = async_sessionmaker(eng, expire_on_commit=False)
+            c = PaperCurve(S(), sol_usd=200.0)
+            c.on_create(create(MV), 0.0)
+            c.on_curve(MV, acct(85), 10.0)
+            c.on_curve(MV, acct(86), 12.5)
+            async with Session() as s:
+                await c.flush(s)
+                from app.models import Chain
+
+                old = PaperPosition(strategy="curve_70", chain=Chain.solana, token_address="OLD", symbol="O", status="open", size_usd=30.0, entry_price=1.0,
+                                    fill_price=1.0, tp_pct=0.0, sl_pct=-25.0, max_hold_minutes=60)
+                s.add(old)                                  # a row from before this change: no saved state
+                await s.commit()
+            # the worker restarts: a new engine reads the open rows
+            c2 = PaperCurve(S(), sol_usd=200.0)
+            async with Session() as s:
+                rows = (await s.execute(select(PaperPosition).where(PaperPosition.status == "open"))).scalars().all()
+                left = c2.resume(rows, 100.0)
+            held = set(c2.watch[MV].held)
+            back = c2.after_reconnect(100.0)
+            c2.on_curve(MV, acct(100, complete=True), 120.0)   # it graduates after the restart
+            async with Session() as s:
+                await c2.flush(s)
+                rows = (await s.execute(select(PaperPosition).where(PaperPosition.token_address == MV))).scalars().all()
+            await eng.dispose()
+            return [r.token_address for r in left], held, back, rows
+
+    left, held, back, rows = asyncio.run(run())
+    assert left == ["OLD"]                                  # old rows are closed as before
+    assert {"curve_70", "curve_85"} <= held and back == [MV]   # held again, watched once the feed connects
+    done = {r.strategy: r for r in rows}
+    assert done["curve_70"].status == "closed" and done["curve_70"].exit_reason == "graduated" \
+        and done["curve_70"].pnl_usd > 0

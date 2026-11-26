@@ -799,7 +799,11 @@ class PaperCurve:
                                 tp_pct=_shown_tp(rule, self.s.curve_tp_pct),
                                 sl_pct=self.s.curve_sl_pct if grad else (rule.sl or 0.0),
                                 max_hold_minutes=max(int(hold_s // 60), 1),
-                                remaining_frac=1.0, proceeds_usd=0.0, features=pos.get("features"))
+                                remaining_frac=1.0, proceeds_usd=0.0,
+                                features={**(pos.get("features") or {}),
+                                          "st": {"market": pos["market"], "fill": pos["fill"], "half": False,
+                                                 "gpeak": None, "graduated": False, "price": pos["market"],
+                                                 "progress": (pos.get("features") or {}).get("fill_level") or 0.0}})
             session.add(row)
             rows.append((pos, row))
             n += 1
@@ -920,8 +924,53 @@ class PaperCurve:
                 row.pnl_usd, row.pnl_pct = pnl, pnl / pos["size"] * 100
                 row.remaining_frac, row.proceeds_usd = pos["rem"], pos["proceeds"]
                 row.trigger = (pos.get("why") or row.trigger or "")[:160]
+                row.features = {**(row.features or {}), "st": self._state(w, pos)}
                 n += 1
         return n
+
+    @staticmethod
+    def _state(w: Watch, pos: dict[str, Any]) -> dict[str, Any]:
+        """What a restart needs to carry the trade on (user's request 2026-11-26: every deploy closed the open curve
+        trades as "restart", 274 of curve_30_70's 372, so no-stop results could not be trusted)."""
+        return {"market": pos["market"], "fill": pos["fill"], "half": pos["half"], "gpeak": pos["gpeak"],
+                "graduated": w.graduated, "price": w.price, "progress": w.progress}
+
+    def resume(self, rows: list[PaperPosition], now: float) -> list[PaperPosition]:
+        """Open curve rows from before a restart: trades with a saved state are held again (their coins watched
+        once the feed connects); the rest (older rows, unknown rules) are returned to be closed as before."""
+        from app.pump_tx import curve_address as pump_curve_address
+        from app.repository import utc
+
+        left = []
+        wall = _now()
+        for row in rows:
+            st = (row.features or {}).get("st") if isinstance(row.features, dict) else None
+            rule = self.rules.get(row.strategy)
+            if not st or rule is None or not st.get("market") or not st.get("fill"):
+                left.append(row)
+                continue
+            age = max((wall - utc(row.entry_time)).total_seconds(), 0.0) if row.entry_time else 0.0
+            w = self.watch.get(row.token_address)
+            if w is None:
+                lead = float((row.features or {}).get("secs_to_level") or 0.0)
+                try:
+                    key = pump_curve_address(row.token_address)
+                except Exception:
+                    left.append(row)                      # not a pump.fun mint we can watch
+                    continue
+                w = Watch(row.token_address, row.symbol or "", now - age - lead, key)
+                w.price, w.progress, w.graduated = st.get("price") or st["market"], float(st.get("progress") or 0.0), \
+                    bool(st.get("graduated"))
+                self.watch[row.token_address] = w
+            w.decided.add(row.strategy)
+            w.held[row.strategy] = {
+                "strategy": row.strategy, "mint": row.token_address, "symbol": row.symbol or "", "market": st["market"],
+                "fill": st["fill"], "at": now - age, "wall": row.entry_time, "peak": row.peak_pct or 0.0,
+                "trough": row.trough_pct or 0.0, "size": row.size_usd,
+                "rem": 1.0 if row.remaining_frac is None else row.remaining_frac, "proceeds": row.proceeds_usd or 0.0,
+                "half": bool(st.get("half")), "gpeak": st.get("gpeak"), "features": row.features,
+                "why": row.trigger or "", "row": row.id}
+        return left
 
     # ---- loop -------------------------------------------------------------------
     def _helius_ws(self) -> str | None:
@@ -939,10 +988,17 @@ class PaperCurve:
 
         from app.db import SessionLocal
 
-        async with SessionLocal() as session:          # a restart left these with no feed: close them flat
+        async with SessionLocal() as session:          # a restart: carry the open trades on (or close the old ones)
             stale = (await session.execute(select(PaperPosition).where(
                 PaperPosition.strategy.in_(tuple(CURVE_STRATEGIES)) | PaperPosition.strategy.like(CUSTOM_PREFIX + "%"),
                 PaperPosition.status == "open"))).scalars().all()
+            await self._load_custom(SessionLocal)
+            await self._refresh_sol_usd()
+            kept = len(stale)
+            stale = self.resume(stale, time.monotonic())
+            if kept - len(stale):
+                log.info("curve (paper): %d open trades carried over the restart", kept - len(stale))
+                await self._resume_prices()
             for p in stale:
                 p.status, p.exit_reason, p.exit_time = "closed", "restart", _now()
                 p.exit_price = p.last_price or p.entry_price
@@ -1129,6 +1185,27 @@ class PaperCurve:
             self.live_signals = {k for r in accts for k, v in bots_of(r).items() if v.get("enabled")}
         except Exception:
             log.warning("curve (paper): could not load the live curve accounts", exc_info=True)
+
+    async def _resume_prices(self) -> None:
+        """Resumed coins still on the curve: one read of their curve accounts (price, progress, graduated)."""
+        import httpx
+
+        mints = [m for m, w in self.watch.items() if w.held and not w.graduated]
+        url = self.s.live_rpc_url or self.s.solana_rpc_url
+        if not mints or not url:
+            return
+        now = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                for i in range(0, len(mints), 100):
+                    part = mints[i:i + 100]
+                    r = await c.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "getMultipleAccounts",
+                                                "params": [[self.watch[m].curve for m in part], {"encoding": "base64"}]})
+                    for m, acc in zip(part, ((r.json().get("result") or {}).get("value") or [])):
+                        if acc and acc.get("data"):
+                            self._update(m, parse_curve(acc["data"][0]), now)
+        except Exception:
+            log.warning("curve (paper): reading resumed curves failed", exc_info=True)
 
     async def _price_riding(self, now: float) -> None:
         """Graduated coins a trail position still holds: Jupiter's price (USD -> SOL per token)."""
