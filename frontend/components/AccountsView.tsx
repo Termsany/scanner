@@ -318,6 +318,10 @@ function Leaders({ d, set, now, openBy, onToggle }: {
                 title="On: every time this wallet sells, the bot sells the same share. No stop loss; at the account's take-capital target (2x) the cost comes back and the rest keeps following its sells. One buy per coin a day">
                 Mirror
               </th>
+              <th className="text-center"
+                title="On: when a position from this wallet reaches the account's take-capital target (2x), the bot sells enough to get its cost back and the rest stays. Off: it never does this for this wallet">
+                2x capital
+              </th>
               <th />
             </tr>
           </thead>
@@ -394,6 +398,10 @@ function Leaders({ d, set, now, openBy, onToggle }: {
                   <span className="inline-flex"><Switch on={!!l.mirror} label="Mirror its sells"
                     onClick={() => flip(i, { mirror: !l.mirror })} /></span>
                 </td>
+                <td className="text-center">
+                  <span className="inline-flex"><Switch on={l.take_capital !== false} label="Take the capital back at 2x"
+                    onClick={() => flip(i, { take_capital: l.take_capital === false })} /></span>
+                </td>
                 <td className="text-right">
                   <button type="button" aria-label="Remove" className="text-muted hover:text-bear"
                     onClick={() => {
@@ -407,7 +415,7 @@ function Leaders({ d, set, now, openBy, onToggle }: {
             ))}
             {d.leaders.length === 0 && (
               <tr>
-                <td colSpan={11} className="text-xs text-faint">
+                <td colSpan={12} className="text-xs text-faint">
                   No smart wallets yet: this account will not buy anything.
                 </td>
               </tr>

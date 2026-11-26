@@ -2806,3 +2806,34 @@ def test_mirror_buys_a_coin_once_even_when_the_wallet_flips_it():
 
     assert len(run(True)) == 1           # bought, sold with it, its second buy of the coin is skipped
     assert len(run(False)) == 2          # without mirror the second buy is copied as before
+
+
+def test_take_capital_switch_off_on_a_wallet_keeps_its_positions_whole_at_2x():
+    from app.accounts import clean_leaders
+    from app.live import Account, Leader
+
+    def run(on):
+        x = PricedExec()
+        acct = Account("main", 30, 100, 50, [LEADER],
+                       leaders={LEADER: Leader(LEADER, unconditional=True, mirror=True, take_capital=on)})
+        s = _s(live_reconcile_seconds=0, live_take_capital_check_seconds=0, live_quick_check_seconds=0,
+               live_take_capital_at_pct=100.0)
+
+        async def body(sess):
+            eng = CopyEngine(x, s, account=acct)
+            await eng.step(sess)
+            sess.add(_trade())
+            await sess.commit()
+            await eng.step(sess)
+            x.price.update(M1=75.0)                                   # 2.5x
+            await eng.step(sess)
+            await eng.step(sess)
+            return [c for c in x.calls if c[0] == "sell"]
+
+        return _db(body)
+
+    assert run(True) == [("sell", "M1", 400_000)]
+    assert run(False) == []
+    # the page's switch: missing means on, an explicit false is kept
+    assert clean_leaders([{"wallet": LEADER}])[0]["take_capital"] is True
+    assert clean_leaders([{"wallet": LEADER, "take_capital": False}])[0]["take_capital"] is False

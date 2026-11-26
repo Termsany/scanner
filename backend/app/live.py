@@ -321,6 +321,9 @@ class Leader:
     # copy stop loss, no "the rest waits for its full exit". The account's take-capital still applies (user's choice
     # 2026-11-26: at 2x take the cost back, the rest keeps mirroring). Max hold still applies.
     mirror: bool = False
+    # take the cost back at the account's take-capital target (2x) on this wallet's positions; off: never
+    # (user's request 2026-11-26: a switch per wallet on the Accounts page)
+    take_capital: bool = True
 
 
 _FROM_SETTINGS = object()
@@ -1758,6 +1761,11 @@ class CopyEngine:
         name = (ld.label if ld and ld.label else "") or label or ""
         return f"{name} ({wallet[:6]})" if name and name != wallet[:6] else wallet[:6]
 
+    def _takes_capital(self, pos: LivePosition) -> bool:
+        """The position's wallet has "2x capital" on (the default; positions without a wallet: on)."""
+        ld = self.a.leaders.get(pos.leader_wallet or "")
+        return ld is None or ld.take_capital
+
     def _mirror(self, pos: LivePosition) -> bool:
         """This position's wallet is mirrored: only its sells (same share) take it out."""
         ld = self.a.leaders.get(pos.leader_wallet or "")
@@ -2406,6 +2414,7 @@ class CopyEngine:
                 and not p.hands_off                                            # the owner manages it
                 and not self._quick(p)                                         # quick exit has its own targets
                 and not taken(p)
+                and self._takes_capital(p)                                     # the wallet's switch on the page
                 # following the leader instead (a mirrored position follows it anyway and still takes its capital)
                 and not (self.s.live_follow_after_trim and self._following(p) and not self._mirror(p))
                 # with the cap: until that share of the coins is sold; without: until the cost is back
