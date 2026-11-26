@@ -266,6 +266,11 @@ class Assistant:
             reply = await self._run(msgs)
         except Exception as exc:
             log.warning("assistant: %s", exc)
+            why = str(exc).lower()
+            if "credit balance" in why:
+                return "رصيد Anthropic خلص، فمقدرش أرد. اشحن من console.anthropic.com ← Plans & Billing."
+            if "authentication" in why or "invalid x-api-key" in why or "401" in why:
+                return "الـ ANTHROPIC_API_KEY اللي على السيرفر مش شغال (Anthropic رفضته)."
             return "حصلت مشكلة وأنا بجهّز الرد، جرّب تاني بعد شوية."
         self.chats[key] = (time.monotonic(), msgs)
         return reply
