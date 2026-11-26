@@ -595,3 +595,27 @@ def test_w8zk_copies_only_that_wallets_first_buys():
         return True
 
     assert _db(body)
+
+
+def test_signal_eth_liq100_only_takes_deep_pools():
+    s = _settings()
+
+    async def body(sess):
+        deep = Token(chain=Chain.ethereum, address="0xdeep", symbol="DEEP", liquidity_usd=150_000.0)
+        thin = Token(chain=Chain.ethereum, address="0xthin", symbol="THIN", liquidity_usd=15_000.0)
+        sess.add_all([deep, thin])
+        await sess.flush()
+        await process_entries(sess, s)                 # cursors
+        await sess.commit()
+        for t in (deep, thin):
+            sess.add(Signal(token_id=t.id, score=85, badge=Badge.strong_alpha, price_usd=1.0, payload={}))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(
+            PaperPosition.strategy.in_(["signal_eth", "signal_eth_liq100"])))).scalars().all()
+        assert {(r.token_address, r.strategy) for r in rows} == {
+            ("0xdeep", "signal_eth"), ("0xthin", "signal_eth"), ("0xdeep", "signal_eth_liq100")}
+        return True
+
+    assert _db(body)

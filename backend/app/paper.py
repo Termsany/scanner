@@ -62,6 +62,7 @@ class Strategy:
     chains: tuple[str, ...] | None = None   # signal strategies: only tokens on these chains
     first_signal: bool = False              # signal strategies: only the token's first signal
     sources_any: tuple[str, ...] | None = None   # signal strategies: only tokens found by one of these feeds
+    min_liquidity: float | None = None   # signal strategies: only tokens with at least this much liquidity (USD)
     costs: bool = False     # also charge what a real trade pays on top of slippage: the chain's gas on each swap
                             # (PAPER_ETH_GAS_USD on Ethereum) and the token's buy / sell tax; skip honeypots
 
@@ -116,6 +117,10 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
     # costs=True (user's request 2026-11-25, before trading it for real): gas on both swaps and the token's taxes
     Strategy("signal_eth", "Scanner signal, score >= 80, Ethereum only (with gas and token tax)", min_score=80,
              chains=("ethereum",), costs=True),
+    # (user's request 2026-11-26) 126 Ethereum signal_80 trades: coins with $100k+ liquidity +13.8% avg (55), under
+    # $20k +0.7% (35); the profit leans on one coin (mihao, $706 of ~$1,070). Same rule, only the deeper pools
+    Strategy("signal_eth_liq100", "Scanner signal, score >= 80, Ethereum only, liquidity $100k+ (with gas and tax)",
+             min_score=80, chains=("ethereum",), costs=True, min_liquidity=100_000.0),
     Strategy("signal_gecko_first", "Scanner signal, score >= 80: the token's first signal, found by GeckoTerminal "
              "(new or trending pools)", min_score=80, first_signal=True, sources_any=("gecko_new", "gecko_trending")),
     Strategy("signal_dulx", "Scanner signal after DULX3e bought it (within 1 h): TP +100%, stop -40%, 6 h",
@@ -381,6 +386,8 @@ async def process_entries(session: AsyncSession, s: Settings | None = None,
                 trigger = f"score {sig.score}"
                 chain = tok.chain.value if isinstance(tok.chain, Chain) else str(tok.chain)
                 if strat.chains and chain not in strat.chains:
+                    continue
+                if strat.min_liquidity is not None and (tok.liquidity_usd or 0.0) < strat.min_liquidity:
                     continue
                 if strat.sources_any and not set(strat.sources_any) & set(tok.discovery_sources or []):
                     continue
