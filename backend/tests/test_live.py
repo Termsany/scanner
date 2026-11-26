@@ -2784,3 +2784,25 @@ def test_jupiter_key_moves_calls_to_api_jup_ag_with_the_header_and_sets_the_pace
 
     r = asyncio.run(go())
     assert r.status_code == 200 and seen["url"].startswith("https://api.jup.ag/swap/v1/quote") and seen["key"] == "K123"
+
+
+def test_mirror_buys_a_coin_once_even_when_the_wallet_flips_it():
+    from app.live import Account, Leader
+
+    def run(mirror):
+        x = FakeExec()
+        acct = Account("main", 30, 100, 50, [LEADER], leaders={LEADER: Leader(LEADER, unconditional=True, mirror=mirror)})
+
+        async def body(sess):
+            eng = CopyEngine(x, _s(), account=acct)
+            await eng.step(sess)
+            for batch in ([_trade()], [_trade(side="sell", pct_sold=100, remaining=0)], [_trade()]):
+                sess.add_all(batch)
+                await sess.commit()
+                await eng.step(sess)
+            return [c for c in x.calls if c[0] == "buy"]
+
+        return _db(body)
+
+    assert len(run(True)) == 1           # bought, sold with it, its second buy of the coin is skipped
+    assert len(run(False)) == 2          # without mirror the second buy is copied as before

@@ -133,6 +133,9 @@ def with_tip(tx_bytes: bytes, kp: Any, tip_lamports: int, tables: dict[str, list
 TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 PUMPPORTAL_FEE = 0.005      # PumpPortal's own fee on each trade (included in the simulated SOL spent)
 MAX_TRADE_AGE_SECONDS = 180
+# a mirrored wallet's coin is bought once in this window (user's request 2026-11-26: 5Y9pyD flipped RASMR four times
+# in 12 minutes; the two copies we caught lost $26, each sell landing seconds after its dump)
+MIRROR_ONE_BUY_HOURS = 24
 MAX_SELL_ATTEMPTS = 8
 CURSOR = "live:wallet_trades"
 MANUAL = "manual"                # leader_wallet of a position the owner opened by hand (no leader to follow)
@@ -1842,6 +1845,12 @@ class CopyEngine:
             *self._mine()))).first()
         if exists:
             return "already holding"
+        if ld is not None and ld.mirror and (await session.execute(select(LivePosition.id).where(
+                LivePosition.token_address == t.token_address, LivePosition.leader_wallet == t.wallet,
+                LivePosition.status != "failed",
+                LivePosition.opened_at >= _now() - timedelta(hours=MIRROR_ONE_BUY_HOURS), *self._mine())
+                .limit(1))).first():
+            return "already traded this coin from this wallet (mirror: one buy per coin a day)"
         open_cost = (await session.execute(select(func.sum(LivePosition.cost_usd)).where(
             LivePosition.status == "open", *self._mine()))).scalar() or 0.0
         if open_cost + size > self.a.max_open_usd + 1e-6:
@@ -1868,7 +1877,7 @@ class CopyEngine:
         checks = time.monotonic() - t_pick
         if why:
             log.info("live: skip buy %s (%s)", sym, why)
-            quiet = "already holding" in why or why.startswith(("leader off", "token blocked"))
+            quiet = "already holding" in why or why.startswith(("leader off", "token blocked", "already traded"))
             if why.startswith("not enough SOL") or why.startswith("account ") or why.startswith("limit:"):
                 # an unfunded, paused or full account would repeat this on every leader buy: say it every 6 h
                 key = why.split(" ")[0]
