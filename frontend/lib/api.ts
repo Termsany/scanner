@@ -21,6 +21,7 @@ import type {
   SiteUser,
   AuditEntry,
   TradingAccountCfg,
+  PaperScorecard,
   PaperSummary,
   Performance,
   ScannerStatus,
@@ -123,6 +124,8 @@ export const api = {
 
   paper: (hours: number, signal?: AbortSignal) =>
     request<PaperSummary>(`/api/paper${qs({ hours })}`, { signal }),
+  paperScorecard: (hours: number, signal?: AbortSignal) =>
+    request<PaperScorecard>(`/api/paper/scorecard${qs({ hours })}`, { signal }),
 
   live: (password: string, signal?: AbortSignal) =>
     request<LiveStatus>("/api/live", { ...adm(password), signal }),

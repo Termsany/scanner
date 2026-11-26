@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, Eye, EyeOff, FlaskConical, History, Info, Pause, Play, Plus, RefreshCw, RotateCcw, Trash2, Wand2 } from "lucide-react";
+import { Activity, Eye, EyeOff, FlaskConical, Gauge, History, Info, Pause, Play, Plus, RefreshCw, RotateCcw, Trash2, Wand2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { adminCredential, adminWho } from "@/components/AdminAuth";
@@ -8,7 +8,9 @@ import { AppNav } from "@/components/AppNav";
 import { Badge, button, Empty, PageHeader, pageMain, Panel, RangeBar, SectionTabs, Segmented, Toggle } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { ago, pct, pctClass, price } from "@/lib/format";
-import type { CurveRuleIn, CurveRuleOut, PaperPositionOut, PaperStrategy, PaperSummary } from "@/lib/types";
+import type {
+  CurveRuleIn, CurveRuleOut, PaperPositionOut, PaperScorecard, PaperStrategy, PaperSummary, ScoreVerdict, StrategyScore,
+} from "@/lib/types";
 
 import { ChainPill } from "./Badges";
 
@@ -37,7 +39,7 @@ function hold(m: number) {
   return m >= 60 ? `${Math.round(m / 60)}h` : `${m}m`;
 }
 
-type Tab = "open" | "history";
+type Tab = "open" | "history" | "scorecard";
 
 export function PaperView() {
   const [hours, setHours] = useState(24 * 7);
@@ -55,14 +57,17 @@ export function PaperView() {
   }, []);
 
   useEffect(() => {
-    const read = () => setTabState(window.location.hash === "#history" ? "history" : "open");
+    const read = () => {
+      const h = window.location.hash.slice(1);
+      setTabState(h === "history" || h === "scorecard" ? h : "open");
+    };
     read();
     window.addEventListener("hashchange", read);
     return () => window.removeEventListener("hashchange", read);
   }, []);
   const setTab = (t: Tab) => {
     setTabState(t);
-    history.replaceState(null, "", t === "open" ? window.location.pathname : "#history");
+    history.replaceState(null, "", t === "open" ? window.location.pathname : `#${t}`);
   };
 
   const load = useCallback(async (h: number, signal?: AbortSignal, quiet = false) => {
@@ -207,6 +212,7 @@ export function PaperView() {
             tabs={[
               { key: "open", label: `Open trades · ${open.length}`, icon: <Activity /> },
               { key: "history", label: `History · ${closed.length}`, icon: <History /> },
+              { key: "scorecard", label: "Scorecard", icon: <Gauge /> },
             ]} />
 
           {strategy && (
@@ -227,8 +233,10 @@ export function PaperView() {
                   {open.map((p) => <OpenCard key={p.id} p={p} s={strat[p.strategy]} now={tick} />)}
                 </div>
               )
-            ) : (
+            ) : tab === "history" ? (
               <HistoryPanel rows={closed} now={tick} />
+            ) : (
+              <ScorecardPanel hours={hours} only={strategy} showHidden={showHidden} />
             )}
           </div>
         </>
@@ -417,6 +425,139 @@ function HistoryPanel({ rows, now }: { rows: PaperPositionOut[]; now: number }) 
         </div>
       )}
     </Panel>
+  );
+}
+
+const VERDICT: Record<ScoreVerdict, { label: string; tone: "mint" | "gold" | "bear" | "sky" | "muted"; hint: string }> = {
+  edge: { label: "Edge", tone: "mint", hint: "Even the low end of the 95% range is above 0: the profit is unlikely to be luck" },
+  unproven: { label: "Unproven", tone: "sky", hint: "The 95% range spans 0: could be a real edge, could be luck. Needs more trades" },
+  unreliable: { label: "Unreliable", tone: "gold", hint: "Over 10% of trades were cut by restarts or feed outages: the numbers are not the rule's" },
+  too_few: { label: "Too few", tone: "muted", hint: "Not enough closed trades to judge yet" },
+  losing: { label: "Losing", tone: "bear", hint: "Even the high end of the 95% range is below 0: it loses money" },
+};
+
+const GRAD_LABEL: Record<string, string> = { "60": "+1m", "300": "+5m", "600": "+10m" };
+
+/** Each strategy judged on its closed trades: is the edge real enough to trade with money? */
+function ScorecardPanel({ hours, only, showHidden }: { hours: number; only: string; showHidden: boolean }) {
+  const [data, setData] = useState<PaperScorecard | null>(null);
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    const ctl = new AbortController();
+    const load = () => api.paperScorecard(hours, ctl.signal)
+      .then((d) => { setData(d); setError(false); })
+      .catch((e) => { if ((e as Error).name !== "AbortError") setError(true); });
+    setData(null);
+    load();
+    const id = setInterval(load, 30_000);    // closed trades only: the server caches 30 s
+    return () => { clearInterval(id); ctl.abort(); };
+  }, [hours]);
+
+  const rows = (data?.strategies ?? []).filter((s) => (only ? s.name === only : showHidden || !s.hidden));
+  const grads = rows.filter((s) => s.graduation);
+  return (
+    <>
+      <Panel icon={<Gauge />} title="Scorecard"
+        meta={data && <>closed trades only · verdict from {data.min_trades}+ trades · 95% range by bootstrap</>} flush>
+        {error ? <Empty>Could not load the scorecard.</Empty> : !data ? (
+          <div className="p-4"><span className="skeleton block h-32 rounded-xl" /></div>
+        ) : rows.length === 0 ? <Empty>No closed paper trades in this window.</Empty> : (
+          <div className="overflow-x-auto">
+            <table className="data-table min-w-[1100px]">
+              <thead>
+                <tr>
+                  <th className="text-left">Strategy</th>
+                  <th className="text-left">Verdict</th>
+                  <th className="text-right" title="Closed trades">Trades</th>
+                  <th className="text-right" title="Average net P&L per trade">Expectancy</th>
+                  <th className="text-right" title="95% range of the expectancy (bootstrap)">95% range</th>
+                  <th className="text-right" title="The typical trade. Far below the expectancy = a few big winners carry it">Median</th>
+                  <th className="text-right">Win</th>
+                  <th className="text-right">Avg win / loss</th>
+                  <th className="text-right" title="Gross wins / gross losses (above 1 makes money)">Profit factor</th>
+                  <th className="text-right">Net</th>
+                  <th className="text-right" title="Worst fall from a peak of cumulative P&L">Max DD</th>
+                  <th className="text-right" title="Most losing trades in a row">Loss run</th>
+                  <th className="text-right" title="UTC days that ended in profit">Green days</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((s) => <ScoreRow key={s.name} s={s} />)}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
+      {grads.length > 0 && (
+        <Panel className="mt-4" icon={<Gauge />} title="Sell or hold after graduation?"
+          meta="the same trades, had the coin been held all the way to this long after graduation (same slippage)" flush>
+          <div className="overflow-x-auto">
+            <table className="data-table min-w-[700px]">
+              <thead>
+                <tr>
+                  <th className="text-left">Strategy</th>
+                  <th className="text-right">Graduated trades</th>
+                  <th className="text-right">As closed</th>
+                  {Object.values(GRAD_LABEL).map((l) => <th key={l} className="text-right">Held to {l}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {grads.map((s) => (
+                  <tr key={s.name}>
+                    <td className="num text-xs">{s.name}</td>
+                    <td className="num text-right text-muted">{s.graduation!.trades}</td>
+                    <td className={`num text-right ${pctClass(s.graduation!.actual_avg_pct)}`}>{pct(s.graduation!.actual_avg_pct)}</td>
+                    {Object.keys(GRAD_LABEL).map((o) => {
+                      const h = s.graduation!.hold_avg_pct[o];
+                      return (
+                        <td key={o} className="num text-right" title={h ? `${h.trades} trades with a price then: as closed ${pct(h.actual)}` : "no price recorded"}>
+                          {h ? <span className={h.held > h.actual ? "text-bull" : "text-bear"}>{pct(h.held)}</span> : "—"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
+    </>
+  );
+}
+
+function ScoreRow({ s }: { s: StrategyScore }) {
+  const v = VERDICT[s.verdict];
+  const n = (x: number | null | undefined, d = 2) => (x == null ? "—" : x.toFixed(d));
+  return (
+    <tr>
+      <td className="max-w-[260px]">
+        <div className="num text-xs font-semibold">{s.name}</div>
+        <div className="truncate text-[11px] text-faint" title={s.title}>{s.title}</div>
+      </td>
+      <td title={v.hint}>
+        <Badge tone={v.tone}>{v.label}</Badge>
+        {s.trades_needed != null && s.verdict !== "losing" && (
+          <div className="mt-0.5 text-[10px] text-faint" title="Rough trade count for today's average to clear the 95% bar">
+            ~{s.trades_needed} trades to tell
+          </div>
+        )}
+      </td>
+      <td className="num text-right">{s.trades}</td>
+      <td className={`num text-right font-semibold ${pctClass(s.expectancy_pct ?? null)}`}>{pct(s.expectancy_pct)}</td>
+      <td className="num text-right text-xs text-muted">{s.ci95_low_pct == null ? "—" : `${pct(s.ci95_low_pct)} … ${pct(s.ci95_high_pct)}`}</td>
+      <td className={`num text-right ${pctClass(s.median_pct ?? null)}`}>{pct(s.median_pct)}</td>
+      <td className="num text-right">{s.win_rate == null ? "—" : `${(s.win_rate * 100).toFixed(0)}%`}</td>
+      <td className="num text-right text-xs"><span className="text-bull">{pct(s.avg_win_pct)}</span> / <span className="text-bear">{pct(s.avg_loss_pct)}</span></td>
+      <td className={`num text-right ${s.profit_factor == null ? "" : s.profit_factor >= 1 ? "text-bull" : "text-bear"}`}>
+        {s.profit_factor == null ? (s.trades && (s.avg_loss_pct == null) ? "∞" : "—") : n(s.profit_factor)}
+      </td>
+      <td className={`num text-right ${pctClass(s.total_usd ?? null)}`}>{money(s.total_usd)}</td>
+      <td className="num text-right text-bear">{s.max_drawdown_usd ? `−$${n(s.max_drawdown_usd)}` : "—"}</td>
+      <td className="num text-right">{s.loss_streak ?? "—"}</td>
+      <td className="num text-right">{s.days ? `${s.green_days}/${s.days}` : "—"}</td>
+    </tr>
   );
 }
 

@@ -421,6 +421,47 @@ export interface PaperSummary {
   positions: PaperPositionOut[];
 }
 
+/** /api/paper/scorecard: each strategy judged on its closed trades (backend app/scorecard.py). */
+export type ScoreVerdict = "edge" | "unproven" | "unreliable" | "too_few" | "losing";
+
+export interface GradHold {
+  trades: number;
+  actual: number;    // avg P&L % of these trades as they really closed
+  held: number;      // avg P&L % had they been held to this many seconds after graduation
+}
+
+export interface StrategyScore {
+  name: string;
+  title: string;
+  hidden: boolean;
+  trades: number;
+  verdict: ScoreVerdict;
+  win_rate?: number;
+  expectancy_pct?: number;
+  median_pct?: number;
+  avg_win_pct?: number | null;
+  avg_loss_pct?: number | null;
+  profit_factor?: number | null;
+  total_usd?: number;
+  return_pct?: number | null;
+  ci95_low_pct?: number;
+  ci95_high_pct?: number;
+  max_drawdown_usd?: number;
+  loss_streak?: number;
+  days?: number;
+  green_days?: number;
+  interrupted_pct?: number;
+  trades_needed?: number | null;
+  graduation?: { trades: number; actual_avg_pct: number; hold_avg_pct: Record<string, GradHold | null> } | null;
+}
+
+export interface PaperScorecard {
+  hours: number;
+  min_trades: number;
+  generated_at: string;
+  strategies: StrategyScore[];
+}
+
 export interface LiveFill {
   side: "buy" | "buy_hand" | "held" | "sell" | "sell_failed";
   sig?: string;

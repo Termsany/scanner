@@ -202,6 +202,28 @@ async def get_paper(
         return data
 
 
+_SCORECARD_CACHE: dict[int, tuple[float, dict]] = {}
+SCORECARD_CACHE_SECONDS = 30.0   # closed trades only: no need for the 3 s refresh of /paper
+
+
+@router.get("/paper/scorecard")
+async def get_paper_scorecard(
+    session: Session,
+    hours: Annotated[int, Query(ge=1, le=24 * 90)] = 24 * 30,
+) -> dict:
+    """Per paper strategy: expectancy, median, profit factor, 95% range, drawdown, verdict (app/scorecard.py)."""
+    import time
+
+    from app.scorecard import paper_scorecard
+
+    hit = _SCORECARD_CACHE.get(hours)
+    if hit and time.monotonic() - hit[0] < SCORECARD_CACHE_SECONDS:
+        return hit[1]
+    data = await paper_scorecard(session, hours=hours)
+    _SCORECARD_CACHE[hours] = (time.monotonic(), data)
+    return data
+
+
 @router.get("/status", response_model=ScannerStatus)
 async def get_status(session: Session) -> ScannerStatus:
     """KPI bar: active tokens, 24h high-alpha signals, top gainer caught, live pulse."""
