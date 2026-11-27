@@ -36,7 +36,9 @@ CLUSTER_MINUTES = 10
 DULX = "DULX3e6vt1ZpHq3AdCUBZLPZ1CrhApdNKcewMPxZQRXf"
 W67Q = "67Q1NscZdLxBMNgbjJ4jprm9J5GSUX1c9aVFigBzxFWg"   # auto 18/34: fast trader (4 min median hold)
 W5Y9 = "5Y9pyDnwdaJ32kWjeChBNvVRubhe6k4Z8bnioUfM3bNd"   # auto 13/25: +$5.9k in 4 days, 8.5 min median hold
-W8ZK = "8zkgFGVZrDLieViwqiXFCydSX6WL5hsxmUu55yBdsNsZ"   # scout trial: +$2.9k on 161 exits in a day, 110 min hold
+W5EVB = "5Evb9RZjVL8gRHshFbAgLnXcpv8PWiZG7CoXzzKkcXcz"  # speed wallet, copied live since 2026-11-21
+W8ZK = "8zkgFGVZrDLieViwqiXFCydSX6WL5hsxmUu55yBdsNsZ"
+WFRT8 = "FRT8YuLJ9q8PPX2o4RUiJ9hWL427hNmMJ2M6JdgGgzwK"  # smart wallet: 10/12 won, +$7.9k in 4 days, 3.5 h hold   # scout trial: +$2.9k on 161 exits in a day, 110 min hold
 CLUSTER_MIN_WALLETS = 2
 CURSOR_TRADES = "paper:wallet_trades"
 CURSOR_SIGNALS = "paper:signals"
@@ -90,6 +92,17 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              leader=DULX, live_rule=True),
     Strategy("dulx_50_1000", "Copy DULX3e like live, only its $50-1000 buys", tp_pct=0.0, sl_pct=0.0,
              leader=DULX, min_usd=50.0, max_usd=1000.0, live_rule=True),
+    # take-profit test (user's request 2026-11-27): on 80 real copies the price after our (late) buy topped out at a
+    # median +4%; a fixed target at +25-30% turned -10% a trade into ~0. These measure it with the copy delay: all out
+    # at the target or on the leader's first sell, whichever comes first; no stop
+    Strategy("dulx_tp25", "Copy DULX3e: all out at +25% or when it sells", tp_pct=25.0, sl_pct=-100.0,
+             max_hold_minutes=24 * 60, leader=DULX),
+    Strategy("dulx_tp30", "Copy DULX3e: all out at +30% or when it sells", tp_pct=30.0, sl_pct=-100.0,
+             max_hold_minutes=24 * 60, leader=DULX),
+    Strategy("w5evb_tp25", "Copy 5Evb9R: all out at +25% or when it sells", tp_pct=25.0, sl_pct=-100.0,
+             max_hold_minutes=24 * 60, leader=W5EVB),
+    Strategy("w5evb_tp30", "Copy 5Evb9R: all out at +30% or when it sells", tp_pct=30.0, sl_pct=-100.0,
+             max_hold_minutes=24 * 60, leader=W5EVB),
     # 67Q1Ns test (user's request 2026-11-25): it made ~+$3.7k in a week but holds 4 minutes for +3% median;
     # does a copy keep any of that? Its first buys, copied two ways
     Strategy("w67q_mirror", "Copy 67Q1Ns: buy with it, sell the same share when it sells", tp_pct=0.0, sl_pct=0.0,
@@ -108,6 +121,12 @@ STRATEGIES: dict[str, Strategy] = {s.name: s for s in (
              leader=W8ZK, mirror=True),
     Strategy("w8zk_live", "Copy 8zkgFG like live (50% at 2x, rest on its full exit)", tp_pct=0.0, sl_pct=0.0,
              leader=W8ZK, live_rule=True),
+    # FRT8Yu test (user's request 2026-11-27): best of the top 30 smart wallets - 10 of 12 closed trades won, +$7.9k
+    # in 4 days (+$5.9k without its best) and a 3.5 h median hold, so our copy delay costs little. Only 12 trades
+    Strategy("wfrt8_mirror", "Copy FRT8Yu: buy with it, sell the same share when it sells", tp_pct=0.0, sl_pct=0.0,
+             leader=WFRT8, mirror=True),
+    Strategy("wfrt8_live", "Copy FRT8Yu like live (50% at 2x, rest on its full exit)", tp_pct=0.0, sl_pct=0.0,
+             leader=WFRT8, live_rule=True),
     # wallet scout trials (app/wallet_scout.py): each candidate's first buys, copied like live
     Strategy("scout_trial", "Wallet scout: paper trial of a candidate wallet (live exit rule)", tp_pct=0.0,
              sl_pct=0.0, live_rule=True),

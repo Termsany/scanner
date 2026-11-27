@@ -69,8 +69,9 @@ def test_no_backfill_then_follow_cluster_and_mirror():
         rows = (await sess.execute(select(PaperPosition))).scalars().all()
         by = {r.strategy for r in rows}
         # follow (one per token), mirror (leader only), cluster (2 wallets in 10 min, counting the pre-run buy)
-        # + the two DULX3e copies (LEADER is DULX3e, its $500 buy fits both)
-        assert by == {"wallet_follow", "wallet_mirror", "wallet_cluster", "dulx_all", "dulx_50_1000"} and opened == 5
+        # + the four DULX3e copies (LEADER is DULX3e, its $500 buy fits all)
+        assert by == {"wallet_follow", "wallet_mirror", "wallet_cluster", "dulx_all", "dulx_50_1000", "dulx_tp25",
+                      "dulx_tp30"} and opened == 7
         assert sum(r.strategy == "wallet_mirror" for r in rows) == 1
         return True
 
@@ -211,7 +212,8 @@ def test_dulx_paper_size_filter_and_live_exit_rule():
         await sess.commit()
         await process_entries(sess, s)
         await sess.commit()
-        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy.like("dulx%")))).scalars().all()
+        rows = (await sess.execute(select(PaperPosition).where(
+            PaperPosition.strategy.in_(("dulx_all", "dulx_50_1000"))))).scalars().all()
         assert sorted((r.strategy, r.token_address) for r in rows) == [
             ("dulx_50_1000", MINT), ("dulx_all", "Big1111"), ("dulx_all", MINT)]
 
@@ -677,3 +679,56 @@ def test_roundtrip_loss_from_kyber_quotes():
             return await eth_quotes.roundtrip_loss_pct("0xcoin", 100.0)
 
     assert asyncio.run(go()) == 31.0                          # 30% lost in the pools + $1 gas on $100
+
+
+def test_take_profit_copies_exit_at_target_or_on_the_leaders_first_sell():
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)
+        await sess.commit()
+        sess.add(_trade(1, LEADER, price=1.0))
+        sess.add(_trade(2, LEADER, price=1.0, mint="Two1111"))
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        q = select(PaperPosition).where(PaperPosition.strategy.in_(("dulx_tp25", "dulx_tp30")))
+        assert len((await sess.execute(q)).scalars().all()) == 4
+
+        await process_exits(sess, _prices({MINT: 1.27, "Two1111": 0.5}), s)     # +27%: only tp25; -50%: no stop
+        await sess.commit()
+        rows = {(r.strategy, r.token_address): r for r in (await sess.execute(q)).scalars().all()}
+        assert rows[("dulx_tp25", MINT)].exit_reason == "take_profit"
+        assert rows[("dulx_tp30", MINT)].status == "open" and rows[("dulx_tp30", "Two1111")].status == "open"
+
+        sess.add(_trade(3, LEADER, side="sell", price=1.1, pct_sold=20.0, remaining=8, mint=MINT))  # a trim
+        await sess.commit()
+        await process_exits(sess, _prices({MINT: 1.1, "Two1111": 0.5}), s)
+        await sess.commit()
+        for r in rows.values():
+            await sess.refresh(r)
+        assert rows[("dulx_tp30", MINT)].exit_reason == "leader_sold"                # its first sell: all out
+        assert rows[("dulx_tp30", "Two1111")].status == "open"
+        return True
+
+    assert _db(body)
+
+
+def test_frt8_first_buys_open_both_copies():
+    from app.paper import WFRT8
+    s = _settings()
+
+    async def body(sess):
+        await process_entries(sess, s)
+        await sess.commit()
+        t = _trade(1, WFRT8)
+        t.first_buy = True
+        sess.add(t)
+        await sess.commit()
+        await process_entries(sess, s)
+        await sess.commit()
+        rows = (await sess.execute(select(PaperPosition).where(PaperPosition.strategy.like("wfrt8%")))).scalars().all()
+        assert {r.strategy for r in rows} == {"wfrt8_mirror", "wfrt8_live"}
+        return True
+
+    assert _db(body)
